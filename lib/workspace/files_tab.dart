@@ -1,194 +1,267 @@
 import 'package:flutter/material.dart';
 
-import '../screens/code_screen.dart';
+import '../core/vfs.dart';
+import '../models.dart';
+import '../screens/editor.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/ui.dart';
 
 class FilesTab extends StatefulWidget {
-  const FilesTab({super.key, required this.projectId});
+  const FilesTab({super.key, required this.project});
 
-  final String projectId;
+  final Project project;
 
   @override
   State<FilesTab> createState() => _FilesTabState();
 }
 
 class _FilesTabState extends State<FilesTab> {
-  final Set<String> _collapsed = <String>{};
+  Future<List<FileEntry>>? _future;
+
+  void _refresh() {
+    final state = AppScope.of(context);
+    setState(() {
+      _future = state.filesOf(widget.project);
+    });
+  }
+
+  Future<void> _newFile() async {
+    final state = AppScope.of(context);
+    final navigator = Navigator.of(context);
+    final name = await _askName('New file', 'lib/example.dart');
+    if (name == null || !mounted) return;
+    await state.createFile(widget.project, name);
+    if (!mounted) return;
+    _refresh();
+    await navigator.push(
+      MaterialPageRoute(
+        builder: (_) => EditorScreen(project: widget.project, path: name),
+      ),
+    );
+    if (mounted) _refresh();
+  }
+
+  Future<void> _newFolder() async {
+    final state = AppScope.of(context);
+    final name = await _askName('New folder', 'src');
+    if (name == null || !mounted) return;
+    await state.createFolder(widget.project, name);
+    if (mounted) _refresh();
+  }
+
+  Future<String?> _askName(String title, String hint) {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: Txt.body,
+          cursorColor: Pal.ember,
+          decoration: appField(hint),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    ).whenComplete(controller.dispose);
+  }
+
+  Future<void> _open(FileEntry entry) async {
+    if (entry.isDir) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => EditorScreen(project: widget.project, path: entry.path),
+      ),
+    );
+    if (mounted) _refresh();
+  }
+
+  Future<void> _delete(FileEntry entry) async {
+    final state = AppScope.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: Text('Delete ${entry.name}?'),
+        content: Text(
+          entry.isDir
+              ? 'The folder and everything inside it is removed from disk.'
+              : 'The file is removed from disk.',
+          style: Txt.bodySoft,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Pal.rose),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if ((confirmed ?? false) && mounted) {
+      await state.deletePath(widget.project, entry.path);
+      if (mounted) _refresh();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final state = AppScope.of(context);
-    final paths = state.files.keys.toList()..sort();
-    final rows = <Widget>[];
-    _walk(_buildTree(paths), 0, rows, state);
-
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(Sp.x2, Sp.x4, Sp.x2, Sp.x6),
+    return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: Sp.x3),
+        Container(
+          padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
+          decoration: const BoxDecoration(
+            border: Border(bottom: BorderSide(color: Pal.line)),
+          ),
           child: Row(
             children: [
-              const Text('EXPLORER', style: Txt.overline),
-              const Spacer(),
               Text(
-                '${paths.length} files · main',
-                style: Txt.meta.copyWith(fontSize: 10),
+                'EXPLORER',
+                style: Txt.overline.copyWith(fontSize: 9.5),
+              ),
+              const Spacer(),
+              IconAction(
+                icon: Icons.note_add_outlined,
+                tooltip: 'New file',
+                size: 18,
+                onTap: _newFile,
+              ),
+              IconAction(
+                icon: Icons.create_new_folder_outlined,
+                tooltip: 'New folder',
+                size: 18,
+                onTap: _newFolder,
+              ),
+              IconAction(
+                icon: Icons.refresh_rounded,
+                tooltip: 'Refresh',
+                size: 18,
+                onTap: _refresh,
               ),
             ],
           ),
         ),
-        const SizedBox(height: Sp.x3),
-        ...rows,
+        Expanded(
+          child: FutureBuilder<List<FileEntry>>(
+            future: _future ??= AppScope.of(context).filesOf(widget.project),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                );
+              }
+              if (snapshot.hasError) {
+                return Padding(
+                  padding: const EdgeInsets.all(Sp.page),
+                  child: Text(
+                    'Could not read the project: ${snapshot.error}',
+                    style: Txt.bodySoft.copyWith(color: Pal.rose),
+                  ),
+                );
+              }
+              final files = snapshot.data ?? const <FileEntry>[];
+              if (files.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(Sp.page),
+                  child: EmptyState(
+                    icon: Icons.folder_off_outlined,
+                    title: 'Empty project',
+                    body:
+                        'Create a file to get started, or ask the agent to write one.',
+                  ),
+                );
+              }
+              return ListView.builder(
+                padding: const EdgeInsets.symmetric(vertical: Sp.x2),
+                itemCount: files.length,
+                itemBuilder: (context, index) {
+                  final entry = files[index];
+                  return InkWell(
+                    onTap: () => _open(entry),
+                    onLongPress: () => _delete(entry),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(Sp.x4, 9, Sp.x3, 9),
+                      child: Row(
+                        children: [
+                          Icon(
+                            entry.isDir
+                                ? Icons.folder_rounded
+                                : _fileIcon(entry.name),
+                            size: 16,
+                            color: entry.isDir ? Pal.amber : Pal.textDim,
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              entry.path,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.code.copyWith(
+                                fontSize: 11.5,
+                                color: entry.isDir ? Pal.textMuted : Pal.text,
+                              ),
+                            ),
+                          ),
+                          if (!entry.isDir)
+                            Text(humanSize(entry.size),
+                                style: Txt.meta.copyWith(fontSize: 9.5)),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x2),
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: Pal.line)),
+          ),
+          child: Text(
+            'tap to edit · long-press to delete',
+            style: Txt.meta.copyWith(fontSize: 9.5),
+          ),
+        ),
       ],
     );
   }
 
-  void _walk(_Node node, int depth, List<Widget> out, AppState state) {
-    final children = node.children.values.toList()
-      ..sort((a, b) {
-        if (a.isFile != b.isFile) return a.isFile ? 1 : -1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
-
-    for (final child in children) {
-      final isOpen = !_collapsed.contains(child.path);
-      out.add(
-        _FileRow(
-          node: child,
-          depth: depth,
-          open: isOpen,
-          onTap: () {
-            if (child.isFile) {
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => CodeScreen(
-                    path: child.file!,
-                    code: state.files[child.file!] ?? '',
-                  ),
-                ),
-              );
-            } else {
-              setState(() {
-                if (!_collapsed.remove(child.path)) _collapsed.add(child.path);
-              });
-            }
-          },
-        ),
-      );
-      if (!child.isFile && isOpen) {
-        _walk(child, depth + 1, out, state);
-      }
-    }
-  }
-
-  _Node _buildTree(List<String> paths) {
-    final root = _Node('');
-    for (final path in paths) {
-      final parts = path.split('/');
-      var node = root;
-      var acc = '';
-      for (var i = 0; i < parts.length; i++) {
-        acc = acc.isEmpty ? parts[i] : '$acc/${parts[i]}';
-        final isLeaf = i == parts.length - 1;
-        node = node.children.putIfAbsent(
-          parts[i],
-          () => _Node(
-            parts[i],
-            file: isLeaf ? path : null,
-            path: acc,
-          ),
-        );
-      }
-    }
-    return root;
-  }
-}
-
-class _Node {
-  _Node(this.name, {this.file, this.path = ''});
-
-  final String name;
-  final String? file;
-  final String path;
-  final Map<String, _Node> children = {};
-
-  bool get isFile => file != null;
-}
-
-class _FileRow extends StatelessWidget {
-  const _FileRow({
-    required this.node,
-    required this.depth,
-    required this.open,
-    required this.onTap,
-  });
-
-  final _Node node;
-  final int depth;
-  final bool open;
-  final VoidCallback onTap;
-
-  Color get _tint {
-    final ext = node.name.split('.').last;
+  IconData _fileIcon(String name) {
+    final ext = name.split('.').last.toLowerCase();
     return switch (ext) {
-      'dart' => Pal.sky,
-      'yaml' || 'yml' => Pal.amber,
-      'md' => Pal.mint,
-      'json' => Pal.mint,
-      _ => Pal.textMuted,
+      'dart' => Icons.flutter_dash,
+      'html' || 'htm' => Icons.language_rounded,
+      'css' => Icons.brush_outlined,
+      'js' || 'ts' || 'json' => Icons.data_object_rounded,
+      'md' => Icons.article_outlined,
+      'py' => Icons.code_rounded,
+      'yaml' || 'yml' => Icons.tune_rounded,
+      _ => Icons.insert_drive_file_outlined,
     };
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(Sp.x3 + depth * 14.0, 0, Sp.x3, 0),
-        child: Container(
-          height: 38,
-          alignment: Alignment.centerLeft,
-          child: Row(
-            children: [
-              if (!node.isFile)
-                Icon(
-                  open
-                      ? Icons.keyboard_arrow_down_rounded
-                      : Icons.keyboard_arrow_right_rounded,
-                  size: 16,
-                  color: Pal.textDim,
-                )
-              else
-                const SizedBox(width: 16),
-              const SizedBox(width: 4),
-              Icon(
-                node.isFile
-                    ? Icons.insert_drive_file_outlined
-                    : Icons.folder_outlined,
-                size: 15,
-                color: node.isFile ? _tint : Pal.textMuted,
-              ),
-              const SizedBox(width: Sp.x2),
-              Expanded(
-                child: Text(
-                  node.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: node.isFile
-                      ? Txt.meta.copyWith(fontSize: 12, color: Pal.text)
-                      : Txt.body.copyWith(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w500,
-                        ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }

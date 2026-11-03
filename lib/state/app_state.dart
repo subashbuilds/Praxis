@@ -1,379 +1,570 @@
-import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/widgets.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-import '../models/chat.dart';
-import '../models/project.dart';
-import '../models/provider.dart';
-
-enum TerminalTone { command, output, muted, error, accent }
-
-class TerminalLine {
-  const TerminalLine(this.text, [this.tone = TerminalTone.output]);
-  final String text;
-  final TerminalTone tone;
-}
+import '../core/agent.dart';
+import '../core/ai.dart';
+import '../core/integrations.dart';
+import '../core/shell.dart';
+import '../core/store.dart';
+import '../core/vfs.dart';
+import '../models.dart';
 
 class AppState extends ChangeNotifier {
-  AppState.seeded() {
-    projects.addAll(_seedProjects);
-    threads['polydev-web'] = _seedThread();
-    terminal.addAll(_seedTerminal);
-    files.addAll(_seedFiles);
-  }
+  AppState({
+    required this.root,
+    required this.store,
+    http.Client? httpClient,
+    this.seedWelcome = true,
+  }) : httpClient = httpClient ?? http.Client();
+
+  static const _kProviders = 'devnest.providers';
+  static const _kSkills = 'devnest.skills';
+  static const _kIntegrations = 'devnest.integrations';
+  static const _kActiveProvider = 'devnest.activeProvider';
+  static const _kWordWrap = 'devnest.wrap';
+  static const _kChatPrefix = 'devnest.chat.';
+
+  final Directory root;
+  final KVStore store;
+  final http.Client httpClient;
+  final bool seedWelcome;
+
+  late final AiClient ai = AiClient(client: httpClient);
 
   final List<Project> projects = [];
-  final Map<String, List<ChatItem>> threads = {};
-  final List<TerminalLine> terminal = [];
-  final Map<String, String> files = {};
+  final List<ProviderConfig> providers = [];
+  final List<Skill> skills = [];
 
-  AiProvider provider = kProviders.first;
-  bool usageStats = true;
-  bool pushNews = true;
+  Integrations integrations = const Integrations();
+  String activeProviderId = '';
+  bool busy = false;
   bool wordWrap = false;
-  bool agentBusy = false;
-  int codeScale = 1;
-  int devicesUsed = 2;
-  int devicesMax = 3;
+  bool _cancelled = false;
+  int _entrySeq = 0;
 
-  bool _disposed = false;
+  final Map<String, List<ChatEntry>> _threads = {};
+  final Map<String, ProjectFs> _fs = {};
+  final Map<String, Shell> _shells = {};
 
-  @override
-  void dispose() {
-    _disposed = true;
-    super.dispose();
+  bool _ready = false;
+  bool get ready => _ready;
+
+  static Future<AppState> bootstrap() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final root = Directory('${directory.path}/devnest');
+    final prefs = await SharedPreferences.getInstance();
+    final state = AppState(root: root, store: PrefsStore(prefs));
+    await state.init();
+    return state;
   }
 
-  void _notify() {
-    if (!_disposed) notifyListeners();
+  Future<void> init() async {
+    await root.create(recursive: true);
+    final projectsDir = Directory('${root.path}/projects');
+    await projectsDir.create(recursive: true);
+
+    projects.clear();
+    await for (final entity in projectsDir.list()) {
+      if (entity is! Directory) continue;
+      final meta = File('${entity.path}/.project.json');
+      if (!await meta.exists()) continue;
+      try {
+        final json = jsonDecode(await meta.readAsString());
+        projects.add(Project.fromJson((json as Map).cast<String, dynamic>()));
+      } catch (_) {
+        // A broken meta file should not hide the rest of the projects.
+      }
+    }
+    projects.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+    _loadProviders();
+    _loadSkills();
+    _loadIntegrations();
+    wordWrap = store.read(_kWordWrap) == 'true';
+
+    if (projects.isEmpty && seedWelcome) {
+      await createProject('hello-dev', ProjectKind.web, persistChat: false);
+    }
+    _ready = true;
+    notifyListeners();
   }
 
-  Project projectById(String id) =>
-      projects.firstWhere((p) => p.id == id, orElse: () => projects.first);
+  // ---------------------------------------------------------------- projects
 
-  List<ChatItem> threadOf(String id) => threads.putIfAbsent(
-        id,
-        () => <ChatItem>[
-          const AgentNote(
-            'This project is ready. Ask me to build a screen, run a command, '
-            'or wire up a deploy.',
-          ),
-        ],
+  Project projectById(String id) => projects.firstWhere(
+        (project) => project.id == id,
+        orElse: () => projects.first,
       );
 
-  void setProvider(AiProvider next) {
-    provider = next;
-    _notify();
-  }
+  ProjectFs fsFor(Project project) => _fs.putIfAbsent(
+        project.id,
+        () => ProjectFs(Directory('${root.path}/projects/${project.id}')),
+      );
 
-  void setUsageStats(bool value) {
-    usageStats = value;
-    _notify();
-  }
+  Shell shellFor(Project project) =>
+      _shells.putIfAbsent(project.id, () => Shell(fsFor(project)));
 
-  void setPushNews(bool value) {
-    pushNews = value;
-    _notify();
-  }
-
-  void setWordWrap(bool value) {
-    wordWrap = value;
-    _notify();
-  }
-
-  void setCodeScale(int value) {
-    codeScale = value.clamp(0, 2);
-    _notify();
-  }
-
-  Project createProject(String name, ProjectKind kind) {
-    final trimmed = name.trim();
-    final slug = trimmed
-        .toLowerCase()
-        .replaceAll(RegExp('[^a-z0-9]+'), '-')
-        .replaceAll(RegExp('^-+|-+\$'), '');
+  Future<Project> createProject(
+    String name,
+    ProjectKind kind, {
+    bool persistChat = true,
+  }) async {
+    final slug = _slug(name);
+    final id =
+        '$slug-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+    final dir = Directory('${root.path}/projects/$id');
+    await dir.create(recursive: true);
     final project = Project(
-      id: 'p-${DateTime.now().microsecondsSinceEpoch}',
-      name: trimmed,
-      path: '~/projects/${slug.isEmpty ? 'untitled' : slug}',
-      branch: 'main',
+      id: id,
+      name: name.trim().isEmpty ? slug : name.trim(),
       kind: kind,
-      updated: 'just now',
+      createdAt: DateTime.now(),
     );
+    await File('${dir.path}/.project.json')
+        .writeAsString(jsonEncode(project.toJson()));
+    final fs = ProjectFs(dir);
+    for (final file in kind.scaffold) {
+      await fs.write(file.key, file.value);
+    }
     projects.insert(0, project);
-    threads[project.id] = <ChatItem>[
-      AgentNote(
-        'Scaffolded ${project.path} (${kind.label}). The Alpine rootfs is '
-        'mounted and the shell is ready.',
-      ),
-    ];
-    _notify();
+    if (persistChat) await _persistChat(project.id);
+    notifyListeners();
     return project;
   }
 
-  void sendPrompt(String projectId, String text) {
-    final prompt = text.trim();
-    if (prompt.isEmpty || agentBusy) return;
-
-    final thread = threadOf(projectId);
-    thread.add(UserNote(prompt));
-    agentBusy = true;
-    _notify();
-
-    Timer(const Duration(milliseconds: 750), () {
-      if (_disposed) return;
-      thread.add(const AgentNote(
-          'Reading the project and planning the smallest diff…'));
-      _notify();
-
-      Timer(const Duration(milliseconds: 1050), () {
-        if (_disposed) return;
-        thread.add(const CommandRun(
-          command: 'rg "ThemeMode" lib',
-          output: 'lib/app.dart:23  themeMode: ThemeMode.dark,\n'
-              'lib/theme/app_theme.dart:9  ThemeData buildAppTheme()',
-        ));
-        thread.add(const FileEdit(
-          path: 'lib/app.dart',
-          added: 6,
-          removed: 2,
-          diff: [
-            ' ThemeData buildAppTheme() {',
-            '-  final scheme = ColorScheme.dark();',
-            '+  final scheme = ColorScheme.dark(',
-            '+    primary: Pal.ember,',
-            '+    onPrimary: Pal.onEmber,',
-            '+  );',
-          ],
-        ));
-        thread.add(const AgentNote(
-          'Done. The ember primary is applied and the analyzer is clean. '
-          'Run it to check the composer contrast on a real device.',
-        ));
-        agentBusy = false;
-        _notify();
-      });
-    });
+  Future<void> deleteProject(Project project) async {
+    final dir = Directory('${root.path}/projects/${project.id}');
+    if (await dir.exists()) await dir.delete(recursive: true);
+    projects.removeWhere((item) => item.id == project.id);
+    _threads.remove(project.id);
+    _fs.remove(project.id);
+    _shells.remove(project.id);
+    await store.remove('$_kChatPrefix${project.id}');
+    notifyListeners();
   }
 
-  void runCommand(String raw) {
-    final cmd = raw.trim();
-    if (cmd.isEmpty) return;
+  Future<List<FileEntry>> filesOf(Project project) => fsFor(project).list();
 
-    terminal.add(TerminalLine('~ \$ $cmd', TerminalTone.command));
+  Future<String> readFile(Project project, String path) =>
+      fsFor(project).read(path);
 
-    if (cmd == 'clear') {
-      terminal.clear();
-      _notify();
+  Future<void> writeFile(Project project, String path, String content) async {
+    await fsFor(project).write(path, content);
+    notifyListeners();
+  }
+
+  Future<void> deletePath(Project project, String path) async {
+    await fsFor(project).delete(path);
+    notifyListeners();
+  }
+
+  Future<void> createFile(Project project, String path,
+      {String content = ''}) async {
+    await fsFor(project).write(path, content);
+    notifyListeners();
+  }
+
+  Future<void> createFolder(Project project, String path) async {
+    await fsFor(project).createDir(path);
+    notifyListeners();
+  }
+
+  /// Absolute path of the file the preview should load, or null for a project
+  /// that has no HTML entry point.
+  Future<String?> previewFile(Project project) async {
+    final fs = fsFor(project);
+    if (await fs.exists('index.html')) return fs.absolute('index.html');
+    final entries = await fs.list();
+    for (final entry in entries) {
+      if (!entry.isDir && entry.path.endsWith('.html')) {
+        return fs.absolute(entry.path);
+      }
+    }
+    return null;
+  }
+
+  static String _slug(String name) {
+    final base = name
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp('[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    return base.isEmpty ? 'project' : base;
+  }
+
+  // ------------------------------------------------------------------- chat
+
+  List<ChatEntry> threadOf(String projectId) {
+    final cached = _threads[projectId];
+    if (cached != null) return cached;
+    final thread = <ChatEntry>[];
+    final raw = store.read('$_kChatPrefix$projectId');
+    if (raw != null) {
+      try {
+        for (final item in jsonDecode(raw) as List) {
+          thread.add(ChatEntry.fromJson((item as Map).cast<String, dynamic>()));
+        }
+      } catch (_) {
+        // ignore a corrupt transcript
+      }
+    }
+    return _threads[projectId] = thread;
+  }
+
+  Future<void> _persistChat(String projectId) async {
+    final thread = _threads[projectId];
+    if (thread == null) return;
+    final trimmed =
+        thread.length > 120 ? thread.sublist(thread.length - 120) : thread;
+    await store.write(
+      '$_kChatPrefix$projectId',
+      jsonEncode(trimmed.map((entry) => entry.toJson()).toList()),
+    );
+  }
+
+  String _nextId() =>
+      'e${DateTime.now().microsecondsSinceEpoch}-${_entrySeq++}';
+
+  Future<void> send(String projectId, String raw) async {
+    final prompt = raw.trim();
+    if (prompt.isEmpty || busy) return;
+    final project = projectById(projectId);
+    final provider = activeProvider;
+    final thread = threadOf(projectId);
+
+    final history = <AiTurn>[];
+    for (final entry in thread) {
+      if (entry.role == ChatRole.user) {
+        history.add(AiTurn.user(entry.text));
+      } else if (entry.role == ChatRole.assistant &&
+          entry.text.trim().isNotEmpty) {
+        history.add(AiTurn.assistant(entry.text, const []));
+      }
+    }
+
+    thread.add(ChatEntry(
+      id: _nextId(),
+      role: ChatRole.user,
+      text: prompt,
+      at: DateTime.now(),
+    ));
+    notifyListeners();
+    await _persistChat(projectId);
+
+    if (!provider.isConfigured) {
+      thread.add(ChatEntry(
+        id: _nextId(),
+        role: ChatRole.error,
+        text: provider.requiresKey
+            ? 'No API key for ${provider.name}. Open Settings → Models, paste a key and run Test connection.'
+            : 'Finish configuring ${provider.name} in Settings → Models.',
+        at: DateTime.now(),
+      ));
+      notifyListeners();
+      await _persistChat(projectId);
       return;
     }
 
-    void out(String text, [TerminalTone tone = TerminalTone.output]) {
-      terminal.add(TerminalLine(text, tone));
-    }
+    busy = true;
+    _cancelled = false;
+    notifyListeners();
 
-    if (cmd == 'ls') {
-      out('app   assets   lib   pubspec.yaml   README.md');
-    } else if (cmd == 'pwd') {
-      out('/data/user/0/com.xapi.polydev/files/home/projects/polydev-web');
-    } else if (cmd == 'whoami') {
-      out('root  ·  proot  ·  Alpine 3.21.7 aarch64', TerminalTone.muted);
-    } else if (cmd.startsWith('node -v')) {
-      out('v22.9.0');
-    } else if (cmd.startsWith('flutter --version')) {
-      out('Flutter 3.24.5 • channel stable • Dart 3.5.4', TerminalTone.accent);
-    } else if (cmd.startsWith('flutter analyze')) {
-      out('Analyzing polydev-web…', TerminalTone.muted);
-      out('No issues found! (ran in 2.4s)', TerminalTone.accent);
-    } else if (cmd.startsWith('npm run dev') || cmd.startsWith('npm i')) {
-      out('');
-      out('  VITE v5.4.2  ready in 412 ms', TerminalTone.accent);
-      out('  ➜  Local:   http://localhost:5173/');
-      out('  ➜  press h + enter to show help', TerminalTone.muted);
-    } else if (cmd.startsWith('git status')) {
-      out('On branch main', TerminalTone.muted);
-      out('Changes not staged for commit:', TerminalTone.muted);
-      out('  modified:   lib/app.dart');
-      out('  modified:   lib/theme/app_theme.dart');
-    } else if (cmd.startsWith('git ')) {
-      out('On branch main · up to date with origin/main', TerminalTone.muted);
-    } else if (cmd == 'help') {
-      out('Try: ls · pwd · node -v · flutter analyze · npm run dev · git status · clear',
-          TerminalTone.muted);
+    final agent = Agent(
+      client: ai,
+      provider: provider,
+      fs: fsFor(project),
+      shell: shellFor(project),
+      skills: skills,
+      onEvent: (event) {
+        thread.add(ChatEntry(
+          id: _nextId(),
+          role: event.kind == AgentEventKind.tool
+              ? ChatRole.tool
+              : event.kind == AgentEventKind.error
+                  ? ChatRole.error
+                  : ChatRole.assistant,
+          text: event.text,
+          tool: event.tool,
+          detail: event.detail,
+          ok: event.ok,
+          at: DateTime.now(),
+        ));
+        notifyListeners();
+      },
+    );
+
+    try {
+      await agent.run(
+        history: history.length > 12
+            ? history.sublist(history.length - 12)
+            : history,
+        prompt: prompt,
+        isCancelled: () => _cancelled,
+      );
+    } on AiProviderException catch (error) {
+      thread.add(ChatEntry(
+        id: _nextId(),
+        role: ChatRole.error,
+        text: error.message,
+        at: DateTime.now(),
+      ));
+    } catch (error) {
+      thread.add(ChatEntry(
+        id: _nextId(),
+        role: ChatRole.error,
+        text: 'Unexpected error: $error',
+        at: DateTime.now(),
+      ));
+    } finally {
+      busy = false;
+      notifyListeners();
+      await _persistChat(projectId);
+    }
+  }
+
+  void stop() {
+    _cancelled = true;
+    notifyListeners();
+  }
+
+  Future<void> clearChat(String projectId) async {
+    _threads[projectId] = [];
+    await store.remove('$_kChatPrefix$projectId');
+    notifyListeners();
+  }
+
+  // -------------------------------------------------------------- providers
+
+  ProviderConfig get activeProvider => providers.firstWhere(
+        (provider) => provider.id == activeProviderId,
+        orElse: () =>
+            providers.isNotEmpty ? providers.first : kProviderPresets.first,
+      );
+
+  void _loadProviders() {
+    providers.clear();
+    final raw = store.read(_kProviders);
+    if (raw != null) {
+      try {
+        for (final item in jsonDecode(raw) as List) {
+          providers.add(
+              ProviderConfig.fromJson((item as Map).cast<String, dynamic>()));
+        }
+      } catch (_) {
+        providers.clear();
+      }
+    }
+    for (final preset in kProviderPresets) {
+      if (!providers.any((provider) => provider.id == preset.id)) {
+        providers.add(preset);
+      }
+    }
+    activeProviderId = store.read(_kActiveProvider) ?? '';
+    if (!providers.any((provider) => provider.id == activeProviderId)) {
+      activeProviderId = providers
+          .firstWhere((provider) => provider.ready,
+              orElse: () => providers.first)
+          .id;
+    }
+  }
+
+  Future<void> saveProvider(ProviderConfig provider) async {
+    final index = providers.indexWhere((item) => item.id == provider.id);
+    if (index >= 0) {
+      providers[index] = provider;
     } else {
-      out('zsh: command not found: $cmd', TerminalTone.error);
+      providers.add(provider);
     }
-    _notify();
+    await _persistProviders();
+    notifyListeners();
   }
 
-  void clearLocalData() {
-    terminal.clear();
-    threads.clear();
-    threads['polydev-web'] = _seedThread();
-    _notify();
+  ProviderConfig newCustomProvider() => ProviderConfig(
+        id: 'custom-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
+        name: 'Custom endpoint',
+        icon: 'assets/icons/opencode.svg',
+        baseUrl: 'https://',
+        model: '',
+        flavor: ApiFlavor.openai,
+        requiresKey: true,
+        isCustom: true,
+        hint: 'Any OpenAI-compatible URL',
+      );
+
+  Future<void> deleteProvider(ProviderConfig provider) async {
+    if (!provider.isCustom) return;
+    providers.removeWhere((item) => item.id == provider.id);
+    if (activeProviderId == provider.id) {
+      activeProviderId = providers.first.id;
+      await store.write(_kActiveProvider, activeProviderId);
+    }
+    await _persistProviders();
+    notifyListeners();
   }
 
-  static const List<Project> _seedProjects = [
-    Project(
-      id: 'polydev-web',
-      name: 'polydev-web',
-      path: '~/projects/polydev-web',
-      branch: 'main',
-      kind: ProjectKind.flutter,
-      updated: '2h ago',
-      running: true,
-    ),
-    Project(
-      id: 'ember-dashboard',
-      name: 'ember-dashboard',
-      path: '~/projects/ember-dashboard',
-      branch: 'feat/charts',
-      kind: ProjectKind.node,
-      updated: 'yesterday',
-    ),
-    Project(
-      id: 'alpine-notes',
-      name: 'alpine-notes',
-      path: '~/projects/alpine-notes',
-      branch: 'main',
-      kind: ProjectKind.python,
-      updated: '3d ago',
-    ),
-  ];
+  Future<void> setActiveProvider(String id) async {
+    activeProviderId = id;
+    await store.write(_kActiveProvider, id);
+    notifyListeners();
+  }
 
-  static List<ChatItem> _seedThread() => const [
-        UserNote(
-            'The composer sits under the keyboard on small screens. Fix it and keep the ember accent.'),
-        AgentNote(
-            'Checking how the shell handles insets before touching layout.'),
-        CommandRun(
-          command: 'rg -n "viewInsets|SafeArea" lib',
-          output: 'lib/app.dart:41  return SafeArea(top: false, child: …);\n'
-              'lib/workspace/composer.dart:18  padding: EdgeInsets.only(bottom: 12),',
-        ),
-        FileEdit(
-          path: 'lib/workspace/composer.dart',
-          added: 4,
-          removed: 3,
-          diff: [
-            ' Widget build(BuildContext context) {',
-            '-  return Padding(',
-            '-    padding: const EdgeInsets.only(bottom: 12),',
-            '+  final inset = MediaQuery.viewInsetsOf(context).bottom;',
-            '+  return Padding(',
-            '+    padding: EdgeInsets.only(bottom: inset + 12),',
-          ],
-        ),
-        AgentNote(
-          'The composer now tracks viewInsets and keeps a 12dp gap above the '
-          'keyboard. Analyzer is clean — want me to run it on device?',
-        ),
-      ];
-
-  static const List<TerminalLine> _seedTerminal = [
-    TerminalLine('cat /etc/os-release | head -2', TerminalTone.command),
-    TerminalLine('NAME="Alpine Linux"', TerminalTone.muted),
-    TerminalLine('VERSION_ID=3.21.7', TerminalTone.muted),
-    TerminalLine('node -v', TerminalTone.command),
-    TerminalLine('v22.9.0'),
-    TerminalLine('npm run dev', TerminalTone.command),
-    TerminalLine('  VITE v5.4.2  ready in 412 ms', TerminalTone.accent),
-    TerminalLine('  ➜  Local:   http://localhost:5173/'),
-    TerminalLine('  ➜  Network: use --host to expose', TerminalTone.muted),
-  ];
-
-  static const Map<String, String> _seedFiles = {
-    'pubspec.yaml': r'''name: polydev
-description: On-device AI coding agent.
-version: 1.0.0+13
-
-environment:
-  sdk: ">=3.4.0 <4.0.0"
-
-dependencies:
-  flutter:
-    sdk: flutter
-  flutter_svg: ^2.0.10
-''',
-    'lib/main.dart': r'''import 'package:flutter/material.dart';
-
-import 'app.dart';
-
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const PolyDevApp());
-}
-''',
-    'lib/app.dart': r'''import 'package:flutter/material.dart';
-
-import 'screens/home_screen.dart';
-import 'state/app_state.dart';
-import 'theme/app_theme.dart';
-import 'theme/tokens.dart';
-
-class PolyDevApp extends StatefulWidget {
-  const PolyDevApp({super.key});
-
-  @override
-  State<PolyDevApp> createState() => _PolyDevAppState();
-}
-
-class _PolyDevAppState extends State<PolyDevApp> {
-  final AppState _state = AppState.seeded();
-
-  @override
-  Widget build(BuildContext context) {
-    return AppScope(
-      state: _state,
-      child: MaterialApp(
-        title: 'PolyDev',
-        theme: buildAppTheme(),
-        themeMode: ThemeMode.dark,
-        home: const HomeScreen(),
-      ),
+  Future<String> testProvider(ProviderConfig provider) async {
+    final reply = await ai.complete(
+      provider: provider,
+      system: 'You are a connection test. Reply with the single word: ok',
+      turns: const [AiTurn.user('ping')],
+      tools: const [],
+      maxTokens: 24,
     );
+    final text = reply.text.trim();
+    return text.isEmpty
+        ? 'Connected, but the model returned no text.'
+        : 'Connected: $text';
   }
-}
-''',
-    'lib/theme/tokens.dart': r'''import 'package:flutter/material.dart';
 
-class Pal {
-  static const canvas = Color(0xFF0A0908);
-  static const surface = Color(0xFF12100E);
-  static const raised = Color(0xFF1A1714);
-  static const ember = Color(0xFFE4693F);
-  static const onEmber = Color(0xFF1A0E08);
-}
-''',
-    'lib/workspace/composer.dart': r'''import 'package:flutter/material.dart';
+  Future<void> _persistProviders() => store.write(
+        _kProviders,
+        jsonEncode(providers.map((provider) => provider.toJson()).toList()),
+      );
 
-import '../state/app_state.dart';
-import '../theme/tokens.dart';
+  // ----------------------------------------------------------------- skills
 
-class Composer extends StatelessWidget {
-  const Composer({super.key, required this.projectId});
-
-  final String projectId;
-
-  @override
-  Widget build(BuildContext context) {
-    final inset = MediaQuery.viewInsetsOf(context).bottom;
-    return Padding(
-      padding: EdgeInsets.only(bottom: inset + 12),
-      child: const _Field(),
-    );
+  void _loadSkills() {
+    skills.clear();
+    final raw = store.read(_kSkills);
+    if (raw != null) {
+      try {
+        for (final item in jsonDecode(raw) as List) {
+          skills.add(Skill.fromJson((item as Map).cast<String, dynamic>()));
+        }
+      } catch (_) {
+        skills.clear();
+      }
+    }
+    if (skills.isEmpty) {
+      skills.add(const Skill(
+        id: 'concise',
+        name: 'Concise replies',
+        instructions:
+            'Keep replies short and always name the files you changed.',
+      ));
+    }
   }
-}
-''',
-    'README.md': r'''# polydev-web
 
-Rebuilt interface for the PolyDev on-device agent.
+  Future<void> saveSkill(Skill skill) async {
+    final index = skills.indexWhere((item) => item.id == skill.id);
+    if (index >= 0) {
+      skills[index] = skill;
+    } else {
+      skills.add(skill);
+    }
+    await store.write(
+        _kSkills, jsonEncode(skills.map((item) => item.toJson()).toList()));
+    notifyListeners();
+  }
 
-- Agent, terminal and preview in one shell
-- Alpine rootfs mounted through proot
-- Deploys to Vercel and Cloudflare Pages
-''',
-  };
+  Future<void> deleteSkill(Skill skill) async {
+    skills.removeWhere((item) => item.id == skill.id);
+    await store.write(
+        _kSkills, jsonEncode(skills.map((item) => item.toJson()).toList()));
+    notifyListeners();
+  }
+
+  Skill newSkill() => Skill(
+        id: 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
+        name: '',
+        instructions: '',
+      );
+
+  // ----------------------------------------------------------- integrations
+
+  void _loadIntegrations() {
+    final raw = store.read(_kIntegrations);
+    if (raw == null) return;
+    try {
+      integrations = Integrations.fromJson(
+          (jsonDecode(raw) as Map).cast<String, dynamic>());
+    } catch (_) {
+      integrations = const Integrations();
+    }
+  }
+
+  Future<void> saveIntegrations(Integrations next) async {
+    integrations = next;
+    await store.write(_kIntegrations, jsonEncode(next.toJson()));
+    notifyListeners();
+  }
+
+  Future<String> testGithub() =>
+      GitHubClient(integrations.githubToken, client: httpClient).login();
+
+  Future<String> testVercel() =>
+      VercelClient(integrations.vercelToken, client: httpClient).login();
+
+  Future<IntegrationResult> pushToGithub(
+    Project project, {
+    required String repo,
+    required bool private,
+  }) async {
+    final files = await fsFor(project).textFiles();
+    return GitHubClient(integrations.githubToken, client: httpClient)
+        .push(repoName: repo, private: private, files: files);
+  }
+
+  Future<IntegrationResult> deployToVercel(Project project,
+      {required String name}) async {
+    final files = await fsFor(project).textFiles();
+    return VercelClient(integrations.vercelToken, client: httpClient)
+        .deploy(name: name, files: files);
+  }
+
+  // -------------------------------------------------------------- settings
+
+  Future<void> setWordWrap(bool value) async {
+    wordWrap = value;
+    await store.write(_kWordWrap, value.toString());
+    notifyListeners();
+  }
+
+  Future<void> resetEverything() async {
+    final projectsDir = Directory('${root.path}/projects');
+    if (await projectsDir.exists()) await projectsDir.delete(recursive: true);
+    await projectsDir.create(recursive: true);
+    projects.clear();
+    _threads.clear();
+    _fs.clear();
+    _shells.clear();
+    for (final key in [
+      _kProviders,
+      _kSkills,
+      _kIntegrations,
+      _kActiveProvider,
+      _kWordWrap
+    ]) {
+      await store.remove(key);
+    }
+    providers
+      ..clear()
+      ..addAll(kProviderPresets);
+    skills
+      ..clear()
+      ..add(const Skill(
+        id: 'concise',
+        name: 'Concise replies',
+        instructions:
+            'Keep replies short and always name the files you changed.',
+      ));
+    integrations = const Integrations();
+    activeProviderId = providers.first.id;
+    wordWrap = false;
+    await createProject('hello-dev', ProjectKind.web, persistChat: false);
+    notifyListeners();
+  }
 }
 
 class AppScope extends InheritedNotifier<AppState> {

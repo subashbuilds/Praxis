@@ -8,10 +8,12 @@
     <uses-permission android:name="com.android.vending.BILLING" />
 
     <application
-        android:label="PolyDev"
+        android:label="DevNest"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:enableOnBackInvokedCallback="true">
+        android:enableOnBackInvokedCallback="true"
+        android:usesCleartextTraffic="true"
+        android:allowBackup="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"

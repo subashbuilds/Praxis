@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// Palette sampled from the shipped app: the PolyDev mark is ember
-/// (#D2603C) on graphite, and the APK bundles a github-dark stylesheet,
-/// so the reconstruction is dark-first and warm rather than blue-black.
+/// DevNest palette: ember on warm graphite, dark-first by design. Machine
+/// output gets its own near-black well so code never shares a surface with UI.
 class Pal {
   const Pal._();
 

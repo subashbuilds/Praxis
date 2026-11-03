@@ -1,76 +1,72 @@
-# PolyDev — Android Studio project
+# DevNest
 
-Rebuilt Android project for **com.xapi.polydev 1.0.0 (13)**.
+A local-first coding workbench for Android. Real project folders, a real file
+shell, a live WebView preview, and an AI agent that edits those files with your
+own model key — all on the phone.
 
-The shipped app is a Flutter app with an obfuscated Dart AOT snapshot
-(`libapp.so`), so a Java/Kotlin translation would be a reimplementation with no
-fidelity. The faithful Android Studio project for this artifact is a **Flutter
-project with its Android module** — open the `polydev/` folder in Android Studio
-(Flutter + Dart plugins) and it syncs the `android/` Gradle module
-(`applicationId com.xapi.polydev`, minSdk 24, targetSdk 36, versionCode 13).
+Built with Flutter; the Android module is a standard Android Studio project.
 
-## Open it
+## What works
 
-```
-Android Studio → Open → polydev/
-# first run
+| Area | Behaviour |
+|---|---|
+| Projects | Real folders under the app's documents directory, with starter files for Web, Flutter, Python or empty projects. Long-press to delete. |
+| Files | A recursive explorer over that folder. Tap a file to edit it, create files and folders, long-press to delete. Changes hit disk immediately. |
+| Shell | A genuine file shell: `ls`, `cd`, `pwd`, `cat`, `echo >`, `mkdir`, `touch`, `rm`, `mv`, `cp`, `tree`, `find`, `grep`, `wc`, `head`, `tail`, `clear`, `help`. |
+| Preview | Loads the project's `index.html` (or first `.html`) in a WebView, with reload. Relative CSS/JS works. |
+| Agent | OpenAI-compatible providers plus Anthropic, with tool calling: `list_files`, `read_file`, `write_file`, `run_command`. Tool calls are shown inline. Stop mid-run. |
+| Models | OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Mistral, Cerebras, Together, keyless Ollama on your network, and any custom OpenAI-compatible endpoint. Keys are stored on device. |
+| Skills | Named prompt fragments toggled on or off; enabled ones are appended to every agent run. |
+| Integrations | GitHub (create/update a repo and commit the project's text files) and Vercel (deploy those files, get the URL). Tokens are local. |
+
+There is no bundled free model. Every hosted provider needs your API key;
+Ollama is the only keyless option, and it talks to a server on your machine.
+
+## Running it
+
+```bash
 flutter pub get
-flutter run            # device or emulator
+flutter run
 ```
 
-The Gradle wrapper is checked in (`android/gradle/wrapper/…`, Gradle 8.10.2).
-If your Flutter install regenerates platform files, `flutter create .` inside
-`polydev/` restores anything missing without touching `lib/`.
+Toolchain used: Flutter 3.24.5, Dart 3.5.4, Android compileSdk 36, minSdk 24.
+CI (`.github/workflows/ci.yml`) runs `dart format`, `flutter analyze`,
+`flutter test`, then builds a release APK artifact.
 
-Nothing was built on the analysis machine — it has 3.9 GB RAM and no Android
-SDK, so a Gradle build would have been killed. Source is verified by
-`flutter analyze` only (see below).
+Release builds are debug-signed because no release keystore is committed.
 
-## What is inside
+## Using a model
+
+1. Settings → Models → tap a provider.
+2. Paste its API key and confirm the model name and base URL.
+3. **Test connection** does a real one-shot call.
+4. **Use this model** makes it active.
+
+Then open a project, ask for a change, and watch the tool calls land.
+
+## Limits, stated plainly
+
+- The shell has no Node, Python, Flutter or git binaries. It reads and writes
+  files; it cannot execute them. `node -v` says so instead of pretending.
+- Preview renders web projects only. Flutter and Python projects are edited and
+  stored, not compiled on device.
+- Agent runs depend on the provider's tool-calling support. Some small models
+  cannot call tools reliably; pick a model that does.
+- GitHub pushes text files only (binaries are skipped), one commit per file via
+  the contents API. Vercel deploys are static; no build step runs server-side.
+- No account, no analytics. Files and keys stay on the device.
+
+## Layout
 
 ```
 lib/
-  main.dart, app.dart          app shell, dark theme, state scope
-  theme/tokens.dart            palette, type roles, spacing, motion
-  theme/app_theme.dart         Material 3 theme with chrome removed
-  models/                      project, chat items, provider catalogue
-  state/app_state.dart         projects, agent thread, shell, settings
-  screens/                     home, workspace, settings, legal, code, sheet
-  workspace/                   agent, files, terminal, preview, composer
-  widgets/                     brand, buttons, hairlines, chips, cards
-assets/
-  fonts/                       Inter, JetBrains Mono, Lora (from the APK)
-  icons/                       30 provider + brand marks (from the APK)
-  images/                      logo, splash art (from the APK)
-  legal/                       privacy + terms, en/ru/uz (from the APK)
-android/                       Gradle module, manifest, launcher icons
-docs/REVERSE_ENGINEERING.md    evidence log: what was seen, inferred, unknown
-DESIGN.md                      tokens, rules and intent of the interface
+  core/        agent, ai client, shell, vfs, integrations, storage
+  models.dart  project, provider, skill, chat types
+  screens/     home, workspace, editor, settings, provider form
+  workspace/   agent, files, shell, preview tabs
+  theme/       tokens and theme
+test/          vfs + shell, agent tool loop, provider errors
 ```
 
-## Behaviour
-
-Everything is local. No network calls, no keys, no analytics.
-
-- Create a project (Flutter / Node / Python) and it appears in the list.
-- Agent thread: send a prompt, watch the simulated plan → command → edit → summary.
-- Shell: `ls`, `pwd`, `node -v`, `flutter analyze`, `npm run dev`, `git status`, `help`, `clear`.
-- Files: browse the tree, open a file for a read-only syntax-coloured view.
-- Preview: device frame with the running dashboard, deploy chips, reload.
-- Settings: provider picker (searchable, 24 providers), integrations, preferences,
-  data reset with confirmation, full legal docs with EN/RU/UZ switch.
-
-## Rebuild fidelity
-
-Kept: package identity, SDK levels, permission set, provider catalogue and marks,
-fonts, legal copy, plan names, device-limit concept, dark-first surface.
-
-Reconstructed: layout, spacing, colour ramp, screen structure, agent/terminal/
-preview chrome. The Dart snapshot is minified, so the original widget trees are
-not recoverable; see `docs/REVERSE_ENGINEERING.md` §4.
-
-## Verification status
-
-- `flutter analyze` — see the check run in the hand-off notes.
-- Not built (no Android SDK/emulator on this machine), not run, no screenshots.
-  First `flutter run` on your machine is the real visual check.
+The `docs/` folder keeps the original reverse-engineering notes that informed
+the product model.

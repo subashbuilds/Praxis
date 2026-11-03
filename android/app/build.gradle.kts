@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.xapi.polydev"
+    namespace = "com.subash.devnest"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
@@ -19,17 +19,17 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.xapi.polydev"
+        applicationId = "com.subash.devnest"
         minSdk = 24
         targetSdk = 36
-        versionCode = 13
+        versionCode = 1
         versionName = "1.0.0"
     }
 
     buildTypes {
         release {
-            // The shipped XAPK is signed with the Play app-signing key,
-            // which we do not have. Debug signing keeps the project buildable.
+            // No release keystore is committed; debug signing keeps CI builds
+            // installable without exposing a private key in this repo.
             signingConfig = signingConfigs.getByName("debug")
         }
     }

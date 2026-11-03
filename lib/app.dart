@@ -1,33 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'screens/home_screen.dart';
+import 'screens/home.dart';
 import 'state/app_state.dart';
 import 'theme/app_theme.dart';
 import 'theme/tokens.dart';
 
-class PolyDevApp extends StatefulWidget {
-  const PolyDevApp({super.key});
+class DevNestApp extends StatelessWidget {
+  const DevNestApp({super.key, required this.state});
 
-  @override
-  State<PolyDevApp> createState() => _PolyDevAppState();
-}
-
-class _PolyDevAppState extends State<PolyDevApp> {
-  final AppState _state = AppState.seeded();
-
-  @override
-  void dispose() {
-    _state.dispose();
-    super.dispose();
-  }
+  final AppState state;
 
   @override
   Widget build(BuildContext context) {
     return AppScope(
-      state: _state,
+      state: state,
       child: MaterialApp(
-        title: 'PolyDev',
+        title: 'DevNest',
         debugShowCheckedModeBanner: false,
         theme: buildAppTheme(),
         themeMode: ThemeMode.dark,
@@ -49,8 +38,6 @@ class _PolyDevAppState extends State<PolyDevApp> {
   }
 }
 
-/// The shipped app has no Material overscroll glow; the interface is flat,
-/// so the stretch/glow would read as chrome.
 class _FlatScrollBehavior extends MaterialScrollBehavior {
   const _FlatScrollBehavior();
 
