@@ -4,6 +4,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/project_actions.dart';
 import '../widgets/ui.dart';
 
 class PreviewTab extends StatefulWidget {
@@ -67,6 +68,15 @@ class _PreviewTabState extends State<PreviewTab> {
 
   @override
   Widget build(BuildContext context) {
+    return Column(
+      children: [
+        ProjectActionsBar(project: widget.project),
+        Expanded(child: _body()),
+      ],
+    );
+  }
+
+  Widget _body() {
     if (_loading) {
       return const Center(
         child: SizedBox(
@@ -127,9 +137,7 @@ class _PreviewTabState extends State<PreviewTab> {
                 icon: Icons.refresh_rounded,
                 tooltip: 'Reload preview',
                 size: 18,
-                onTap: () async {
-                  await _load();
-                },
+                onTap: _load,
               ),
             ],
           ),

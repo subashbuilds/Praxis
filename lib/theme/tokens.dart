@@ -29,6 +29,23 @@ class Pal {
   /// Terminal well is a touch darker than the canvas so code reads as
   /// a separate material.
   static const terminal = Color(0xFF070706);
+
+  /// GitHub's dark code palette, used by the editor and the diff pills so
+  /// added and removed lines read the same way they do on GitHub.
+  static const ghBg = Color(0xFF0D1117);
+  static const ghPanel = Color(0xFF161B22);
+  static const ghLine = Color(0xFF30363D);
+  static const ghText = Color(0xFFE6EDF3);
+  static const ghMuted = Color(0xFF8B949E);
+  static const ghKeyword = Color(0xFFFF7B72);
+  static const ghString = Color(0xFFA5D6FF);
+  static const ghNumber = Color(0xFF79C0FF);
+  static const ghTag = Color(0xFF7EE787);
+  static const ghAttr = Color(0xFFD2A8FF);
+  static const ghAddBg = Color(0xFF12261E);
+  static const ghAddText = Color(0xFF7EE787);
+  static const ghDelBg = Color(0xFF2D1417);
+  static const ghDelText = Color(0xFFFFA198);
 }
 
 /// Type roles. Inter for interface, JetBrains Mono for anything the

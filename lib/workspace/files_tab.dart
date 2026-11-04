@@ -5,6 +5,7 @@ import '../models.dart';
 import '../screens/editor.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/project_actions.dart';
 import '../widgets/ui.dart';
 
 class FilesTab extends StatefulWidget {
@@ -126,6 +127,7 @@ class _FilesTabState extends State<FilesTab> {
   Widget build(BuildContext context) {
     return Column(
       children: [
+        ProjectActionsBar(project: widget.project),
         Container(
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
           decoration: const BoxDecoration(

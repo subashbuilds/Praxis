@@ -75,6 +75,15 @@ class ProjectFs {
     return file.readAsString();
   }
 
+  /// Copies a file that lives outside the project (a picker result) into it.
+  Future<void> copyFromOutside(File source, String path) async {
+    final rel = normalize(path);
+    if (rel.isEmpty) throw FsError('Not a file: /');
+    final target = File(absolute(rel));
+    await target.parent.create(recursive: true);
+    await source.copy(target.path);
+  }
+
   Future<int> write(String path, String content) async {
     final rel = normalize(path);
     if (rel.isEmpty) throw FsError('Not a file: /');

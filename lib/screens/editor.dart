@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/code_editor.dart';
 import '../widgets/ui.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -16,7 +17,8 @@ class EditorScreen extends StatefulWidget {
 }
 
 class _EditorScreenState extends State<EditorScreen> {
-  final _controller = TextEditingController();
+  late final CodeController _controller =
+      CodeController(language: languageForPath(widget.path));
   bool _loading = true;
   bool _dirty = false;
   bool _saving = false;
@@ -103,15 +105,18 @@ class _EditorScreenState extends State<EditorScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final language = languageForPath(widget.path);
+    final lines = _controller.text.split('\n').length;
+
     return Scaffold(
+      backgroundColor: Pal.ghBg,
       body: SafeArea(
         child: Column(
           children: [
             Container(
+              color: Pal.ghPanel,
               padding: const EdgeInsets.fromLTRB(Sp.x2, Sp.x2, Sp.x2, Sp.x2),
-              decoration: const BoxDecoration(
-                border: Border(bottom: BorderSide(color: Pal.line)),
-              ),
               child: Row(
                 children: [
                   IconAction(
@@ -124,15 +129,25 @@ class _EditorScreenState extends State<EditorScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          widget.path,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Txt.title.copyWith(fontSize: 14),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                widget.path.split('/').last,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Txt.title.copyWith(fontSize: 14),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            MonoChip(language.label),
+                          ],
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          _dirty ? 'unsaved changes' : 'saved on device',
+                          _dirty
+                              ? 'unsaved changes · $lines lines'
+                              : 'saved on device · $lines lines',
                           style: Txt.meta.copyWith(
                             fontSize: 10,
                             color: _dirty ? Pal.amber : Pal.textDim,
@@ -167,40 +182,13 @@ class _EditorScreenState extends State<EditorScreen> {
                             style: Txt.bodySoft.copyWith(color: Pal.rose),
                           ),
                         )
-                      : Padding(
-                          padding: const EdgeInsets.all(Sp.x3),
-                          child: TextField(
-                            controller: _controller,
-                            expands: true,
-                            maxLines: null,
-                            minLines: null,
-                            textAlignVertical: TextAlignVertical.top,
-                            style: Txt.code,
-                            cursorColor: Pal.ember,
-                            autocorrect: false,
-                            enableSuggestions: false,
-                            keyboardType: TextInputType.multiline,
-                            onChanged: (_) {
-                              if (!_dirty) setState(() => _dirty = true);
-                            },
-                            decoration: const InputDecoration(
-                              filled: true,
-                              fillColor: Pal.terminal,
-                              border: OutlineInputBorder(
-                                borderRadius: Rd.sm,
-                                borderSide: BorderSide(color: Pal.line),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: Rd.sm,
-                                borderSide: BorderSide(color: Pal.line),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: Rd.sm,
-                                borderSide: BorderSide(color: Pal.ember),
-                              ),
-                              contentPadding: EdgeInsets.all(Sp.x3),
-                            ),
-                          ),
+                      : CodeEditor(
+                          controller: _controller,
+                          language: language,
+                          wrap: state.wordWrap,
+                          onChanged: (_) {
+                            if (!_dirty) setState(() => _dirty = true);
+                          },
                         ),
             ),
           ],

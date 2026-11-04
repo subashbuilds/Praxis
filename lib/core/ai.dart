@@ -50,9 +50,17 @@ class AiToolSpec {
 }
 
 class AiReply {
-  const AiReply({required this.text, required this.calls});
+  const AiReply({
+    required this.text,
+    required this.calls,
+    this.thinking = '',
+  });
   final String text;
   final List<AiToolCall> calls;
+
+  /// Reasoning returned by models that expose it (deepseek-reasoner,
+  /// OpenRouter reasoning models, Anthropic thinking blocks).
+  final String thinking;
 }
 
 class AiClient {
@@ -118,6 +126,85 @@ class AiClient {
     return provider.flavor == ApiFlavor.anthropic
         ? _parseAnthropic(body)
         : _parseOpenAi(body);
+  }
+
+  /// Lists the models the provider exposes to this key. Used by the provider
+  /// form so the user can keep only the models they want.
+  Future<List<String>> listModels(ProviderConfig provider) async {
+    if (!provider.ready) {
+      throw AiProviderException(
+        'Add a key for ${provider.name} before fetching models.',
+        status: 401,
+      );
+    }
+    final base = provider.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.tryParse('$base/models');
+    if (uri == null || !uri.hasScheme) {
+      throw AiProviderException('Invalid base URL: ${provider.baseUrl}');
+    }
+    final http.Response response;
+    try {
+      response = await _client.get(
+        uri,
+        headers: {
+          if (provider.flavor == ApiFlavor.anthropic)
+            'x-api-key': provider.apiKey,
+          if (provider.flavor == ApiFlavor.anthropic)
+            'anthropic-version': '2023-06-01',
+          if (provider.flavor != ApiFlavor.anthropic)
+            'Authorization': 'Bearer ${provider.apiKey}',
+          'Accept': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      throw AiProviderException(
+        '${provider.name} did not answer the model list within 30s.',
+      );
+    } on http.ClientException catch (error) {
+      throw AiProviderException(
+          'Network error from ${provider.name}: ${error.message}');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _failure(provider, response);
+    }
+
+    final List<dynamic> raw;
+    try {
+      final body = jsonDecode(response.body);
+      if (body is Map && body['data'] is List) {
+        raw = body['data'] as List;
+      } else if (body is Map && body['models'] is List) {
+        raw = body['models'] as List;
+      } else if (body is List) {
+        raw = body;
+      } else {
+        raw = const [];
+      }
+    } catch (_) {
+      throw AiProviderException(
+          '${provider.name} returned a model list that is not JSON.');
+    }
+
+    final models = <String>{};
+    for (final item in raw) {
+      if (item is String) {
+        models.add(item.replaceFirst('models/', ''));
+        continue;
+      }
+      if (item is Map) {
+        final id = item['id'] ?? item['name'] ?? item['model'];
+        if (id is String && id.trim().isNotEmpty) {
+          models.add(id.replaceFirst('models/', '').trim());
+        }
+      }
+    }
+    final sorted = models.where((id) => id.isNotEmpty).toList()..sort();
+    if (sorted.isEmpty) {
+      throw AiProviderException(
+        '${provider.name} returned no models. Check the base URL and key.',
+      );
+    }
+    return sorted;
   }
 
   Future<http.Response> _openAiRequest(
@@ -271,6 +358,8 @@ class AiClient {
     final message =
         choices.first['message'] as Map<String, dynamic>? ?? const {};
     final text = (message['content'] as String?)?.trim() ?? '';
+    final reasoning = message['reasoning_content'] ?? message['reasoning'];
+    final thinking = reasoning is String ? reasoning.trim() : '';
     final calls = <AiToolCall>[];
     for (final raw in (message['tool_calls'] as List? ?? const [])) {
       final call = raw as Map<String, dynamic>;
@@ -281,17 +370,20 @@ class AiClient {
         arguments: _arguments(function['arguments']),
       ));
     }
-    return AiReply(text: text, calls: calls);
+    return AiReply(text: text, calls: calls, thinking: thinking);
   }
 
   AiReply _parseAnthropic(Map<String, dynamic> body) {
     final content = body['content'] as List? ?? const [];
     final buffer = StringBuffer();
+    final reason = StringBuffer();
     final calls = <AiToolCall>[];
     for (final raw in content) {
       final block = raw as Map<String, dynamic>;
       if (block['type'] == 'text') {
         buffer.write(block['text'] as String? ?? '');
+      } else if (block['type'] == 'thinking') {
+        reason.write(block['thinking'] as String? ?? '');
       } else if (block['type'] == 'tool_use') {
         calls.add(AiToolCall(
           id: block['id'] as String? ?? 'tool_${calls.length}',
@@ -301,7 +393,11 @@ class AiClient {
         ));
       }
     }
-    return AiReply(text: buffer.toString().trim(), calls: calls);
+    return AiReply(
+      text: buffer.toString().trim(),
+      calls: calls,
+      thinking: reason.toString().trim(),
+    );
   }
 
   Map<String, dynamic> _arguments(Object? raw) {
@@ -342,10 +438,12 @@ class AiClient {
       401 ||
       403 =>
         'API key rejected by ${provider.name}. Check the key in Settings → Models.',
+      402 =>
+        '${provider.name} says the account is out of credit. Add credit or switch provider.',
       404 =>
         'Endpoint or model not found. Check the base URL and model name for ${provider.name}.',
       429 =>
-        'Rate limited by ${provider.name}. Wait a moment or pick another model.',
+        'Rate limited by ${provider.name}. If another key is saved, DevNest can switch to it.',
       400 => '${provider.name} rejected the request.',
       _ => '${provider.name} failed with HTTP ${response.statusCode}.',
     };

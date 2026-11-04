@@ -15,29 +15,58 @@ class ProviderFormSheet extends StatefulWidget {
 }
 
 class _ProviderFormSheetState extends State<ProviderFormSheet> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.provider.name);
-  late final TextEditingController _model =
-      TextEditingController(text: widget.provider.model);
-  late final TextEditingController _baseUrl =
-      TextEditingController(text: widget.provider.baseUrl);
-  late final TextEditingController _apiKey =
-      TextEditingController(text: widget.provider.apiKey);
+  late final TextEditingController _name;
+  late final TextEditingController _model;
+  late final TextEditingController _baseUrl;
+  late final List<TextEditingController> _keys;
+  late final List<bool> _reveal;
+  late final List<String> _models;
+  late final Set<String> _selected;
+  int _keyIndex = 0;
 
-  bool _obscure = true;
   bool _testing = false;
   bool _saving = false;
+  bool _fetching = false;
   String? _status;
   bool _statusError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.provider.name);
+    _model = TextEditingController(text: widget.provider.model);
+    _baseUrl = TextEditingController(text: widget.provider.baseUrl);
+    final stored =
+        widget.provider.keys.where((key) => key.trim().isNotEmpty).toList();
+    _keys = (stored.isEmpty ? [''] : stored)
+        .map((key) => TextEditingController(text: key))
+        .toList();
+    _reveal = List<bool>.filled(_keys.length, false);
+    _models = List<String>.from(widget.provider.models);
+    _selected = Set<String>.from(widget.provider.selectedModels);
+    _keyIndex = stored.isEmpty
+        ? 0
+        : widget.provider.keyIndex.clamp(0, stored.length - 1);
+  }
 
   @override
   void dispose() {
     _name.dispose();
     _model.dispose();
     _baseUrl.dispose();
-    _apiKey.dispose();
+    for (final controller in _keys) {
+      controller.dispose();
+    }
     super.dispose();
   }
+
+  List<String> get _liveKeys => _keys
+      .map((controller) => controller.text.trim())
+      .where((key) => key.isNotEmpty)
+      .toList();
+
+  int get _activeIndex =>
+      _liveKeys.isEmpty ? 0 : _keyIndex.clamp(0, _liveKeys.length - 1);
 
   ProviderConfig get _edited => widget.provider.copyWith(
         name: _name.text.trim().isEmpty
@@ -45,16 +74,37 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
             : _name.text.trim(),
         model: _model.text.trim(),
         baseUrl: _baseUrl.text.trim(),
-        apiKey: _apiKey.text.trim(),
+        keys: _liveKeys,
+        keyIndex: _activeIndex,
+        models: _models,
+        selectedModels: _selected.toList()..sort(),
       );
 
+  void _addKey() {
+    setState(() {
+      _keys.add(TextEditingController());
+      _reveal.add(false);
+    });
+  }
+
+  void _removeKey(int index) {
+    setState(() {
+      _keys.removeAt(index).dispose();
+      _reveal.removeAt(index);
+      if (_keyIndex >= _keys.length) {
+        _keyIndex = _keys.isEmpty ? 0 : _keys.length - 1;
+      }
+    });
+  }
+
   Future<void> _test() async {
+    final state = AppScope.of(context);
     setState(() {
       _testing = true;
       _status = null;
     });
     try {
-      final result = await AppScope.of(context).testProvider(_edited);
+      final result = await state.testProvider(_edited);
       if (!mounted) return;
       setState(() {
         _status = result;
@@ -77,15 +127,82 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     }
   }
 
+  Future<void> _fetchModels() async {
+    if (_fetching) return;
+    final state = AppScope.of(context);
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _fetching = true;
+      _status = null;
+    });
+    try {
+      final models = await state.fetchModels(_edited);
+      if (!mounted) return;
+      setState(() {
+        _models
+          ..clear()
+          ..addAll(models);
+        _selected.removeWhere((model) => !models.contains(model));
+        _status =
+            '${models.length} models fetched. Tick the ones you want to keep.';
+        _statusError = false;
+      });
+    } on AiProviderException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _status = error.message;
+        _statusError = true;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _status = '$error';
+        _statusError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _fetching = false);
+    }
+  }
+
+  bool get _allSelected => _models.isNotEmpty && _selected.containsAll(_models);
+
+  void _toggleAll() {
+    setState(() {
+      if (_allSelected) {
+        _selected.clear();
+      } else {
+        _selected.addAll(_models);
+      }
+    });
+  }
+
+  void _useModel(String model) {
+    setState(() {
+      _model.text = model;
+      _selected.add(model);
+    });
+  }
+
   Future<void> _save({required bool activate}) async {
     if (_saving) return;
     setState(() => _saving = true);
     final state = AppScope.of(context);
     final navigator = Navigator.of(context);
-    await state.saveProvider(_edited);
-    if (activate) {
-      await state.setActiveProvider(_edited.id);
-    }
+    final keys = _liveKeys;
+    final provider = widget.provider.copyWith(
+      name:
+          _name.text.trim().isEmpty ? widget.provider.name : _name.text.trim(),
+      model: _model.text.trim().isEmpty && _selected.isNotEmpty
+          ? _selected.first
+          : _model.text.trim(),
+      baseUrl: _baseUrl.text.trim(),
+      keys: keys,
+      keyIndex: keys.isEmpty ? 0 : _keyIndex.clamp(0, keys.length - 1),
+      models: _models,
+      selectedModels: _selected.toList()..sort(),
+    );
+    await state.saveProvider(provider);
+    if (activate) await state.setActiveProvider(provider.id);
     if (!mounted) return;
     navigator.pop();
   }
@@ -133,7 +250,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
             Text(
               widget.provider.hint.isEmpty
                   ? 'Keys are stored in app preferences on this device.'
-                  : 'Key from ${widget.provider.hint}',
+                  : 'Key from ${widget.provider.hint}. Keys are tried in order.',
               style: Txt.meta,
             ),
             const SizedBox(height: Sp.x4),
@@ -157,36 +274,195 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
                 label: 'Base URL (OpenAI-compatible)',
               ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Text('KEYS', style: Txt.overline.copyWith(fontSize: 9.5)),
+                const Spacer(),
+                TextButton(
+                  onPressed: _addKey,
+                  child: const Text('+ Add key'),
+                ),
+              ],
+            ),
+            for (var i = 0; i < _keys.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _keys[i],
+                        style: Txt.code.copyWith(fontSize: 12),
+                        cursorColor: Pal.ember,
+                        obscureText: _reveal[i],
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: appField(
+                          widget.provider.requiresKey ? 'sk-…' : 'Not required',
+                          label: 'Key ${i + 1}',
+                          suffix: IconAction(
+                            icon: _reveal[i]
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                            tooltip: _reveal[i] ? 'Hide key' : 'Show key',
+                            size: 18,
+                            onTap: () =>
+                                setState(() => _reveal[i] = !_reveal[i]),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (_keys.length > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4, left: 2),
+                        child: IconAction(
+                          icon: Icons.remove_circle_outline_rounded,
+                          tooltip: 'Remove key',
+                          size: 18,
+                          color: Pal.rose,
+                          onTap: () => _removeKey(i),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (_liveKeys.length > 1)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Wrap(
+                  spacing: 7,
+                  runSpacing: 7,
+                  children: [
+                    for (var i = 0; i < _liveKeys.length; i++)
+                      GestureDetector(
+                        onTap: () => setState(() => _keyIndex = i),
+                        behavior: HitTestBehavior.opaque,
+                        child: StatusPill(
+                          'Key ${i + 1}',
+                          color: i == _activeIndex ? Pal.ember : Pal.textDim,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            Text(
+              'The active key is used first. When it hits its limit the agent '
+              'moves down this list — asking first unless automatic key '
+              'switching is on in Settings.',
+              style: Txt.meta.copyWith(height: 1.5),
+            ),
+            const SizedBox(height: 16),
+            Text('MODEL', style: Txt.overline.copyWith(fontSize: 9.5)),
+            const SizedBox(height: 8),
             TextField(
               controller: _model,
               style: Txt.code.copyWith(fontSize: 12),
               cursorColor: Pal.ember,
               autocorrect: false,
               enableSuggestions: false,
-              decoration: appField('model-name', label: 'Model'),
+              decoration: appField('model-name', label: 'Active model'),
             ),
+            if (_selected.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final model in (_selected.toList()..sort()))
+                    GestureDetector(
+                      onTap: () => _useModel(model),
+                      child: StatusPill(
+                        model,
+                        color: _model.text.trim() == model
+                            ? Pal.ember
+                            : Pal.textDim,
+                      ),
+                    ),
+                ],
+              ),
+            ],
             const SizedBox(height: 10),
-            TextField(
-              controller: _apiKey,
-              style: Txt.code.copyWith(fontSize: 12),
-              cursorColor: Pal.ember,
-              obscureText: _obscure,
-              autocorrect: false,
-              enableSuggestions: false,
-              decoration: appField(
-                widget.provider.requiresKey ? 'sk-…' : 'Not required',
-                label: 'API key',
-                suffix: IconAction(
-                  icon: _obscure
-                      ? Icons.visibility_outlined
-                      : Icons.visibility_off_outlined,
-                  tooltip: _obscure ? 'Show key' : 'Hide key',
-                  size: 18,
-                  onTap: () => setState(() => _obscure = !_obscure),
+            Row(
+              children: [
+                GhostButton(
+                  label: _fetching ? 'Fetching…' : 'Fetch models',
+                  icon: Icons.download_rounded,
+                  onTap: _fetching ? null : _fetchModels,
+                ),
+                const Spacer(),
+                if (_models.isNotEmpty)
+                  TextButton(
+                    onPressed: _toggleAll,
+                    child: Text(_allSelected ? 'Deselect all' : 'Select all'),
+                  ),
+              ],
+            ),
+            if (_models.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                height: 240,
+                decoration: BoxDecoration(
+                  color: Pal.raised,
+                  borderRadius: Rd.sm,
+                  border: Border.all(color: Pal.line),
+                ),
+                child: ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: _models.length,
+                  itemBuilder: (context, index) {
+                    final model = _models[index];
+                    final checked = _selected.contains(model);
+                    final active = _model.text.trim() == model;
+                    return InkWell(
+                      onTap: () => setState(() {
+                        if (checked) {
+                          _selected.remove(model);
+                        } else {
+                          _selected.add(model);
+                        }
+                      }),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2),
+                        child: Row(
+                          children: [
+                            Checkbox(
+                              value: checked,
+                              activeColor: Pal.ember,
+                              checkColor: Pal.onEmber,
+                              onChanged: (value) => setState(() {
+                                if (value ?? false) {
+                                  _selected.add(model);
+                                } else {
+                                  _selected.remove(model);
+                                }
+                              }),
+                            ),
+                            Expanded(
+                              child: Text(
+                                model,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Txt.code.copyWith(fontSize: 11),
+                              ),
+                            ),
+                            if (active)
+                              const StatusPill('active', color: Pal.mint)
+                            else
+                              TextButton(
+                                onPressed: () => _useModel(model),
+                                child: const Text('Use'),
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
-            ),
+            ],
             const SizedBox(height: Sp.x3),
             Row(
               children: [

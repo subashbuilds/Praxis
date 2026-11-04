@@ -11,8 +11,17 @@ import '../core/ai.dart';
 import '../core/integrations.dart';
 import '../core/shell.dart';
 import '../core/store.dart';
+import '../core/system_shell.dart';
 import '../core/vfs.dart';
 import '../models.dart';
+
+/// The UI supplies this so the agent can stop mid-run and ask whether it may
+/// move to another saved key or another provider.
+typedef LimitPrompt = Future<bool> Function(
+  String title,
+  String body,
+  String acceptLabel,
+);
 
 class AppState extends ChangeNotifier {
   AppState({
@@ -27,6 +36,8 @@ class AppState extends ChangeNotifier {
   static const _kIntegrations = 'devnest.integrations';
   static const _kActiveProvider = 'devnest.activeProvider';
   static const _kWordWrap = 'devnest.wrap';
+  static const _kAutoNextKey = 'devnest.autoNextKey';
+  static const _kAutoNextProvider = 'devnest.autoNextProvider';
   static const _kChatPrefix = 'devnest.chat.';
 
   final Directory root;
@@ -44,15 +55,26 @@ class AppState extends ChangeNotifier {
   String activeProviderId = '';
   bool busy = false;
   bool wordWrap = false;
+  bool autoNextKey = false;
+  bool autoNextProvider = false;
+
+  /// Set by the agent tab while it is on screen. Without it a limit stops the
+  /// run instead of guessing.
+  LimitPrompt? limitPrompt;
+
   bool _cancelled = false;
   int _entrySeq = 0;
 
   final Map<String, List<ChatEntry>> _threads = {};
   final Map<String, ProjectFs> _fs = {};
   final Map<String, Shell> _shells = {};
+  final Map<String, SystemShell> _systemShells = {};
 
   bool _ready = false;
   bool get ready => _ready;
+
+  List<ProviderConfig> get configuredProviders =>
+      providers.where((provider) => provider.ready).toList();
 
   static Future<AppState> bootstrap() async {
     final directory = await getApplicationDocumentsDirectory();
@@ -86,6 +108,8 @@ class AppState extends ChangeNotifier {
     _loadSkills();
     _loadIntegrations();
     wordWrap = store.read(_kWordWrap) == 'true';
+    autoNextKey = store.read(_kAutoNextKey) == 'true';
+    autoNextProvider = store.read(_kAutoNextProvider) == 'true';
 
     if (projects.isEmpty && seedWelcome) {
       await createProject('hello-dev', ProjectKind.web, persistChat: false);
@@ -108,6 +132,11 @@ class AppState extends ChangeNotifier {
 
   Shell shellFor(Project project) =>
       _shells.putIfAbsent(project.id, () => Shell(fsFor(project)));
+
+  SystemShell systemShellFor(Project project) => _systemShells.putIfAbsent(
+        project.id,
+        () => SystemShell(fsFor(project)),
+      );
 
   Future<Project> createProject(
     String name,
@@ -144,6 +173,7 @@ class AppState extends ChangeNotifier {
     _threads.remove(project.id);
     _fs.remove(project.id);
     _shells.remove(project.id);
+    _systemShells.remove(project.id);
     await store.remove('$_kChatPrefix${project.id}');
     notifyListeners();
   }
@@ -197,6 +227,33 @@ class AppState extends ChangeNotifier {
     return base.isEmpty ? 'project' : base;
   }
 
+  // ------------------------------------------------------------- attachments
+
+  /// Copies picked files into `attachments/` inside the project and returns
+  /// their project-relative paths for the message and the agent prompt.
+  Future<List<String>> attachFiles(Project project, List<String> paths) async {
+    final fs = fsFor(project);
+    final saved = <String>[];
+    for (final path in paths) {
+      final source = File(path);
+      if (!await source.exists()) continue;
+      final rawName = source.uri.pathSegments.last;
+      final safe = rawName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      var name = safe.isEmpty ? 'attachment' : safe;
+      if (await fs.exists('attachments/$name')) {
+        final stamp = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+        name = '$stamp-$name';
+      }
+      await fs.copyFromOutside(source, 'attachments/$name');
+      saved.add('attachments/$name');
+    }
+    if (saved.isNotEmpty) notifyListeners();
+    return saved;
+  }
+
+  String attachmentPath(Project project, String relative) =>
+      fsFor(project).absolute(relative);
+
   // ------------------------------------------------------------------- chat
 
   List<ChatEntry> threadOf(String projectId) {
@@ -230,12 +287,20 @@ class AppState extends ChangeNotifier {
   String _nextId() =>
       'e${DateTime.now().microsecondsSinceEpoch}-${_entrySeq++}';
 
-  Future<void> send(String projectId, String raw) async {
+  Future<void> send(
+    String projectId,
+    String raw, {
+    List<String> attachments = const [],
+  }) async {
     final prompt = raw.trim();
-    if (prompt.isEmpty || busy) return;
+    if ((prompt.isEmpty && attachments.isEmpty) || busy) return;
     final project = projectById(projectId);
-    final provider = activeProvider;
+    var provider = activeProvider;
     final thread = threadOf(projectId);
+
+    final stored = attachments.isEmpty
+        ? const <String>[]
+        : await attachFiles(project, attachments);
 
     final history = <AiTurn>[];
     for (final entry in thread) {
@@ -250,7 +315,8 @@ class AppState extends ChangeNotifier {
     thread.add(ChatEntry(
       id: _nextId(),
       role: ChatRole.user,
-      text: prompt,
+      text: prompt.isEmpty ? 'Look at the attached files.' : prompt,
+      attachments: stored,
       at: DateTime.now(),
     ));
     notifyListeners();
@@ -261,8 +327,8 @@ class AppState extends ChangeNotifier {
         id: _nextId(),
         role: ChatRole.error,
         text: provider.requiresKey
-            ? 'No API key for ${provider.name}. Open Settings → Models, paste a key and run Test connection.'
-            : 'Finish configuring ${provider.name} in Settings → Models.',
+            ? 'No API key for ${provider.name}. Open Providers, add a key and run Test connection.'
+            : 'Finish configuring ${provider.name} in Providers.',
         at: DateTime.now(),
       ));
       notifyListeners();
@@ -280,6 +346,7 @@ class AppState extends ChangeNotifier {
       fs: fsFor(project),
       shell: shellFor(project),
       skills: skills,
+      onProviderLimit: _handleProviderLimit,
       onEvent: (event) {
         thread.add(ChatEntry(
           id: _nextId(),
@@ -291,6 +358,10 @@ class AppState extends ChangeNotifier {
           text: event.text,
           tool: event.tool,
           detail: event.detail,
+          thinking: event.thinking,
+          patch: event.patch,
+          added: event.added,
+          removed: event.removed,
           ok: event.ok,
           at: DateTime.now(),
         ));
@@ -298,12 +369,17 @@ class AppState extends ChangeNotifier {
       },
     );
 
+    final modelPrompt = stored.isEmpty
+        ? prompt
+        : '$prompt\n\nFiles the user attached (already inside the project):\n'
+            '${stored.map((path) => '- $path').join('\n')}';
+
     try {
       await agent.run(
         history: history.length > 12
             ? history.sublist(history.length - 12)
             : history,
-        prompt: prompt,
+        prompt: modelPrompt,
         isCancelled: () => _cancelled,
       );
     } on AiProviderException catch (error) {
@@ -325,6 +401,64 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       await _persistChat(projectId);
     }
+  }
+
+  Future<ProviderConfig?> _handleProviderLimit(
+    ProviderConfig current,
+    AiProviderException error,
+  ) async {
+    final index = providers.indexWhere((item) => item.id == current.id);
+    if (index >= 0) providers[index] = current;
+
+    if (current.hasMoreKeys) {
+      var nextIndex = -1;
+      for (var i = current.keyIndex + 1; i < current.keys.length; i++) {
+        if (current.keys[i].trim().isNotEmpty) {
+          nextIndex = i;
+          break;
+        }
+      }
+      if (nextIndex >= 0) {
+        final allowed = autoNextKey ||
+            await (limitPrompt?.call(
+                  'Key limit reached',
+                  '${current.name} reports this key is rate-limited or out of credit.\n\n'
+                      'Use key ${nextIndex + 1} of ${current.keys.length}?',
+                  'Use key ${nextIndex + 1}',
+                ) ??
+                Future.value(false));
+        if (!allowed) return null;
+        final next = current.copyWith(keyIndex: nextIndex);
+        _replaceProvider(next);
+        await _persistProviders();
+        notifyListeners();
+        return next;
+      }
+    }
+
+    ProviderConfig? candidate;
+    for (final provider in providers) {
+      if (provider.id == current.id) continue;
+      if (provider.isConfigured) {
+        candidate = provider;
+        break;
+      }
+    }
+    if (candidate == null) return null;
+
+    final allowed = autoNextProvider ||
+        await (limitPrompt?.call(
+              'Provider limit reached',
+              '${current.name} has no usable keys left.\n\n'
+                  'Continue with ${candidate.name} (${candidate.model})?',
+              'Use ${candidate.name}',
+            ) ??
+            Future.value(false));
+    if (!allowed) return null;
+    activeProviderId = candidate.id;
+    await store.write(_kActiveProvider, candidate.id);
+    notifyListeners();
+    return candidate;
   }
 
   void stop() {
@@ -374,14 +508,29 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> saveProvider(ProviderConfig provider) async {
+    _replaceProvider(provider);
+    await _persistProviders();
+    notifyListeners();
+  }
+
+  void _replaceProvider(ProviderConfig provider) {
     final index = providers.indexWhere((item) => item.id == provider.id);
     if (index >= 0) {
       providers[index] = provider;
     } else {
       providers.add(provider);
     }
-    await _persistProviders();
-    notifyListeners();
+  }
+
+  Future<List<String>> fetchModels(ProviderConfig provider) async {
+    final models = await ai.listModels(provider);
+    final index = providers.indexWhere((item) => item.id == provider.id);
+    if (index >= 0) {
+      providers[index] = providers[index].copyWith(models: models);
+      await _persistProviders();
+      notifyListeners();
+    }
+    return models;
   }
 
   ProviderConfig newCustomProvider() => ProviderConfig(
@@ -475,6 +624,27 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Imports a `.md` or `.txt` file as a skill whose instructions are its text.
+  Future<Skill?> importSkillFile(String path) async {
+    final file = File(path);
+    if (!await file.exists()) return null;
+    final name = file.uri.pathSegments.last;
+    final lower = name.toLowerCase();
+    if (!lower.endsWith('.md') && !lower.endsWith('.txt')) return null;
+    final content = await file.readAsString();
+    final title = name.substring(0, name.lastIndexOf('.')).replaceAll(
+          RegExp(r'[-_]+'),
+          ' ',
+        );
+    final skill = Skill(
+      id: 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
+      name: title.trim().isEmpty ? 'Imported skill' : title.trim(),
+      instructions: content.trim(),
+    );
+    await saveSkill(skill);
+    return skill;
+  }
+
   Skill newSkill() => Skill(
         id: 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
         name: '',
@@ -531,6 +701,18 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setAutoNextKey(bool value) async {
+    autoNextKey = value;
+    await store.write(_kAutoNextKey, value.toString());
+    notifyListeners();
+  }
+
+  Future<void> setAutoNextProvider(bool value) async {
+    autoNextProvider = value;
+    await store.write(_kAutoNextProvider, value.toString());
+    notifyListeners();
+  }
+
   Future<void> resetEverything() async {
     final projectsDir = Directory('${root.path}/projects');
     if (await projectsDir.exists()) await projectsDir.delete(recursive: true);
@@ -539,12 +721,15 @@ class AppState extends ChangeNotifier {
     _threads.clear();
     _fs.clear();
     _shells.clear();
+    _systemShells.clear();
     for (final key in [
       _kProviders,
       _kSkills,
       _kIntegrations,
       _kActiveProvider,
-      _kWordWrap
+      _kWordWrap,
+      _kAutoNextKey,
+      _kAutoNextProvider,
     ]) {
       await store.remove(key);
     }
@@ -562,6 +747,8 @@ class AppState extends ChangeNotifier {
     integrations = const Integrations();
     activeProviderId = providers.first.id;
     wordWrap = false;
+    autoNextKey = false;
+    autoNextProvider = false;
     await createProject('hello-dev', ProjectKind.web, persistChat: false);
     notifyListeners();
   }

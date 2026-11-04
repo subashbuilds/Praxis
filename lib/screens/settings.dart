@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../core/integrations.dart';
@@ -58,9 +59,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         Text('${state.providers.length}', style: Txt.meta),
                   ),
                   const Text(
-                    'Every provider uses your own key. There is no bundled free '
-                    'model — without a key there is nothing to call. Ollama can '
-                    'run keyless on your own network.',
+                    'Every provider uses your own key; add several so the agent '
+                    'can move on when one runs out. Pick the active one with the '
+                    'Providers pill inside a project. Ollama is the keyless '
+                    'option on your own network.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x3),
@@ -130,10 +132,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ),
                     ),
-                  GhostButton(
-                    label: 'Add skill',
-                    icon: Icons.add_rounded,
-                    onTap: () => _editSkill(state.newSkill()),
+                  Row(
+                    children: [
+                      GhostButton(
+                        label: 'Add skill',
+                        icon: Icons.add_rounded,
+                        onTap: () => _editSkill(state.newSkill()),
+                      ),
+                      const SizedBox(width: 8),
+                      GhostButton(
+                        label: 'Import .md / .txt',
+                        icon: Icons.upload_file_rounded,
+                        onTap: _importSkill,
+                      ),
+                    ],
                   ),
                   const SectionLabel('INTEGRATIONS'),
                   const Text(
@@ -163,11 +175,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ? null
                             : () => _testGithub(state),
                       ),
-                      GhostButton(
-                        label: 'Push project',
-                        icon: Icons.upload_rounded,
-                        onTap: _githubBusy ? null : () => _pushGithub(state),
-                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -192,12 +199,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ? null
                             : () => _testVercel(state),
                       ),
-                      GhostButton(
-                        label: 'Deploy',
-                        icon: Icons.rocket_launch_outlined,
-                        onTap: _vercelBusy ? null : () => _deployVercel(state),
-                      ),
                     ],
+                  ),
+                  const SectionLabel('CONTINUATION'),
+                  const Text(
+                    'What happens when a key or a provider runs out. With both '
+                    'off, the agent stops and asks before switching.',
+                    style: Txt.bodySoft,
+                  ),
+                  const SizedBox(height: Sp.x3),
+                  Panel(
+                    padding:
+                        const EdgeInsets.fromLTRB(Sp.x3, Sp.x1, Sp.x3, Sp.x1),
+                    child: Column(
+                      children: [
+                        _SwitchRow(
+                          title: 'Use the next key',
+                          body: 'When a key is rate-limited or out of credit, '
+                              'move to the next saved key automatically.',
+                          value: state.autoNextKey,
+                          onChanged: state.setAutoNextKey,
+                        ),
+                        const Hairline(),
+                        _SwitchRow(
+                          title: 'Move to the next provider',
+                          body: 'When every key for a provider is used up, '
+                              'switch to another configured provider.',
+                          value: state.autoNextProvider,
+                          onChanged: state.setAutoNextProvider,
+                        ),
+                      ],
+                    ),
                   ),
                   const SectionLabel('EDITOR'),
                   Panel(
@@ -258,7 +290,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             SizedBox(width: 9),
                             Text('DevNest', style: Txt.title),
                             Spacer(),
-                            Text('1.0.0', style: Txt.meta),
+                            Text('1.1.0', style: Txt.meta),
                           ],
                         ),
                         SizedBox(height: 10),
@@ -292,6 +324,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
       isScrollControlled: true,
       backgroundColor: Pal.surface,
       builder: (_) => ProviderFormSheet(provider: provider),
+    );
+  }
+
+  Future<void> _importSkill() async {
+    final state = AppScope.of(context);
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['md', 'txt'],
+        allowMultiple: true,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showResult('Could not open the picker: $error');
+      return;
+    }
+    if (result == null) return;
+    var imported = 0;
+    for (final file in result.files) {
+      final path = file.path;
+      if (path == null) continue;
+      final skill = await state.importSkillFile(path);
+      if (skill != null) imported++;
+    }
+    if (!mounted) return;
+    _showResult(
+      imported == 0
+          ? 'No .md or .txt file was imported.'
+          : 'Imported $imported skill${imported == 1 ? '' : 's'}.',
     );
   }
 
@@ -425,136 +487,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _pushGithub(AppState state) async {
-    final project = widget.project;
-    if (project == null) {
-      _showResult(
-          'Open a project first — the push uploads that project’s files.');
-      return;
-    }
-    if (state.integrations.githubToken.isEmpty) {
-      _showResult('Add a GitHub token first.');
-      return;
-    }
-    final repo = TextEditingController(text: project.id.split('-').first);
-    var private = true;
-    final go = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: Pal.surface,
-          title: const Text('Push to GitHub'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: repo,
-                autofocus: true,
-                style: Txt.body,
-                cursorColor: Pal.ember,
-                decoration: appField('new-repo-name'),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  const Expanded(
-                      child: Text('Private repository', style: Txt.bodySoft)),
-                  Switch(
-                    value: private,
-                    onChanged: (value) => setDialogState(() => private = value),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Push'),
-            ),
-          ],
-        ),
-      ),
-    );
-    final repoName = repo.text.trim();
-    repo.dispose();
-    if (go != true) return;
-    setState(() => _githubBusy = true);
-    try {
-      final result = await state.pushToGithub(
-        project,
-        repo: repoName.isEmpty ? 'devnest-project' : repoName,
-        private: private,
-      );
-      _showResult(result.message, result.url);
-    } on IntegrationException catch (error) {
-      _showResult(error.message);
-    } catch (error) {
-      _showResult('$error');
-    } finally {
-      if (mounted) setState(() => _githubBusy = false);
-    }
-  }
-
-  Future<void> _deployVercel(AppState state) async {
-    final project = widget.project;
-    if (project == null) {
-      _showResult(
-          'Open a project first — the deploy uploads that project’s files.');
-      return;
-    }
-    if (state.integrations.vercelToken.isEmpty) {
-      _showResult('Add a Vercel token first.');
-      return;
-    }
-    final controller = TextEditingController(text: project.id.split('-').first);
-    final go = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: const Text('Deploy to Vercel'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: Txt.body,
-          cursorColor: Pal.ember,
-          decoration: appField('project-name'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Deploy'),
-          ),
-        ],
-      ),
-    );
-    final name = controller.text.trim();
-    controller.dispose();
-    if (go != true) return;
-    setState(() => _vercelBusy = true);
-    try {
-      final result = await state.deployToVercel(
-        project,
-        name: name.isEmpty ? 'devnest-project' : name,
-      );
-      _showResult(result.message, result.url);
-    } on IntegrationException catch (error) {
-      _showResult(error.message);
-    } catch (error) {
-      _showResult('$error');
-    } finally {
-      if (mounted) setState(() => _vercelBusy = false);
-    }
-  }
-
   Future<void> _reset(AppState state) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -673,7 +605,8 @@ class _ProviderRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    provider.model.isEmpty ? 'No model set' : provider.model,
+                    '${provider.model.isEmpty ? 'No model set' : provider.model}'
+                    ' · ${provider.keys.where((key) => key.trim().isNotEmpty).length} keys',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Txt.meta,
@@ -741,6 +674,39 @@ class _IntegrationPanel extends StatelessWidget {
           Wrap(spacing: 8, runSpacing: 8, children: actions),
         ],
       ),
+    );
+  }
+}
+
+class _SwitchRow extends StatelessWidget {
+  const _SwitchRow({
+    required this.title,
+    required this.body,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String title;
+  final String body;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Txt.title.copyWith(fontSize: 14)),
+              const SizedBox(height: 2),
+              Text(body, style: Txt.meta.copyWith(height: 1.4)),
+            ],
+          ),
+        ),
+        Switch(value: value, onChanged: onChanged),
+      ],
     );
   }
 }

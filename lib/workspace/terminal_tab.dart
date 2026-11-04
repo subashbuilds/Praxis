@@ -18,12 +18,18 @@ class TerminalTab extends StatefulWidget {
 class _TerminalTabState extends State<TerminalTab> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  final _stdout = StringBuffer();
+  final _stderr = StringBuffer();
   final _lines = <ShellLine>[
     const ShellLine(
-        'DevNest shell — running against the project folder on this device.',
-        ShellTone.muted),
+      'Device shell — /system/bin/sh, working inside this project.',
+      ShellTone.muted,
+    ),
     const ShellLine(
-        "Type 'help' for the commands it understands.", ShellTone.muted),
+      'git, curl or any binary installed on the phone is available. '
+      'cd is tracked; clear empties this view.',
+      ShellTone.muted,
+    ),
   ];
   bool _running = false;
 
@@ -34,24 +40,55 @@ class _TerminalTabState extends State<TerminalTab> {
     super.dispose();
   }
 
+  void _feed(String chunk, ShellTone tone, StringBuffer pending) {
+    if (!mounted) return;
+    pending.write(chunk.replaceAll('\r', ''));
+    final parts = pending.toString().split('\n');
+    pending.clear();
+    pending.write(parts.removeLast());
+    if (parts.isEmpty) return;
+    setState(() {
+      _lines.addAll(parts.map((line) => ShellLine(line, tone)));
+    });
+    _scrollToEnd();
+  }
+
+  void _flush(StringBuffer pending, ShellTone tone) {
+    final rest = pending.toString();
+    pending.clear();
+    if (rest.isEmpty) return;
+    setState(() => _lines.add(ShellLine(rest, tone)));
+  }
+
   Future<void> _submit(String raw) async {
     final command = raw.trim();
     if (command.isEmpty || _running) return;
-    final shell = AppScope.of(context).shellFor(widget.project);
     _input.clear();
+    if (command == 'clear') {
+      setState(_lines.clear);
+      return;
+    }
+    final shell = AppScope.of(context).systemShellFor(widget.project);
+    _stdout.clear();
+    _stderr.clear();
     setState(() {
       _running = true;
-      _lines
-          .add(ShellLine('${shell.cwdDisplay} \$ $command', ShellTone.command));
+      _lines.add(ShellLine('\$ $command', ShellTone.command));
     });
-    final result = await shell.run(command);
+    _scrollToEnd();
+
+    final result = await shell.run(
+      command,
+      onStdout: (chunk) => _feed(chunk, ShellTone.output, _stdout),
+      onStderr: (chunk) => _feed(chunk, ShellTone.error, _stderr),
+    );
     if (!mounted) return;
+    _flush(_stdout, ShellTone.output);
+    _flush(_stderr, ShellTone.error);
     setState(() {
       _running = false;
-      if (result.clear) {
-        _lines.clear();
-      } else {
-        _lines.addAll(result.lines);
+      if (result.exitCode != 0) {
+        _lines.add(ShellLine('exit ${result.exitCode}', ShellTone.muted));
       }
     });
     _scrollToEnd();
@@ -74,7 +111,7 @@ class _TerminalTabState extends State<TerminalTab> {
 
   @override
   Widget build(BuildContext context) {
-    final shell = AppScope.of(context).shellFor(widget.project);
+    final shell = AppScope.of(context).systemShellFor(widget.project);
 
     return Container(
       color: Pal.terminal,
@@ -88,7 +125,7 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
             child: Row(
               children: [
-                const StatusPill('local', color: Pal.mint),
+                const StatusPill('device sh', color: Pal.mint),
                 const SizedBox(width: Sp.x2),
                 Expanded(
                   child: Text(
@@ -98,12 +135,21 @@ class _TerminalTabState extends State<TerminalTab> {
                     style: Txt.meta.copyWith(fontSize: 10.5),
                   ),
                 ),
-                IconAction(
-                  icon: Icons.delete_outline_rounded,
-                  tooltip: 'Clear shell',
-                  size: 17,
-                  onTap: () => setState(_lines.clear),
-                ),
+                if (_running)
+                  IconAction(
+                    icon: Icons.stop_circle_outlined,
+                    tooltip: 'Stop command',
+                    size: 18,
+                    color: Pal.rose,
+                    onTap: shell.cancel,
+                  )
+                else
+                  IconAction(
+                    icon: Icons.delete_outline_rounded,
+                    tooltip: 'Clear shell',
+                    size: 17,
+                    onTap: () => setState(_lines.clear),
+                  ),
               ],
             ),
           ),
@@ -116,8 +162,10 @@ class _TerminalTabState extends State<TerminalTab> {
                 if (index >= _lines.length) {
                   return Padding(
                     padding: const EdgeInsets.only(top: 2),
-                    child:
-                        Text('…', style: Txt.code.copyWith(color: Pal.textDim)),
+                    child: Text(
+                      '…',
+                      style: Txt.code.copyWith(color: Pal.textDim),
+                    ),
                   );
                 }
                 final line = _lines[index];
@@ -146,9 +194,9 @@ class _TerminalTabState extends State<TerminalTab> {
             child: Row(
               children: [
                 Text(
-                  '${shell.cwdDisplay} \$',
+                  '\$',
                   style: Txt.code.copyWith(
-                    fontSize: 11.5,
+                    fontSize: 12,
                     color: Pal.ember,
                     fontWeight: FontWeight.w600,
                   ),
@@ -162,12 +210,13 @@ class _TerminalTabState extends State<TerminalTab> {
                     textInputAction: TextInputAction.send,
                     autocorrect: false,
                     enableSuggestions: false,
+                    enabled: !_running,
                     onSubmitted: _submit,
                     decoration: InputDecoration(
                       isDense: true,
                       border: InputBorder.none,
                       contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                      hintText: 'ls',
+                      hintText: 'git status',
                       hintStyle:
                           Txt.code.copyWith(fontSize: 11.5, color: Pal.textDim),
                     ),
@@ -178,7 +227,7 @@ class _TerminalTabState extends State<TerminalTab> {
                   tooltip: 'Run command',
                   size: 18,
                   color: Pal.ember,
-                  onTap: () => _submit(_input.text),
+                  onTap: _running ? null : () => _submit(_input.text),
                 ),
               ],
             ),

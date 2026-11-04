@@ -30,7 +30,7 @@ void main() {
         baseUrl: 'https://example.test/v1',
         model: 'test-model',
         flavor: ApiFlavor.openai,
-        apiKey: 'test-key',
+        keys: ['test-key'],
       );
 
   test('agent calls write_file, then reports the final text', () async {

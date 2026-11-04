@@ -52,7 +52,7 @@ jobs:
       - name: Analyze
         run: flutter analyze
 
-      - name: Run widget tests
+      - name: Run tests
         run: flutter test --reporter expanded
 
   build-apk:
@@ -100,7 +100,7 @@ jobs:
           APK=build/app/outputs/flutter-apk/app-release.apk
           ls -lh "$APK"
           {
-            echo "### PolyDev release APK"
+            echo "### DevNest release APK"
             echo ""
             echo "| | |"
             echo "|---|---|"
@@ -112,7 +112,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: polydev-release-apk
+          name: devnest-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14

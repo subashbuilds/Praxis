@@ -100,7 +100,10 @@ class ProviderConfig {
     required this.baseUrl,
     required this.model,
     required this.flavor,
-    this.apiKey = '',
+    this.keys = const [],
+    this.keyIndex = 0,
+    this.models = const [],
+    this.selectedModels = const [],
     this.requiresKey = true,
     this.isCustom = false,
     this.hint = '',
@@ -112,20 +115,42 @@ class ProviderConfig {
   final String baseUrl;
   final String model;
   final ApiFlavor flavor;
-  final String apiKey;
+
+  /// Keys are tried in order. [keyIndex] is the one the agent is using now;
+  /// it moves forward when a key hits its limit and the user allows it.
+  final List<String> keys;
+  final int keyIndex;
+
+  /// Models returned by the provider's `/models` endpoint, and the subset the
+  /// user chose to keep.
+  final List<String> models;
+  final List<String> selectedModels;
   final bool requiresKey;
   final bool isCustom;
   final String hint;
 
-  bool get ready => !requiresKey || apiKey.trim().isNotEmpty;
+  String get apiKey {
+    if (keys.isEmpty) return '';
+    final index = keyIndex.clamp(0, keys.length - 1);
+    return keys[index].trim();
+  }
+
+  bool get hasKeys => keys.any((key) => key.trim().isNotEmpty);
+  bool get ready => !requiresKey || hasKeys;
   bool get isConfigured => model.trim().isNotEmpty && ready;
+  bool get hasMoreKeys =>
+      keyIndex + 1 < keys.length &&
+      keys.skip(keyIndex + 1).any((key) => key.trim().isNotEmpty);
 
   ProviderConfig copyWith({
     String? name,
     String? baseUrl,
     String? model,
     ApiFlavor? flavor,
-    String? apiKey,
+    List<String>? keys,
+    int? keyIndex,
+    List<String>? models,
+    List<String>? selectedModels,
     bool? requiresKey,
   }) =>
       ProviderConfig(
@@ -135,7 +160,10 @@ class ProviderConfig {
         baseUrl: baseUrl ?? this.baseUrl,
         model: model ?? this.model,
         flavor: flavor ?? this.flavor,
-        apiKey: apiKey ?? this.apiKey,
+        keys: keys ?? this.keys,
+        keyIndex: keyIndex ?? this.keyIndex,
+        models: models ?? this.models,
+        selectedModels: selectedModels ?? this.selectedModels,
         requiresKey: requiresKey ?? this.requiresKey,
         isCustom: isCustom,
         hint: hint,
@@ -148,27 +176,47 @@ class ProviderConfig {
         'baseUrl': baseUrl,
         'model': model,
         'flavor': flavor.name,
-        'apiKey': apiKey,
+        'keys': keys,
+        'keyIndex': keyIndex,
+        'models': models,
+        'selectedModels': selectedModels,
         'requiresKey': requiresKey,
         'isCustom': isCustom,
         'hint': hint,
       };
 
-  static ProviderConfig fromJson(Map<String, dynamic> json) => ProviderConfig(
-        id: json['id'] as String,
-        name: json['name'] as String? ?? 'Provider',
-        icon: json['icon'] as String? ?? 'assets/icons/opencode.svg',
-        baseUrl: json['baseUrl'] as String? ?? '',
-        model: json['model'] as String? ?? '',
-        flavor: ApiFlavor.values.firstWhere(
-          (f) => f.name == json['flavor'],
-          orElse: () => ApiFlavor.openai,
-        ),
-        apiKey: json['apiKey'] as String? ?? '',
-        requiresKey: json['requiresKey'] as bool? ?? true,
-        isCustom: json['isCustom'] as bool? ?? false,
-        hint: json['hint'] as String? ?? '',
-      );
+  static List<String> _strings(Object? raw) =>
+      raw is List ? raw.whereType<String>().toList() : const [];
+
+  static ProviderConfig fromJson(Map<String, dynamic> json) {
+    final stored = _strings(json['keys']);
+    final legacy = json['apiKey'] as String? ?? '';
+    final keys = stored.isNotEmpty
+        ? stored
+        : (legacy.trim().isEmpty ? const <String>[] : [legacy]);
+    final keyIndex = (json['keyIndex'] as int? ?? 0).clamp(
+      0,
+      keys.isEmpty ? 0 : keys.length - 1,
+    );
+    return ProviderConfig(
+      id: json['id'] as String,
+      name: json['name'] as String? ?? 'Provider',
+      icon: json['icon'] as String? ?? 'assets/icons/opencode.svg',
+      baseUrl: json['baseUrl'] as String? ?? '',
+      model: json['model'] as String? ?? '',
+      flavor: ApiFlavor.values.firstWhere(
+        (f) => f.name == json['flavor'],
+        orElse: () => ApiFlavor.openai,
+      ),
+      keys: keys,
+      keyIndex: keyIndex,
+      models: _strings(json['models']),
+      selectedModels: _strings(json['selectedModels']),
+      requiresKey: json['requiresKey'] as bool? ?? true,
+      isCustom: json['isCustom'] as bool? ?? false,
+      hint: json['hint'] as String? ?? '',
+    );
+  }
 }
 
 /// Every preset is a real endpoint that needs the user's own key (except
@@ -273,6 +321,19 @@ class AiProviderException implements Exception {
   final String message;
   final int? status;
 
+  /// True when the provider said the key is rate-limited or out of credit,
+  /// which is the only case where another key can help.
+  bool get isLimit {
+    if (status == 402 || status == 429) return true;
+    final text = message.toLowerCase();
+    return text.contains('quota') ||
+        text.contains('insufficient') ||
+        text.contains('credit') ||
+        text.contains('rate limit') ||
+        text.contains('rate_limit') ||
+        text.contains('too many requests');
+  }
+
   @override
   String toString() => message;
 }
@@ -344,6 +405,11 @@ class ChatEntry {
     required this.text,
     this.tool = '',
     this.detail = '',
+    this.thinking = '',
+    this.patch = '',
+    this.added = 0,
+    this.removed = 0,
+    this.attachments = const [],
     this.ok = true,
     required this.at,
   });
@@ -353,6 +419,18 @@ class ChatEntry {
   final String text;
   final String tool;
   final String detail;
+
+  /// Reasoning the model returned alongside its answer. Hidden behind a pill
+  /// so a long chain of thought never floods the conversation.
+  final String thinking;
+
+  /// JSON encoded [FileDiff] for a write_file call, plus its line counts.
+  final String patch;
+  final int added;
+  final int removed;
+
+  /// Project-relative paths of files the user attached to this message.
+  final List<String> attachments;
   final bool ok;
   final DateTime at;
 
@@ -362,6 +440,11 @@ class ChatEntry {
         'text': text,
         'tool': tool,
         'detail': detail,
+        'thinking': thinking,
+        'patch': patch,
+        'added': added,
+        'removed': removed,
+        'attachments': attachments,
         'ok': ok,
         'at': at.toIso8601String(),
       };
@@ -375,6 +458,13 @@ class ChatEntry {
         text: json['text'] as String? ?? '',
         tool: json['tool'] as String? ?? '',
         detail: json['detail'] as String? ?? '',
+        thinking: json['thinking'] as String? ?? '',
+        patch: json['patch'] as String? ?? '',
+        added: json['added'] as int? ?? 0,
+        removed: json['removed'] as int? ?? 0,
+        attachments: json['attachments'] is List
+            ? (json['attachments'] as List).whereType<String>().toList()
+            : const [],
         ok: json['ok'] as bool? ?? true,
         at: DateTime.tryParse(json['at'] as String? ?? '') ?? DateTime.now(),
       );
