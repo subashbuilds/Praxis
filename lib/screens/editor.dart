@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../models.dart';
 import '../state/app_state.dart';
@@ -23,6 +25,9 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _dirty = false;
   bool _saving = false;
   String? _error;
+  late bool _preview = _isMarkdown;
+
+  bool get _isMarkdown => languageForPath(widget.path) == CodeLanguage.markdown;
 
   @override
   void initState() {
@@ -110,7 +115,7 @@ class _EditorScreenState extends State<EditorScreen> {
     final lines = _controller.text.split('\n').length;
 
     return Scaffold(
-      backgroundColor: Pal.ghBg,
+      backgroundColor: _preview ? Pal.canvas : Pal.ghBg,
       body: SafeArea(
         child: Column(
           children: [
@@ -140,7 +145,9 @@ class _EditorScreenState extends State<EditorScreen> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            MonoChip(language.label),
+                            MonoChip(_isMarkdown && _preview
+                                ? 'Markdown'
+                                : language.label),
                           ],
                         ),
                         const SizedBox(height: 2),
@@ -156,6 +163,52 @@ class _EditorScreenState extends State<EditorScreen> {
                       ],
                     ),
                   ),
+                  if (_isMarkdown)
+                    GestureDetector(
+                      onTap: () => setState(() => _preview = !_preview),
+                      behavior: HitTestBehavior.opaque,
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 6),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Pal.raised,
+                          borderRadius: Rd.pill,
+                          border: Border.all(color: Pal.lineStrong),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _preview
+                                  ? Icons.code_rounded
+                                  : Icons.article_outlined,
+                              size: 14,
+                              color: Pal.textMuted,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              _preview ? 'Code' : 'Preview',
+                              style: Txt.meta.copyWith(
+                                fontSize: 10,
+                                color: Pal.text,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (!_preview)
+                    IconAction(
+                      icon: state.wordWrap
+                          ? Icons.wrap_text_rounded
+                          : Icons.notes_rounded,
+                      tooltip:
+                          state.wordWrap ? 'Disable wrapping' : 'Wrap lines',
+                      size: 18,
+                      onTap: () => state.setWordWrap(!state.wordWrap),
+                    ),
+                  const SizedBox(width: 2),
                   EmberButton(
                     label: _saving ? 'Saving' : 'Save',
                     compact: true,
@@ -182,16 +235,88 @@ class _EditorScreenState extends State<EditorScreen> {
                             style: Txt.bodySoft.copyWith(color: Pal.rose),
                           ),
                         )
-                      : CodeEditor(
-                          controller: _controller,
-                          language: language,
-                          wrap: state.wordWrap,
-                          onChanged: (_) {
-                            if (!_dirty) setState(() => _dirty = true);
-                          },
-                        ),
+                      : _preview
+                          ? _MarkdownPreview(
+                              data: _controller.text,
+                              path: widget.path,
+                            )
+                          : CodeEditor(
+                              controller: _controller,
+                              language: language,
+                              wrap: state.wordWrap,
+                              onChanged: (_) {
+                                if (!_dirty) setState(() => _dirty = true);
+                              },
+                            ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MarkdownPreview extends StatelessWidget {
+  const _MarkdownPreview({required this.data, required this.path});
+
+  final String data;
+  final String path;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Pal.canvas,
+      child: Markdown(
+        data: data.isEmpty ? '_This file is empty._' : data,
+        padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, Sp.x8),
+        selectable: true,
+        onTapLink: (text, href, title) {
+          if (href == null || href.isEmpty) return;
+          Clipboard.setData(ClipboardData(text: href));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Link copied: $href')),
+          );
+        },
+        styleSheet: MarkdownStyleSheet(
+          p: Txt.body.copyWith(height: 1.65),
+          h1: Txt.headline.copyWith(fontSize: 27),
+          h2: Txt.headline.copyWith(fontSize: 22),
+          h3: Txt.title.copyWith(fontSize: 18),
+          h4: Txt.title.copyWith(fontSize: 16),
+          strong: Txt.body.copyWith(fontWeight: FontWeight.w700),
+          em: Txt.body.copyWith(fontStyle: FontStyle.italic),
+          a: Txt.body.copyWith(
+            color: Pal.ember,
+            decoration: TextDecoration.underline,
+            decorationColor: Pal.ember,
+          ),
+          code: Txt.code.copyWith(
+            fontSize: 12,
+            color: Pal.ghText,
+            backgroundColor: Pal.ghPanel,
+          ),
+          codeblockDecoration: BoxDecoration(
+            color: Pal.ghBg,
+            borderRadius: Rd.sm,
+            border: Border.all(color: Pal.ghLine),
+          ),
+          codeblockPadding: const EdgeInsets.all(Sp.x3),
+          blockquote: Txt.bodySoft.copyWith(
+            fontStyle: FontStyle.italic,
+            color: Pal.textMuted,
+          ),
+          blockquoteDecoration: BoxDecoration(
+            border: Border(left: BorderSide(color: Pal.ember, width: 2)),
+          ),
+          blockquotePadding: const EdgeInsets.only(left: Sp.x4),
+          listBullet: Txt.body,
+          horizontalRuleDecoration: BoxDecoration(
+            border: Border(top: BorderSide(color: Pal.line)),
+          ),
+          tableHead: Txt.label.copyWith(fontWeight: FontWeight.w700),
+          tableBody: Txt.bodySoft,
+          tableBorder: TableBorder.all(color: Pal.line),
+          tableCellsPadding: const EdgeInsets.all(8),
         ),
       ),
     );

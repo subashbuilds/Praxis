@@ -1,4 +1,4 @@
-# DevNest
+# Praxis
 
 A local-first coding workbench for Android. Real project folders, a real device
 shell, a GitHub-style editor, a live WebView preview, and an AI agent that edits
@@ -54,7 +54,7 @@ Release builds are debug-signed because no release keystore is committed.
 ## Limits, stated plainly
 
 - The **agent's** shell is sandboxed to file verbs; it has no Node, Python, git
-  or Flutter runtime. The **Shell tab** is the real device shell, but DevNest
+  or Flutter runtime. The **Shell tab** is the real device shell, but Praxis
   does not bundle those binaries — it runs what the phone already has.
 - Preview renders web projects only. Flutter and Python projects are edited and
   stored, not compiled on device.

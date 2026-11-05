@@ -49,7 +49,7 @@ extension ProjectKindX on ProjectKind {
           ],
         ProjectKind.python => const [
             MapEntry('main.py',
-                'def main():\n    print("hello from DevNest")\n\n\nif __name__ == "__main__":\n    main()\n'),
+                'def main():\n    print("hello from Praxis")\n\n\nif __name__ == "__main__":\n    main()\n'),
             MapEntry('README.md', '# New Python project\n'),
           ],
         ProjectKind.blank => const [],
@@ -67,6 +67,8 @@ class Project {
     required this.name,
     required this.kind,
     required this.createdAt,
+    this.repo = '',
+    this.branch = 'main',
   });
 
   final String id;
@@ -74,11 +76,26 @@ class Project {
   final ProjectKind kind;
   final DateTime createdAt;
 
+  /// `owner/name` when the project was cloned from or pushed to GitHub.
+  final String repo;
+  final String branch;
+
+  Project copyWith({String? repo, String? branch}) => Project(
+        id: id,
+        name: name,
+        kind: kind,
+        createdAt: createdAt,
+        repo: repo ?? this.repo,
+        branch: branch ?? this.branch,
+      );
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
         'kind': kind.name,
         'createdAt': createdAt.toIso8601String(),
+        'repo': repo,
+        'branch': branch,
       };
 
   static Project fromJson(Map<String, dynamic> json) => Project(
@@ -87,6 +104,8 @@ class Project {
         kind: ProjectKindX.fromId(json['kind'] as String?),
         createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
             DateTime.now(),
+        repo: json['repo'] as String? ?? '',
+        branch: json['branch'] as String? ?? 'main',
       );
 }
 
@@ -305,6 +324,15 @@ const kProviderPresets = <ProviderConfig>[
     hint: 'api.together.ai/settings/api-keys',
   ),
   ProviderConfig(
+    id: 'nvidia',
+    name: 'NVIDIA NIM',
+    icon: 'assets/icons/nvidia.svg',
+    baseUrl: 'https://integrate.api.nvidia.com/v1',
+    model: 'meta/llama-3.3-70b-instruct',
+    flavor: ApiFlavor.openai,
+    hint: 'build.nvidia.com → API keys',
+  ),
+  ProviderConfig(
     id: 'ollama',
     name: 'Ollama (LAN)',
     icon: 'assets/icons/ollama.svg',
@@ -373,30 +401,228 @@ class Skill {
       );
 }
 
-class Integrations {
-  const Integrations({this.githubToken = '', this.vercelToken = ''});
+enum IntegrationKind { github, vercel }
 
-  final String githubToken;
-  final String vercelToken;
+extension IntegrationKindX on IntegrationKind {
+  String get label => switch (this) {
+        IntegrationKind.github => 'GitHub',
+        IntegrationKind.vercel => 'Vercel',
+      };
 
-  Integrations copyWith({String? githubToken, String? vercelToken}) =>
-      Integrations(
-        githubToken: githubToken ?? this.githubToken,
-        vercelToken: vercelToken ?? this.vercelToken,
+  String get tokenHint => switch (this) {
+        IntegrationKind.github => 'GitHub personal access token',
+        IntegrationKind.vercel => 'Vercel access token',
+      };
+}
+
+class IntegrationAccount {
+  const IntegrationAccount({
+    required this.id,
+    required this.kind,
+    required this.label,
+    required this.username,
+    required this.token,
+    this.createdAt,
+  });
+
+  final String id;
+  final IntegrationKind kind;
+  final String label;
+  final String username;
+  final String token;
+  final DateTime? createdAt;
+
+  String get displayName => label.trim().isNotEmpty
+      ? label.trim()
+      : username.trim().isNotEmpty
+          ? username
+          : kind.label;
+
+  IntegrationAccount copyWith(
+          {String? label, String? username, String? token}) =>
+      IntegrationAccount(
+        id: id,
+        kind: kind,
+        label: label ?? this.label,
+        username: username ?? this.username,
+        token: token ?? this.token,
+        createdAt: createdAt,
       );
 
   Map<String, dynamic> toJson() => {
-        'githubToken': githubToken,
-        'vercelToken': vercelToken,
+        'id': id,
+        'kind': kind.name,
+        'label': label,
+        'username': username,
+        'token': token,
+        'createdAt': createdAt?.toIso8601String(),
       };
 
-  static Integrations fromJson(Map<String, dynamic> json) => Integrations(
-        githubToken: json['githubToken'] as String? ?? '',
-        vercelToken: json['vercelToken'] as String? ?? '',
+  static IntegrationAccount fromJson(Map<String, dynamic> json) =>
+      IntegrationAccount(
+        id: json['id'] as String? ??
+            'account-${DateTime.now().microsecondsSinceEpoch}',
+        kind: IntegrationKind.values.firstWhere(
+          (kind) => kind.name == json['kind'],
+          orElse: () => IntegrationKind.github,
+        ),
+        label: json['label'] as String? ?? '',
+        username: json['username'] as String? ?? '',
+        token: json['token'] as String? ?? '',
+        createdAt: DateTime.tryParse(json['createdAt'] as String? ?? ''),
       );
 }
 
-enum ChatRole { user, assistant, tool, error }
+class Integrations {
+  const Integrations({
+    this.accounts = const [],
+    this.activeGithubId = '',
+    this.activeVercelId = '',
+  });
+
+  final List<IntegrationAccount> accounts;
+  final String activeGithubId;
+  final String activeVercelId;
+
+  List<IntegrationAccount> ofKind(IntegrationKind kind) =>
+      accounts.where((account) => account.kind == kind).toList();
+
+  IntegrationAccount? accountById(String id) {
+    for (final account in accounts) {
+      if (account.id == id) return account;
+    }
+    return null;
+  }
+
+  IntegrationAccount? activeFor(IntegrationKind kind) {
+    final list = ofKind(kind);
+    if (list.isEmpty) return null;
+    final id = kind == IntegrationKind.github ? activeGithubId : activeVercelId;
+    return accountById(id) ?? list.first;
+  }
+
+  /// Kept for older call sites that only need to know whether an account exists.
+  String get githubToken => activeFor(IntegrationKind.github)?.token ?? '';
+  String get vercelToken => activeFor(IntegrationKind.vercel)?.token ?? '';
+
+  Integrations copyWith({
+    List<IntegrationAccount>? accounts,
+    String? activeGithubId,
+    String? activeVercelId,
+  }) =>
+      Integrations(
+        accounts: accounts ?? this.accounts,
+        activeGithubId: activeGithubId ?? this.activeGithubId,
+        activeVercelId: activeVercelId ?? this.activeVercelId,
+      );
+
+  Integrations addOrReplace(IntegrationAccount account) {
+    final next = [
+      for (final existing in accounts)
+        if (existing.id != account.id) existing,
+      account,
+    ];
+    return copyWith(
+      accounts: next,
+      activeGithubId:
+          account.kind == IntegrationKind.github ? account.id : activeGithubId,
+      activeVercelId:
+          account.kind == IntegrationKind.vercel ? account.id : activeVercelId,
+    );
+  }
+
+  Integrations remove(String id) {
+    final next = accounts.where((account) => account.id != id).toList();
+    return Integrations(
+      accounts: next,
+      activeGithubId: activeGithubId == id ? '' : activeGithubId,
+      activeVercelId: activeVercelId == id ? '' : activeVercelId,
+    );
+  }
+
+  Integrations activate(IntegrationAccount account) => copyWith(
+        activeGithubId: account.kind == IntegrationKind.github
+            ? account.id
+            : activeGithubId,
+        activeVercelId: account.kind == IntegrationKind.vercel
+            ? account.id
+            : activeVercelId,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'accounts': accounts.map((account) => account.toJson()).toList(),
+        'activeGithubId': activeGithubId,
+        'activeVercelId': activeVercelId,
+      };
+
+  static Integrations fromJson(Map<String, dynamic> json) {
+    final raw = json['accounts'];
+    if (raw is List) {
+      return Integrations(
+        accounts: [
+          for (final item in raw)
+            if (item is Map)
+              IntegrationAccount.fromJson(item.cast<String, dynamic>()),
+        ],
+        activeGithubId: json['activeGithubId'] as String? ?? '',
+        activeVercelId: json['activeVercelId'] as String? ?? '',
+      );
+    }
+    // Migration from the single-token shape. The username is filled on first
+    // test or use; the token itself is enough to authenticate.
+    final accounts = <IntegrationAccount>[];
+    final github = json['githubToken'] as String? ?? '';
+    final vercel = json['vercelToken'] as String? ?? '';
+    if (github.trim().isNotEmpty) {
+      accounts.add(IntegrationAccount(
+        id: 'github-1',
+        kind: IntegrationKind.github,
+        label: 'GitHub',
+        username: '',
+        token: github,
+      ));
+    }
+    if (vercel.trim().isNotEmpty) {
+      accounts.add(IntegrationAccount(
+        id: 'vercel-1',
+        kind: IntegrationKind.vercel,
+        label: 'Vercel',
+        username: '',
+        token: vercel,
+      ));
+    }
+    return Integrations(
+      accounts: accounts,
+      activeGithubId: accounts.isNotEmpty ? accounts.first.id : '',
+      activeVercelId: accounts.length > 1 ? accounts.last.id : '',
+    );
+  }
+}
+
+enum ChatRole { user, assistant, tool, error, note }
+
+/// A tool call that has been announced by the model but has not finished yet.
+/// The transcript shows it as a live pill with a status verb.
+class ToolDraft {
+  const ToolDraft({
+    required this.id,
+    required this.tool,
+    required this.detail,
+    this.running = true,
+  });
+
+  final String id;
+  final String tool;
+  final String detail;
+  final bool running;
+
+  ToolDraft copyWith({bool? running}) => ToolDraft(
+        id: id,
+        tool: tool,
+        detail: detail,
+        running: running ?? this.running,
+      );
+}
 
 class ChatEntry {
   const ChatEntry({
@@ -475,12 +701,12 @@ const kIndexHtml = '''<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Hello from DevNest</title>
+  <title>Hello from Praxis</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main>
-    <p class="eyebrow">DEVNEST PREVIEW</p>
+    <p class="eyebrow">PRAXIS PREVIEW</p>
     <h1>Your project runs<br />on your phone.</h1>
     <p class="lede">Edit these files in the Files tab, then refresh. The agent can change them too — ask it to.</p>
     <button id="tap">Tap me</button>
@@ -531,7 +757,7 @@ class App extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         home: Scaffold(
-          body: Center(child: Text('Hello from DevNest')),
+          body: Center(child: Text('Hello from Praxis')),
         ),
       );
 }

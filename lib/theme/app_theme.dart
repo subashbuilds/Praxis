@@ -2,21 +2,34 @@ import 'package:flutter/material.dart';
 
 import 'tokens.dart';
 
-ThemeData buildAppTheme() {
-  const scheme = ColorScheme.dark(
-    primary: Pal.ember,
-    onPrimary: Pal.onEmber,
-    secondary: Pal.mint,
-    onSecondary: Pal.onEmber,
-    surface: Pal.surface,
-    onSurface: Pal.text,
-    error: Pal.rose,
-    onError: Pal.onEmber,
-  );
+ThemeData buildAppTheme({required bool dark}) {
+  Pal.use(dark ? Brightness.dark : Brightness.light);
+  final brightness = dark ? Brightness.dark : Brightness.light;
+  final scheme = dark
+      ? ColorScheme.dark(
+          primary: Pal.ember,
+          onPrimary: Pal.onEmber,
+          secondary: Pal.mint,
+          onSecondary: Pal.onEmber,
+          surface: Pal.surface,
+          onSurface: Pal.text,
+          error: Pal.rose,
+          onError: Pal.onEmber,
+        )
+      : ColorScheme.light(
+          primary: Pal.ember,
+          onPrimary: Pal.onEmber,
+          secondary: Pal.mint,
+          onSecondary: Pal.onEmber,
+          surface: Pal.surface,
+          onSurface: Pal.text,
+          error: Pal.rose,
+          onError: Pal.onEmber,
+        );
 
   return ThemeData(
     useMaterial3: true,
-    brightness: Brightness.dark,
+    brightness: brightness,
     colorScheme: scheme,
     scaffoldBackgroundColor: Pal.canvas,
     canvasColor: Pal.canvas,
@@ -26,20 +39,20 @@ ThemeData buildAppTheme() {
     splashFactory: NoSplash.splashFactory,
     highlightColor: Colors.transparent,
     hoverColor: Pal.overlay,
-    textTheme: const TextTheme(
+    textTheme: TextTheme(
       displaySmall: Txt.headline,
       titleMedium: Txt.title,
       bodyMedium: Txt.body,
       bodySmall: Txt.meta,
       labelSmall: Txt.overline,
     ),
-    textSelectionTheme: const TextSelectionThemeData(
+    textSelectionTheme: TextSelectionThemeData(
       cursorColor: Pal.ember,
-      selectionColor: Color(0x40E4693F),
+      selectionColor: Pal.ember.withOpacity(0.22),
       selectionHandleColor: Pal.ember,
     ),
-    iconTheme: const IconThemeData(color: Pal.textMuted, size: 20),
-    appBarTheme: const AppBarTheme(
+    iconTheme: IconThemeData(color: Pal.textMuted, size: 20),
+    appBarTheme: AppBarTheme(
       backgroundColor: Pal.canvas,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
@@ -48,13 +61,13 @@ ThemeData buildAppTheme() {
       iconTheme: IconThemeData(color: Pal.text, size: 20),
       titleTextStyle: Txt.title,
     ),
-    bottomSheetTheme: const BottomSheetThemeData(
+    bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: Pal.surface,
       modalBackgroundColor: Pal.surface,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       modalElevation: 0,
-      shape: RoundedRectangleBorder(
+      shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
     ),
@@ -90,16 +103,16 @@ ThemeData buildAppTheme() {
       }),
       trackOutlineWidth: const WidgetStatePropertyAll(1),
     ),
-    progressIndicatorTheme: const ProgressIndicatorThemeData(
+    progressIndicatorTheme: ProgressIndicatorThemeData(
       color: Pal.ember,
       linearTrackColor: Pal.overlay,
       circularTrackColor: Pal.overlay,
     ),
-    scrollbarTheme: const ScrollbarThemeData(
-      thickness: WidgetStatePropertyAll(3),
-      radius: Radius.circular(3),
+    scrollbarTheme: ScrollbarThemeData(
+      thickness: const WidgetStatePropertyAll(3),
+      radius: const Radius.circular(3),
       thumbColor: WidgetStatePropertyAll(Pal.lineStrong),
-      trackColor: WidgetStatePropertyAll(Colors.transparent),
+      trackColor: const WidgetStatePropertyAll(Colors.transparent),
     ),
   );
 }

@@ -2,18 +2,18 @@ import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-/// A terminal prompt inside a rounded frame: the mark for DevNest.
+/// A terminal prompt inside a rounded frame: the mark for Praxis.
 class BrandMark extends StatelessWidget {
-  const BrandMark({super.key, this.size = 24, this.color = Pal.ember});
+  const BrandMark({super.key, this.size = 24, this.color});
 
   final double size;
-  final Color color;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
       size: Size.square(size),
-      painter: _MarkPainter(color),
+      painter: _MarkPainter(color ?? Pal.ember),
     );
   }
 }
@@ -70,7 +70,7 @@ class Wordmark extends StatelessWidget {
           const SizedBox(width: 9),
         ],
         Text(
-          'DevNest',
+          'Praxis',
           style: TextStyle(
             fontFamily: Txt.serif,
             fontSize: size * 0.95,
@@ -327,7 +327,7 @@ class EmberButton extends StatelessWidget {
           height: compact ? 40 : 52,
           padding: EdgeInsets.symmetric(horizontal: compact ? Sp.x4 : Sp.x5),
           alignment: Alignment.center,
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             color: Pal.ember,
             borderRadius: Rd.md,
           ),
@@ -336,7 +336,7 @@ class EmberButton extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               if (loading)
-                const SizedBox(
+                SizedBox(
                   width: 15,
                   height: 15,
                   child: CircularProgressIndicator(
@@ -414,8 +414,7 @@ class SheetHandle extends StatelessWidget {
         width: 36,
         height: 4,
         margin: const EdgeInsets.only(top: 10, bottom: 14),
-        decoration:
-            const BoxDecoration(color: Pal.lineStrong, borderRadius: Rd.pill),
+        decoration: BoxDecoration(color: Pal.lineStrong, borderRadius: Rd.pill),
       ),
     );
   }
@@ -460,15 +459,15 @@ InputDecoration appField(String hint, {Widget? suffix, String? label}) =>
       fillColor: Pal.raised,
       contentPadding:
           const EdgeInsets.symmetric(horizontal: Sp.x3, vertical: Sp.x3 + 2),
-      border: const OutlineInputBorder(
+      border: OutlineInputBorder(
         borderRadius: Rd.sm,
         borderSide: BorderSide(color: Pal.line),
       ),
-      enabledBorder: const OutlineInputBorder(
+      enabledBorder: OutlineInputBorder(
         borderRadius: Rd.sm,
         borderSide: BorderSide(color: Pal.line),
       ),
-      focusedBorder: const OutlineInputBorder(
+      focusedBorder: OutlineInputBorder(
         borderRadius: Rd.sm,
         borderSide: BorderSide(color: Pal.ember),
       ),

@@ -1,13 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:devnest/core/agent.dart';
-import 'package:devnest/core/ai.dart';
-import 'package:devnest/core/diff.dart';
-import 'package:devnest/core/shell.dart';
-import 'package:devnest/core/system_shell.dart';
-import 'package:devnest/core/vfs.dart';
-import 'package:devnest/models.dart';
+import 'package:praxis/core/agent.dart';
+import 'package:praxis/core/ai.dart';
+import 'package:praxis/core/diff.dart';
+import 'package:praxis/core/shell.dart';
+import 'package:praxis/core/system_shell.dart';
+import 'package:praxis/core/vfs.dart';
+import 'package:praxis/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';

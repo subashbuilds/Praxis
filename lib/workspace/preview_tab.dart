@@ -4,7 +4,6 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
-import '../widgets/project_actions.dart';
 import '../widgets/ui.dart';
 
 class PreviewTab extends StatefulWidget {
@@ -68,12 +67,7 @@ class _PreviewTabState extends State<PreviewTab> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        ProjectActionsBar(project: widget.project),
-        Expanded(child: _body()),
-      ],
-    );
+    return _body();
   }
 
   Widget _body() {
@@ -106,7 +100,7 @@ class _PreviewTabState extends State<PreviewTab> {
             onTap: _createIndex,
           ),
           const SizedBox(height: Sp.x3),
-          const Text(
+          Text(
             'Preview renders files from this device. Nothing is uploaded.',
             style: Txt.meta,
           ),
@@ -118,12 +112,12 @@ class _PreviewTabState extends State<PreviewTab> {
       children: [
         Container(
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: Pal.line)),
           ),
           child: Row(
             children: [
-              const Icon(Icons.lock_outline_rounded, size: 13, color: Pal.mint),
+              Icon(Icons.lock_outline_rounded, size: 13, color: Pal.mint),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(

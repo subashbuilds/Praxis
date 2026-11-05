@@ -140,6 +140,10 @@ class Agent {
     required this.skills,
     required this.onEvent,
     this.onProviderLimit,
+    this.onTextDelta,
+    this.onThinkingDelta,
+    this.onToolStart,
+    this.onReply,
     this.maxRounds = 6,
   });
 
@@ -150,6 +154,10 @@ class Agent {
   final List<Skill> skills;
   final void Function(AgentEvent event) onEvent;
   final ProviderLimitHandler? onProviderLimit;
+  final void Function(String delta)? onTextDelta;
+  final void Function(String delta)? onThinkingDelta;
+  final void Function(AiToolCall call)? onToolStart;
+  final void Function(AiReply reply, ProviderConfig provider)? onReply;
   final int maxRounds;
 
   Future<void> run({
@@ -168,12 +176,15 @@ class Agent {
       var switches = 0;
       while (true) {
         try {
-          reply = await client.complete(
+          reply = await client.stream(
             provider: current,
             system: system,
             turns: turns,
             tools: kAgentTools,
+            onText: onTextDelta,
+            onThinking: onThinkingDelta,
           );
+          onReply?.call(reply, current);
           break;
         } on AiProviderException catch (error) {
           final handler = onProviderLimit;
@@ -202,6 +213,7 @@ class Agent {
       }
       for (final call in reply.calls) {
         if (isCancelled?.call() ?? false) return;
+        onToolStart?.call(call);
         final result = await _execute(call);
         onEvent(AgentEvent.tool(
           tool: call.name,
@@ -226,7 +238,7 @@ class Agent {
         .map((skill) => '- ${skill.name}: ${skill.instructions.trim()}')
         .join('\n');
     return '''
-You are DevNest, an AI coding agent running on the user's Android phone.
+You are Praxis, an AI coding agent running on the user's Android phone.
 You work on a real project folder on the device. The user sees your replies,
 your reasoning behind a collapsed pill, and every tool call with its diff in a
 chat next to the code, a terminal and a live preview.

@@ -1,4 +1,7 @@
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:archive/archive.dart';
 
 class FsError implements Exception {
   FsError(this.message);
@@ -91,6 +94,30 @@ class ProjectFs {
     await file.parent.create(recursive: true);
     await file.writeAsString(content);
     return content.length;
+  }
+
+  Future<int> writeBytes(String path, List<int> bytes) async {
+    final rel = normalize(path);
+    if (rel.isEmpty) throw FsError('Not a file: /');
+    final file = File(absolute(rel));
+    await file.parent.create(recursive: true);
+    await file.writeAsBytes(bytes);
+    return bytes.length;
+  }
+
+  /// Everything the user can see, including binary assets, as a ZIP. Hidden
+  /// app state (`.praxis`) is intentionally excluded.
+  Future<Uint8List> zipBytes() async {
+    final entries = await list();
+    final archive = Archive();
+    for (final entry in entries) {
+      if (entry.isDir) continue;
+      final bytes = await File(absolute(entry.path)).readAsBytes();
+      archive.addFile(ArchiveFile(entry.path, bytes.length, bytes));
+    }
+    final encoded = ZipEncoder().encode(archive);
+    if (encoded == null) throw FsError('Could not build the archive');
+    return Uint8List.fromList(encoded);
   }
 
   Future<void> createDir(String path) async {

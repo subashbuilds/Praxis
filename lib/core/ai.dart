@@ -49,11 +49,19 @@ class AiToolSpec {
   final Map<String, dynamic> parameters;
 }
 
+class AiUsage {
+  const AiUsage({this.promptTokens = 0, this.completionTokens = 0});
+  final int promptTokens;
+  final int completionTokens;
+  int get total => promptTokens + completionTokens;
+}
+
 class AiReply {
   const AiReply({
     required this.text,
     required this.calls,
     this.thinking = '',
+    this.usage,
   });
   final String text;
   final List<AiToolCall> calls;
@@ -61,7 +69,10 @@ class AiReply {
   /// Reasoning returned by models that expose it (deepseek-reasoner,
   /// OpenRouter reasoning models, Anthropic thinking blocks).
   final String thinking;
+  final AiUsage? usage;
 }
+
+typedef AiDelta = void Function(String delta);
 
 class AiClient {
   AiClient({http.Client? client}) : _client = client ?? http.Client();
@@ -75,26 +86,7 @@ class AiClient {
     required List<AiToolSpec> tools,
     int maxTokens = 2048,
   }) async {
-    if (!provider.ready) {
-      throw AiProviderException(
-        'No API key saved for ${provider.name}. Open Settings → Models and add one.',
-        status: 401,
-      );
-    }
-    if (provider.baseUrl.trim().isEmpty) {
-      throw AiProviderException(
-        'No base URL for ${provider.name}. Set one in Settings → Models.',
-      );
-    }
-    final base = provider.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
-    final path = provider.flavor == ApiFlavor.anthropic
-        ? '/messages'
-        : '/chat/completions';
-    final uri = Uri.tryParse('$base$path');
-    if (uri == null || !uri.hasScheme) {
-      throw AiProviderException('Invalid base URL: ${provider.baseUrl}');
-    }
-
+    final uri = _uriFor(provider);
     final http.Response response;
     try {
       response = await (provider.flavor == ApiFlavor.anthropic
@@ -128,6 +120,319 @@ class AiClient {
         : _parseOpenAi(body);
   }
 
+  /// Streams a completion. Text and reasoning arrive as they are produced;
+  /// tool calls are assembled from their JSON fragments. Providers that answer
+  /// with a plain JSON body are still supported.
+  Future<AiReply> stream({
+    required ProviderConfig provider,
+    required String system,
+    required List<AiTurn> turns,
+    required List<AiToolSpec> tools,
+    int maxTokens = 2048,
+    AiDelta? onText,
+    AiDelta? onThinking,
+  }) async {
+    final uri = _uriFor(provider);
+    final request = http.Request('POST', uri);
+    request.headers.addAll(_headers(provider));
+    request.body = jsonEncode(provider.flavor == ApiFlavor.anthropic
+        ? _anthropicPayload(provider, system, turns, tools, maxTokens,
+            stream: true)
+        : _openAiPayload(provider, system, turns, tools, maxTokens,
+            stream: true));
+
+    http.StreamedResponse response;
+    try {
+      response =
+          await _client.send(request).timeout(const Duration(seconds: 45));
+    } on TimeoutException {
+      throw AiProviderException(
+          '${provider.name} did not start answering within 45s.');
+    } on http.ClientException catch (error) {
+      throw AiProviderException(
+          'Network error talking to ${provider.name}: ${error.message}');
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final body = await response.stream.bytesToString();
+      throw _failureFrom(provider, response.statusCode, body);
+    }
+
+    final contentType = response.headers['content-type'] ?? '';
+    if (!contentType.toLowerCase().contains('text/event-stream')) {
+      final body = await response.stream.bytesToString();
+      if (body.trimLeft().startsWith('data:')) {
+        final reply = provider.flavor == ApiFlavor.anthropic
+            ? await _consumeAnthropic(
+                const Stream<String>.empty().cast<String>(),
+                onText,
+                onThinking,
+                seeded: body,
+              )
+            : await _consumeOpenAi(
+                const Stream<String>.empty().cast<String>(),
+                onText,
+                onThinking,
+                seeded: body,
+              );
+        return reply;
+      }
+      Map<String, dynamic> json;
+      try {
+        json = jsonDecode(body) as Map<String, dynamic>;
+      } catch (_) {
+        throw AiProviderException(
+            '${provider.name} returned an unreadable response.');
+      }
+      final reply = provider.flavor == ApiFlavor.anthropic
+          ? _parseAnthropic(json)
+          : _parseOpenAi(json);
+      if (reply.text.isNotEmpty) onText?.call(reply.text);
+      if (reply.thinking.isNotEmpty) onThinking?.call(reply.thinking);
+      return reply;
+    }
+
+    final lines = response.stream
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .timeout(const Duration(seconds: 60));
+    try {
+      return provider.flavor == ApiFlavor.anthropic
+          ? await _consumeAnthropic(lines, onText, onThinking)
+          : await _consumeOpenAi(lines, onText, onThinking);
+    } on TimeoutException {
+      throw AiProviderException(
+          '${provider.name} stalled mid-response. Try again.');
+    }
+  }
+
+  /// Parses an already-buffered SSE body (used when a proxy omits the content
+  /// type). Both consumers accept a seeded string for this case.
+  Future<AiReply> _consumeOpenAi(
+    Stream<String> lines,
+    AiDelta? onText,
+    AiDelta? onThinking, {
+    String? seeded,
+  }) async {
+    final text = StringBuffer();
+    final thinking = StringBuffer();
+    final calls = <int, _CallBuilder>{};
+    AiUsage? usage;
+
+    Future<void> consume(String line) async {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      final data = trimmed.substring(5).trim();
+      if (data.isEmpty || data == '[DONE]') return;
+      Map<String, dynamic> json;
+      try {
+        json = jsonDecode(data) as Map<String, dynamic>;
+      } catch (_) {
+        return;
+      }
+      if (json['error'] is Map) {
+        final message =
+            (json['error'] as Map)['message']?.toString() ?? 'Provider error';
+        throw AiProviderException(message);
+      }
+      final rawUsage = json['usage'];
+      if (rawUsage is Map) {
+        usage = _usageFrom(rawUsage) ?? usage;
+      }
+      final choices = json['choices'];
+      if (choices is! List || choices.isEmpty) return;
+      final choice = choices.first;
+      if (choice is! Map) return;
+      final delta = choice['delta'] ?? choice['message'];
+      if (delta is! Map) return;
+      final content = delta['content'];
+      if (content is String && content.isNotEmpty) {
+        text.write(content);
+        onText?.call(content);
+      }
+      final reasoning = delta['reasoning_content'] ?? delta['reasoning'];
+      if (reasoning is String && reasoning.isNotEmpty) {
+        thinking.write(reasoning);
+        onThinking?.call(reasoning);
+      }
+      final rawCalls = delta['tool_calls'];
+      if (rawCalls is List) {
+        for (var position = 0; position < rawCalls.length; position++) {
+          final raw = rawCalls[position];
+          if (raw is! Map) continue;
+          final index = (raw['index'] as int?) ?? position;
+          final builder = calls.putIfAbsent(index, _CallBuilder.new);
+          if (raw['id'] is String) builder.id = raw['id'] as String;
+          final function = raw['function'];
+          if (function is Map) {
+            if (function['name'] is String) {
+              builder.name = function['name'] as String;
+            }
+            final args = function['arguments'];
+            if (args is String) builder.arguments.write(args);
+          }
+        }
+      }
+    }
+
+    if (seeded != null) {
+      for (final line in const LineSplitter().convert(seeded)) {
+        await consume(line);
+      }
+    }
+    await for (final line in lines) {
+      await consume(line);
+    }
+
+    final parsedCalls = <AiToolCall>[];
+    for (final entry in (calls.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key)))) {
+      final call = entry.value;
+      if (call.name.isEmpty) continue;
+      parsedCalls.add(AiToolCall(
+        id: call.id.isEmpty ? 'call_${entry.key}' : call.id,
+        name: call.name,
+        arguments: _arguments(call.arguments.toString()),
+      ));
+    }
+    return AiReply(
+      text: text.toString().trim(),
+      calls: parsedCalls,
+      thinking: thinking.toString().trim(),
+      usage: usage,
+    );
+  }
+
+  Future<AiReply> _consumeAnthropic(
+    Stream<String> lines,
+    AiDelta? onText,
+    AiDelta? onThinking, {
+    String? seeded,
+  }) async {
+    final text = StringBuffer();
+    final thinking = StringBuffer();
+    final blocks = <int, _CallBuilder>{};
+    var promptTokens = 0;
+    var completionTokens = 0;
+
+    Future<void> consume(String line) async {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      final data = trimmed.substring(5).trim();
+      if (data.isEmpty || data == '[DONE]') return;
+      Map<String, dynamic> json;
+      try {
+        json = jsonDecode(data) as Map<String, dynamic>;
+      } catch (_) {
+        return;
+      }
+      final type = json['type'] as String? ?? '';
+      switch (type) {
+        case 'message_start':
+          final message = json['message'];
+          if (message is Map) {
+            final usage = message['usage'];
+            if (usage is Map) {
+              promptTokens = usage['input_tokens'] as int? ?? promptTokens;
+            }
+          }
+        case 'content_block_start':
+          final index = json['index'] as int? ?? 0;
+          final block = json['content_block'];
+          if (block is Map && block['type'] == 'tool_use') {
+            blocks[index] = _CallBuilder()
+              ..id = block['id'] as String? ?? ''
+              ..name = block['name'] as String? ?? '';
+          }
+        case 'content_block_delta':
+          final index = json['index'] as int? ?? 0;
+          final delta = json['delta'];
+          if (delta is! Map) return;
+          if (delta['type'] == 'text_delta') {
+            final value = delta['text'] as String? ?? '';
+            if (value.isNotEmpty) {
+              text.write(value);
+              onText?.call(value);
+            }
+          } else if (delta['type'] == 'thinking_delta') {
+            final value = delta['thinking'] as String? ?? '';
+            if (value.isNotEmpty) {
+              thinking.write(value);
+              onThinking?.call(value);
+            }
+          } else if (delta['type'] == 'input_json_delta') {
+            final value = delta['partial_json'] as String? ?? '';
+            blocks.putIfAbsent(index, _CallBuilder.new).arguments.write(value);
+          }
+        case 'message_delta':
+          final usage = json['usage'];
+          if (usage is Map) {
+            completionTokens =
+                usage['output_tokens'] as int? ?? completionTokens;
+          }
+        case 'error':
+          final error = json['error'];
+          throw AiProviderException(
+              error is Map ? '${error['message']}' : 'Provider error');
+      }
+    }
+
+    if (seeded != null) {
+      for (final line in const LineSplitter().convert(seeded)) {
+        await consume(line);
+      }
+    }
+    await for (final line in lines) {
+      await consume(line);
+    }
+
+    final calls = <AiToolCall>[];
+    for (final entry in (blocks.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key)))) {
+      final call = entry.value;
+      if (call.name.isEmpty) continue;
+      calls.add(AiToolCall(
+        id: call.id.isEmpty ? 'tool_${entry.key}' : call.id,
+        name: call.name,
+        arguments: _arguments(call.arguments.toString()),
+      ));
+    }
+    return AiReply(
+      text: text.toString().trim(),
+      calls: calls,
+      thinking: thinking.toString().trim(),
+      usage: (promptTokens == 0 && completionTokens == 0)
+          ? null
+          : AiUsage(
+              promptTokens: promptTokens,
+              completionTokens: completionTokens,
+            ),
+    );
+  }
+
+  Uri _uriFor(ProviderConfig provider) {
+    if (!provider.ready) {
+      throw AiProviderException(
+        'No API key saved for ${provider.name}. Open Settings → Providers and add one.',
+        status: 401,
+      );
+    }
+    if (provider.baseUrl.trim().isEmpty) {
+      throw AiProviderException(
+        'No base URL for ${provider.name}. Set one in Settings → Providers.',
+      );
+    }
+    final base = provider.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final path = provider.flavor == ApiFlavor.anthropic
+        ? '/messages'
+        : '/chat/completions';
+    final uri = Uri.tryParse('$base$path');
+    if (uri == null || !uri.hasScheme) {
+      throw AiProviderException('Invalid base URL: ${provider.baseUrl}');
+    }
+    return uri;
+  }
+
   /// Lists the models the provider exposes to this key. Used by the provider
   /// form so the user can keep only the models they want.
   Future<List<String>> listModels(ProviderConfig provider) async {
@@ -144,18 +449,9 @@ class AiClient {
     }
     final http.Response response;
     try {
-      response = await _client.get(
-        uri,
-        headers: {
-          if (provider.flavor == ApiFlavor.anthropic)
-            'x-api-key': provider.apiKey,
-          if (provider.flavor == ApiFlavor.anthropic)
-            'anthropic-version': '2023-06-01',
-          if (provider.flavor != ApiFlavor.anthropic)
-            'Authorization': 'Bearer ${provider.apiKey}',
-          'Accept': 'application/json',
-        },
-      ).timeout(const Duration(seconds: 30));
+      response = await _client
+          .get(uri, headers: _headers(provider))
+          .timeout(const Duration(seconds: 30));
     } on TimeoutException {
       throw AiProviderException(
         '${provider.name} did not answer the model list within 30s.',
@@ -207,6 +503,19 @@ class AiClient {
     return sorted;
   }
 
+  Map<String, String> _headers(ProviderConfig provider) => {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream, application/json',
+        if (provider.flavor == ApiFlavor.anthropic)
+          'x-api-key': provider.apiKey,
+        if (provider.flavor == ApiFlavor.anthropic)
+          'anthropic-version': '2023-06-01',
+        if (provider.flavor != ApiFlavor.anthropic)
+          'Authorization': 'Bearer ${provider.apiKey}',
+        if (provider.id == 'openrouter') 'HTTP-Referer': 'https://praxis.app',
+        if (provider.id == 'openrouter') 'X-Title': 'Praxis',
+      };
+
   Future<http.Response> _openAiRequest(
     Uri uri,
     ProviderConfig provider,
@@ -214,37 +523,45 @@ class AiClient {
     List<AiTurn> turns,
     List<AiToolSpec> tools,
     int maxTokens,
-  ) {
+  ) =>
+      _client.post(
+        uri,
+        headers: _headers(provider),
+        body: jsonEncode(
+            _openAiPayload(provider, system, turns, tools, maxTokens)),
+      );
+
+  Map<String, dynamic> _openAiPayload(
+    ProviderConfig provider,
+    String system,
+    List<AiTurn> turns,
+    List<AiToolSpec> tools,
+    int maxTokens, {
+    bool stream = false,
+  }) {
     final messages = <Map<String, dynamic>>[
       {'role': 'system', 'content': system},
       for (final turn in turns) _openAiTurn(turn),
     ];
-    return _client.post(
-      uri,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ${provider.apiKey}',
-        if (provider.id == 'openrouter') 'HTTP-Referer': 'https://devnest.app',
-        if (provider.id == 'openrouter') 'X-Title': 'DevNest',
-      },
-      body: jsonEncode({
-        'model': provider.model,
-        'max_tokens': maxTokens,
-        'temperature': 0.2,
-        'messages': messages,
-        'tools': tools
-            .map((tool) => {
-                  'type': 'function',
-                  'function': {
-                    'name': tool.name,
-                    'description': tool.description,
-                    'parameters': tool.parameters,
-                  },
-                })
-            .toList(),
-        'tool_choice': 'auto',
-      }),
-    );
+    return {
+      'model': provider.model,
+      'max_tokens': maxTokens,
+      'temperature': 0.2,
+      'messages': messages,
+      'tools': tools
+          .map((tool) => {
+                'type': 'function',
+                'function': {
+                  'name': tool.name,
+                  'description': tool.description,
+                  'parameters': tool.parameters,
+                },
+              })
+          .toList(),
+      'tool_choice': 'auto',
+      if (stream) 'stream': true,
+      if (stream) 'stream_options': {'include_usage': true},
+    };
   }
 
   Map<String, dynamic> _openAiTurn(AiTurn turn) {
@@ -283,7 +600,22 @@ class AiClient {
     List<AiTurn> turns,
     List<AiToolSpec> tools,
     int maxTokens,
-  ) {
+  ) =>
+      _client.post(
+        uri,
+        headers: _headers(provider),
+        body: jsonEncode(
+            _anthropicPayload(provider, system, turns, tools, maxTokens)),
+      );
+
+  Map<String, dynamic> _anthropicPayload(
+    ProviderConfig provider,
+    String system,
+    List<AiTurn> turns,
+    List<AiToolSpec> tools,
+    int maxTokens, {
+    bool stream = false,
+  }) {
     final messages = <Map<String, dynamic>>[];
     for (final turn in turns) {
       if (turn.role == 'tool') {
@@ -299,7 +631,7 @@ class AiClient {
         } else {
           messages.add({
             'role': 'user',
-            'content': [block]
+            'content': [block],
           });
         }
         continue;
@@ -326,28 +658,20 @@ class AiClient {
         ],
       });
     }
-
-    return _client.post(
-      uri,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': provider.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: jsonEncode({
-        'model': provider.model,
-        'max_tokens': maxTokens,
-        'system': system,
-        'messages': messages,
-        'tools': tools
-            .map((tool) => {
-                  'name': tool.name,
-                  'description': tool.description,
-                  'input_schema': tool.parameters,
-                })
-            .toList(),
-      }),
-    );
+    return {
+      'model': provider.model,
+      'max_tokens': maxTokens,
+      'system': system,
+      'messages': messages,
+      'tools': tools
+          .map((tool) => {
+                'name': tool.name,
+                'description': tool.description,
+                'input_schema': tool.parameters,
+              })
+          .toList(),
+      if (stream) 'stream': true,
+    };
   }
 
   AiReply _parseOpenAi(Map<String, dynamic> body) {
@@ -370,7 +694,12 @@ class AiClient {
         arguments: _arguments(function['arguments']),
       ));
     }
-    return AiReply(text: text, calls: calls, thinking: thinking);
+    return AiReply(
+      text: text,
+      calls: calls,
+      thinking: thinking,
+      usage: _usageFrom(body['usage']),
+    );
   }
 
   AiReply _parseAnthropic(Map<String, dynamic> body) {
@@ -393,10 +722,31 @@ class AiClient {
         ));
       }
     }
+    final usage = body['usage'];
+    int prompt = 0;
+    int completion = 0;
+    if (usage is Map) {
+      prompt = usage['input_tokens'] as int? ?? 0;
+      completion = usage['output_tokens'] as int? ?? 0;
+    }
     return AiReply(
       text: buffer.toString().trim(),
       calls: calls,
       thinking: reason.toString().trim(),
+      usage: (prompt == 0 && completion == 0)
+          ? null
+          : AiUsage(promptTokens: prompt, completionTokens: completion),
+    );
+  }
+
+  AiUsage? _usageFrom(Object? raw) {
+    if (raw is! Map) return null;
+    final prompt = raw['prompt_tokens'] ?? raw['input_tokens'];
+    final completion = raw['completion_tokens'] ?? raw['output_tokens'];
+    if (prompt is! int && completion is! int) return null;
+    return AiUsage(
+      promptTokens: prompt is int ? prompt : 0,
+      completionTokens: completion is int ? completion : 0,
     );
   }
 
@@ -414,42 +764,50 @@ class AiClient {
   }
 
   AiProviderException _failure(
-      ProviderConfig provider, http.Response response) {
+          ProviderConfig provider, http.Response response) =>
+      _failureFrom(provider, response.statusCode, response.body);
+
+  AiProviderException _failureFrom(
+      ProviderConfig provider, int status, String body) {
     var detail = '';
     try {
-      final body = jsonDecode(response.body);
-      if (body is Map) {
-        final error = body['error'];
+      final decoded = jsonDecode(body);
+      if (decoded is Map) {
+        final error = decoded['error'];
         if (error is Map && error['message'] is String) {
           detail = error['message'] as String;
         } else if (error is String) {
           detail = error;
-        } else if (body['message'] is String) {
-          detail = body['message'] as String;
+        } else if (decoded['message'] is String) {
+          detail = decoded['message'] as String;
         }
       }
     } catch (_) {
-      detail = response.body.length > 300
-          ? response.body.substring(0, 300)
-          : response.body;
+      detail = body.length > 300 ? body.substring(0, 300) : body;
     }
 
-    final hint = switch (response.statusCode) {
+    final hint = switch (status) {
       401 ||
       403 =>
-        'API key rejected by ${provider.name}. Check the key in Settings → Models.',
+        'API key rejected by ${provider.name}. Check the key in Settings → Providers.',
       402 =>
         '${provider.name} says the account is out of credit. Add credit or switch provider.',
       404 =>
         'Endpoint or model not found. Check the base URL and model name for ${provider.name}.',
       429 =>
-        'Rate limited by ${provider.name}. If another key is saved, DevNest can switch to it.',
+        'Rate limited by ${provider.name}. If another key is saved, Praxis can switch to it.',
       400 => '${provider.name} rejected the request.',
-      _ => '${provider.name} failed with HTTP ${response.statusCode}.',
+      _ => '${provider.name} failed with HTTP $status.',
     };
     return AiProviderException(
       detail.isEmpty ? hint : '$hint\n$detail',
-      status: response.statusCode,
+      status: status,
     );
   }
+}
+
+class _CallBuilder {
+  String id = '';
+  String name = '';
+  final StringBuffer arguments = StringBuffer();
 }

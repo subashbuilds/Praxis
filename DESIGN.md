@@ -1,4 +1,4 @@
-# DevNest — design notes
+# Praxis — design notes
 
 The interface is a tool, not a landing page: warm graphite, one ember accent,
 hairlines instead of shadows, and type that distinguishes people from machines.

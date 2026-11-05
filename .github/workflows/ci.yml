@@ -100,7 +100,7 @@ jobs:
           APK=build/app/outputs/flutter-apk/app-release.apk
           ls -lh "$APK"
           {
-            echo "### DevNest release APK"
+            echo "### Praxis release APK"
             echo ""
             echo "| | |"
             echo "|---|---|"

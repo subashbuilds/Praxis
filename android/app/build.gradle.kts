@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.subash.devnest"
+    namespace = "com.subash.praxis"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
@@ -19,11 +19,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.subash.devnest"
+        applicationId = "com.subash.praxis"
         minSdk = 24
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "2.0.0"
     }
 
     buildTypes {

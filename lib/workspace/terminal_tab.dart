@@ -120,12 +120,12 @@ class _TerminalTabState extends State<TerminalTab> {
           Container(
             padding:
                 const EdgeInsets.fromLTRB(Sp.x4, Sp.x2 + 2, Sp.x2, Sp.x2 + 2),
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               border: Border(bottom: BorderSide(color: Pal.line)),
             ),
             child: Row(
               children: [
-                const StatusPill('device sh', color: Pal.mint),
+                StatusPill('device sh', color: Pal.mint),
                 const SizedBox(width: Sp.x2),
                 Expanded(
                   child: Text(
@@ -187,7 +187,7 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
           ),
           Container(
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               border: Border(top: BorderSide(color: Pal.line)),
             ),
             padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x1, Sp.x2, Sp.x2),

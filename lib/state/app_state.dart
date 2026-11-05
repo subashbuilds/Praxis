@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
@@ -8,15 +9,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/agent.dart';
 import '../core/ai.dart';
+import '../core/diff.dart';
 import '../core/integrations.dart';
+import '../core/model_info.dart';
+import '../core/push_state.dart';
+import '../core/repo_clone.dart';
 import '../core/shell.dart';
 import '../core/store.dart';
 import '../core/system_shell.dart';
+import '../core/usage.dart';
 import '../core/vfs.dart';
 import '../models.dart';
 
-/// The UI supplies this so the agent can stop mid-run and ask whether it may
-/// move to another saved key or another provider.
+/// The UI supplies this so the agent can ask before moving to another key or
+/// provider. With the automatic switches on, the same code path runs silently.
 typedef LimitPrompt = Future<bool> Function(
   String title,
   String body,
@@ -31,14 +37,16 @@ class AppState extends ChangeNotifier {
     this.seedWelcome = true,
   }) : httpClient = httpClient ?? http.Client();
 
-  static const _kProviders = 'devnest.providers';
-  static const _kSkills = 'devnest.skills';
-  static const _kIntegrations = 'devnest.integrations';
-  static const _kActiveProvider = 'devnest.activeProvider';
-  static const _kWordWrap = 'devnest.wrap';
-  static const _kAutoNextKey = 'devnest.autoNextKey';
-  static const _kAutoNextProvider = 'devnest.autoNextProvider';
-  static const _kChatPrefix = 'devnest.chat.';
+  static const _kProviders = 'praxis.providers';
+  static const _kSkills = 'praxis.skills';
+  static const _kIntegrations = 'praxis.integrations';
+  static const _kActiveProvider = 'praxis.activeProvider';
+  static const _kWordWrap = 'praxis.wrap';
+  static const _kAutoNextKey = 'praxis.autoNextKey';
+  static const _kAutoNextProvider = 'praxis.autoNextProvider';
+  static const _kDarkMode = 'praxis.darkMode';
+  static const _kUsage = 'praxis.usage';
+  static const _kChatPrefix = 'praxis.chat.';
 
   final Directory root;
   final KVStore store;
@@ -46,10 +54,12 @@ class AppState extends ChangeNotifier {
   final bool seedWelcome;
 
   late final AiClient ai = AiClient(client: httpClient);
+  late final RepoCloneService repoClone = RepoCloneService(client: httpClient);
 
   final List<Project> projects = [];
   final List<ProviderConfig> providers = [];
   final List<Skill> skills = [];
+  final List<UsageEvent> usageEvents = [];
 
   Integrations integrations = const Integrations();
   String activeProviderId = '';
@@ -57,6 +67,13 @@ class AppState extends ChangeNotifier {
   bool wordWrap = false;
   bool autoNextKey = false;
   bool autoNextProvider = false;
+  bool darkMode = true;
+
+  /// Live stream while the agent is answering. Cleared when a final transcript
+  /// entry lands or the run ends.
+  String liveText = '';
+  String liveThinking = '';
+  final List<ToolDraft> liveTools = [];
 
   /// Set by the agent tab while it is on screen. Without it a limit stops the
   /// run instead of guessing.
@@ -64,21 +81,33 @@ class AppState extends ChangeNotifier {
 
   bool _cancelled = false;
   int _entrySeq = 0;
+  UsageEvent? _lastUsage;
 
   final Map<String, List<ChatEntry>> _threads = {};
   final Map<String, ProjectFs> _fs = {};
   final Map<String, Shell> _shells = {};
   final Map<String, SystemShell> _systemShells = {};
+  final Map<String, PushState> _pushStates = {};
 
   bool _ready = false;
   bool get ready => _ready;
 
   List<ProviderConfig> get configuredProviders =>
-      providers.where((provider) => provider.ready).toList();
+      providers.where((provider) => provider.isConfigured).toList();
+
+  UsageStats get usage => UsageStats(usageEvents);
+  UsageEvent? get lastUsage => _lastUsage;
+  IntegrationAccount? get activeGithub =>
+      integrations.activeFor(IntegrationKind.github);
+  IntegrationAccount? get activeVercel =>
+      integrations.activeFor(IntegrationKind.vercel);
+
+  bool get hasLiveReply =>
+      liveText.isNotEmpty || liveThinking.isNotEmpty || liveTools.isNotEmpty;
 
   static Future<AppState> bootstrap() async {
     final directory = await getApplicationDocumentsDirectory();
-    final root = Directory('${directory.path}/devnest');
+    final root = Directory('${directory.path}/praxis');
     final prefs = await SharedPreferences.getInstance();
     final state = AppState(root: root, store: PrefsStore(prefs));
     await state.init();
@@ -107,12 +136,14 @@ class AppState extends ChangeNotifier {
     _loadProviders();
     _loadSkills();
     _loadIntegrations();
+    _loadUsage();
     wordWrap = store.read(_kWordWrap) == 'true';
     autoNextKey = store.read(_kAutoNextKey) == 'true';
     autoNextProvider = store.read(_kAutoNextProvider) == 'true';
+    darkMode = store.read(_kDarkMode) != 'false';
 
     if (projects.isEmpty && seedWelcome) {
-      await createProject('hello-dev', ProjectKind.web, persistChat: false);
+      await createProject('hello-praxis', ProjectKind.web, persistChat: false);
     }
     _ready = true;
     notifyListeners();
@@ -142,6 +173,8 @@ class AppState extends ChangeNotifier {
     String name,
     ProjectKind kind, {
     bool persistChat = true,
+    String repo = '',
+    String branch = 'main',
   }) async {
     final slug = _slug(name);
     final id =
@@ -153,18 +186,79 @@ class AppState extends ChangeNotifier {
       name: name.trim().isEmpty ? slug : name.trim(),
       kind: kind,
       createdAt: DateTime.now(),
+      repo: repo,
+      branch: branch,
     );
-    await File('${dir.path}/.project.json')
-        .writeAsString(jsonEncode(project.toJson()));
     final fs = ProjectFs(dir);
     for (final file in kind.scaffold) {
       await fs.write(file.key, file.value);
     }
+    await _writeProjectMeta(dir, project);
     projects.insert(0, project);
     if (persistChat) await _persistChat(project.id);
     notifyListeners();
     return project;
   }
+
+  /// Downloads a GitHub branch archive, writes it into a real project folder
+  /// and records the repo/branch metadata. No git binary is needed.
+  Future<Project> cloneProject({
+    required String name,
+    required String repoUrl,
+    required String branch,
+    String token = '',
+  }) async {
+    final ref = RepoRef.parse(repoUrl);
+    if (ref == null) {
+      throw RepoCloneException(
+          'Use a GitHub repository such as owner/repo or https://github.com/owner/repo.');
+    }
+    final cloned = await repoClone.clone(
+      repo: ref,
+      branch: branch,
+      token: token,
+    );
+    final slug = _slug(name.trim().isEmpty ? ref.name : name);
+    final id =
+        '$slug-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+    final dir = Directory('${root.path}/projects/$id');
+    await dir.create(recursive: true);
+    final fs = ProjectFs(dir);
+    try {
+      for (final entry in cloned.files.entries) {
+        await fs.writeBytes(entry.key, entry.value);
+      }
+      ProjectKind kind = ProjectKind.blank;
+      if (await fs.exists('pubspec.yaml')) {
+        kind = ProjectKind.flutter;
+      } else if (await fs.exists('index.html') ||
+          cloned.files.keys.any((path) => path.endsWith('.html'))) {
+        kind = ProjectKind.web;
+      } else if (cloned.files.keys.any((path) => path.endsWith('.py'))) {
+        kind = ProjectKind.python;
+      }
+      final project = Project(
+        id: id,
+        name: name.trim().isEmpty ? ref.name : name.trim(),
+        kind: kind,
+        createdAt: DateTime.now(),
+        repo: ref.slug,
+        branch: cloned.branch,
+      );
+      await _writeProjectMeta(dir, project);
+      projects.insert(0, project);
+      notifyListeners();
+      return project;
+    } catch (error) {
+      if (await dir.exists()) await dir.delete(recursive: true);
+      if (error is RepoCloneException) rethrow;
+      throw RepoCloneException('Could not create the project: $error');
+    }
+  }
+
+  Future<void> _writeProjectMeta(Directory dir, Project project) =>
+      File('${dir.path}/.project.json')
+          .writeAsString(jsonEncode(project.toJson()));
 
   Future<void> deleteProject(Project project) async {
     final dir = Directory('${root.path}/projects/${project.id}');
@@ -174,8 +268,24 @@ class AppState extends ChangeNotifier {
     _fs.remove(project.id);
     _shells.remove(project.id);
     _systemShells.remove(project.id);
+    _pushStates.remove(project.id);
     await store.remove('$_kChatPrefix${project.id}');
     notifyListeners();
+  }
+
+  /// Updates the branch/repo recorded in project metadata.
+  Future<Project> updateProjectGit(
+    Project project, {
+    String? repo,
+    String? branch,
+  }) async {
+    final next = project.copyWith(repo: repo, branch: branch);
+    final index = projects.indexWhere((item) => item.id == project.id);
+    if (index >= 0) projects[index] = next;
+    await _writeProjectMeta(
+        Directory('${root.path}/projects/${project.id}'), next);
+    notifyListeners();
+    return next;
   }
 
   Future<List<FileEntry>> filesOf(Project project) => fsFor(project).list();
@@ -204,8 +314,6 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Absolute path of the file the preview should load, or null for a project
-  /// that has no HTML entry point.
   Future<String?> previewFile(Project project) async {
     final fs = fsFor(project);
     if (await fs.exists('index.html')) return fs.absolute('index.html');
@@ -218,6 +326,8 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
+  Future<Uint8List> exportZip(Project project) => fsFor(project).zipBytes();
+
   static String _slug(String name) {
     final base = name
         .trim()
@@ -229,8 +339,6 @@ class AppState extends ChangeNotifier {
 
   // ------------------------------------------------------------- attachments
 
-  /// Copies picked files into `attachments/` inside the project and returns
-  /// their project-relative paths for the message and the agent prompt.
   Future<List<String>> attachFiles(Project project, List<String> paths) async {
     final fs = fsFor(project);
     final saved = <String>[];
@@ -277,7 +385,7 @@ class AppState extends ChangeNotifier {
     final thread = _threads[projectId];
     if (thread == null) return;
     final trimmed =
-        thread.length > 120 ? thread.sublist(thread.length - 120) : thread;
+        thread.length > 140 ? thread.sublist(thread.length - 140) : thread;
     await store.write(
       '$_kChatPrefix$projectId',
       jsonEncode(trimmed.map((entry) => entry.toJson()).toList()),
@@ -286,6 +394,48 @@ class AppState extends ChangeNotifier {
 
   String _nextId() =>
       'e${DateTime.now().microsecondsSinceEpoch}-${_entrySeq++}';
+
+  ChatEntry _entry({
+    required ChatRole role,
+    String text = '',
+    String tool = '',
+    String detail = '',
+    String thinking = '',
+    String patch = '',
+    int added = 0,
+    int removed = 0,
+    List<String> attachments = const [],
+    bool ok = true,
+  }) =>
+      ChatEntry(
+        id: _nextId(),
+        role: role,
+        text: text,
+        tool: tool,
+        detail: detail,
+        thinking: thinking,
+        patch: patch,
+        added: added,
+        removed: removed,
+        attachments: attachments,
+        ok: ok,
+        at: DateTime.now(),
+      );
+
+  void _addNote(String text) {
+    final projectId = _activeProjectId;
+    if (projectId == null) return;
+    threadOf(projectId).add(_entry(role: ChatRole.note, text: text));
+    notifyListeners();
+  }
+
+  String? _activeProjectId;
+
+  void _clearLive() {
+    liveText = '';
+    liveThinking = '';
+    liveTools.clear();
+  }
 
   Future<void> send(
     String projectId,
@@ -297,6 +447,8 @@ class AppState extends ChangeNotifier {
     final project = projectById(projectId);
     var provider = activeProvider;
     final thread = threadOf(projectId);
+    final started = DateTime.now();
+    _activeProjectId = projectId;
 
     final stored = attachments.isEmpty
         ? const <String>[]
@@ -312,24 +464,21 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    thread.add(ChatEntry(
-      id: _nextId(),
+    thread.add(_entry(
       role: ChatRole.user,
       text: prompt.isEmpty ? 'Look at the attached files.' : prompt,
       attachments: stored,
-      at: DateTime.now(),
     ));
+    _clearLive();
     notifyListeners();
     await _persistChat(projectId);
 
     if (!provider.isConfigured) {
-      thread.add(ChatEntry(
-        id: _nextId(),
+      thread.add(_entry(
         role: ChatRole.error,
         text: provider.requiresKey
-            ? 'No API key for ${provider.name}. Open Providers, add a key and run Test connection.'
-            : 'Finish configuring ${provider.name} in Providers.',
-        at: DateTime.now(),
+            ? 'No provider is ready. Open Settings → Providers and add an API key.'
+            : 'Finish configuring ${provider.name} in Settings → Providers.',
       ));
       notifyListeners();
       await _persistChat(projectId);
@@ -347,24 +496,64 @@ class AppState extends ChangeNotifier {
       shell: shellFor(project),
       skills: skills,
       onProviderLimit: _handleProviderLimit,
-      onEvent: (event) {
-        thread.add(ChatEntry(
-          id: _nextId(),
-          role: event.kind == AgentEventKind.tool
-              ? ChatRole.tool
-              : event.kind == AgentEventKind.error
-                  ? ChatRole.error
-                  : ChatRole.assistant,
-          text: event.text,
-          tool: event.tool,
-          detail: event.detail,
-          thinking: event.thinking,
-          patch: event.patch,
-          added: event.added,
-          removed: event.removed,
-          ok: event.ok,
-          at: DateTime.now(),
+      onTextDelta: (delta) {
+        liveText += delta;
+        notifyListeners();
+      },
+      onThinkingDelta: (delta) {
+        liveThinking += delta;
+        notifyListeners();
+      },
+      onToolStart: (call) {
+        liveTools.add(ToolDraft(
+          id: '${DateTime.now().microsecondsSinceEpoch}',
+          tool: call.name,
+          detail: _toolDetail(call),
         ));
+        notifyListeners();
+      },
+      onReply: (reply, usedProvider) {
+        final tokens = reply.usage;
+        if (tokens == null) return;
+        _recordUsage(usedProvider, tokens);
+      },
+      onEvent: (event) {
+        if (event.kind == AgentEventKind.text) {
+          _clearLive();
+          thread.add(_entry(
+            role: ChatRole.assistant,
+            text: event.text,
+            thinking: event.thinking,
+          ));
+        } else if (event.kind == AgentEventKind.tool) {
+          if (liveTools.isNotEmpty) {
+            final index = liveTools.indexWhere((draft) =>
+                draft.tool == event.tool && draft.detail == event.detail);
+            if (index >= 0) {
+              liveTools.removeAt(index);
+            } else {
+              liveTools.removeAt(0);
+            }
+          }
+          thread.add(_entry(
+            role: ChatRole.tool,
+            text: event.text,
+            tool: event.tool,
+            detail: event.detail,
+            thinking: event.thinking,
+            patch: event.patch,
+            added: event.added,
+            removed: event.removed,
+            ok: event.ok,
+          ));
+        } else {
+          _clearLive();
+          thread.add(_entry(
+            role: ChatRole.error,
+            text: event.text,
+            ok: false,
+          ));
+        }
         notifyListeners();
       },
     );
@@ -376,31 +565,65 @@ class AppState extends ChangeNotifier {
 
     try {
       await agent.run(
-        history: history.length > 12
-            ? history.sublist(history.length - 12)
+        history: history.length > 14
+            ? history.sublist(history.length - 14)
             : history,
         prompt: modelPrompt,
         isCancelled: () => _cancelled,
       );
     } on AiProviderException catch (error) {
-      thread.add(ChatEntry(
-        id: _nextId(),
-        role: ChatRole.error,
-        text: error.message,
-        at: DateTime.now(),
-      ));
+      _clearLive();
+      thread.add(_entry(role: ChatRole.error, text: error.message, ok: false));
     } catch (error) {
-      thread.add(ChatEntry(
-        id: _nextId(),
+      _clearLive();
+      thread.add(_entry(
         role: ChatRole.error,
         text: 'Unexpected error: $error',
-        at: DateTime.now(),
+        ok: false,
       ));
     } finally {
+      _clearLive();
+      final elapsed = DateTime.now().difference(started);
+      thread.add(_entry(
+        role: ChatRole.note,
+        text:
+            '${_cancelled ? 'Stopped' : 'Ran'} for ${formatDuration(elapsed)}',
+      ));
       busy = false;
+      _activeProjectId = null;
       notifyListeners();
       await _persistChat(projectId);
     }
+  }
+
+  Future<void> _recordUsage(ProviderConfig provider, AiUsage tokens) async {
+    final event = UsageEvent(
+      at: DateTime.now(),
+      providerId: provider.id,
+      providerName: provider.name,
+      keyIndex: provider.keyIndex,
+      model: provider.model,
+      promptTokens: tokens.promptTokens,
+      completionTokens: tokens.completionTokens,
+    );
+    _lastUsage = event;
+    usageEvents.add(event);
+    if (usageEvents.length > 4000) {
+      usageEvents.removeRange(0, usageEvents.length - 4000);
+    }
+    notifyListeners();
+    await _persistUsage();
+  }
+
+  String _toolDetail(AiToolCall call) {
+    final args = call.arguments;
+    return switch (call.name) {
+      'write_file' || 'read_file' => '${args['path'] ?? '?'}',
+      'run_command' => '${args['command'] ?? '?'}',
+      'list_files' =>
+        (args['path'] as String? ?? '').isEmpty ? '.' : '${args['path']}',
+      _ => '',
+    };
   }
 
   Future<ProviderConfig?> _handleProviderLimit(
@@ -422,7 +645,7 @@ class AppState extends ChangeNotifier {
         final allowed = autoNextKey ||
             await (limitPrompt?.call(
                   'Key limit reached',
-                  '${current.name} reports this key is rate-limited or out of credit.\n\n'
+                  '${current.name} (key ${current.keyIndex + 1}) reports this key is rate-limited or out of credit.\n\n'
                       'Use key ${nextIndex + 1} of ${current.keys.length}?',
                   'Use key ${nextIndex + 1}',
                 ) ??
@@ -430,6 +653,10 @@ class AppState extends ChangeNotifier {
         if (!allowed) return null;
         final next = current.copyWith(keyIndex: nextIndex);
         _replaceProvider(next);
+        _clearLive();
+        _addNote(
+          '${current.name} (key ${current.keyIndex + 1}) reached its limit. Using key ${nextIndex + 1}.',
+        );
         await _persistProviders();
         notifyListeners();
         return next;
@@ -456,6 +683,10 @@ class AppState extends ChangeNotifier {
             Future.value(false));
     if (!allowed) return null;
     activeProviderId = candidate.id;
+    _clearLive();
+    _addNote(
+      '${current.name}${current.keys.length > 1 ? ' (all keys)' : ''} reached its limit. Switched to ${candidate.name} (key ${candidate.keyIndex + 1}).',
+    );
     await store.write(_kActiveProvider, candidate.id);
     notifyListeners();
     return candidate;
@@ -466,8 +697,14 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  void clearLive() {
+    _clearLive();
+    notifyListeners();
+  }
+
   Future<void> clearChat(String projectId) async {
     _threads[projectId] = [];
+    _clearLive();
     await store.remove('$_kChatPrefix$projectId');
     notifyListeners();
   }
@@ -479,6 +716,13 @@ class AppState extends ChangeNotifier {
         orElse: () =>
             providers.isNotEmpty ? providers.first : kProviderPresets.first,
       );
+
+  List<ProviderConfig> get availablePresets => kProviderPresets
+      .where((preset) => !providers.any((item) => item.id == preset.id))
+      .toList();
+
+  bool isPresetAdded(String id) =>
+      providers.any((provider) => provider.id == id);
 
   void _loadProviders() {
     providers.clear();
@@ -493,22 +737,18 @@ class AppState extends ChangeNotifier {
         providers.clear();
       }
     }
-    for (final preset in kProviderPresets) {
-      if (!providers.any((provider) => provider.id == preset.id)) {
-        providers.add(preset);
-      }
-    }
+    // Older builds stored every preset, configured or not. The new provider
+    // picker shows only providers that actually have a key or are keyless.
+    providers.removeWhere((provider) => !provider.isConfigured);
     activeProviderId = store.read(_kActiveProvider) ?? '';
     if (!providers.any((provider) => provider.id == activeProviderId)) {
-      activeProviderId = providers
-          .firstWhere((provider) => provider.ready,
-              orElse: () => providers.first)
-          .id;
+      activeProviderId = providers.isEmpty ? '' : providers.first.id;
     }
   }
 
   Future<void> saveProvider(ProviderConfig provider) async {
     _replaceProvider(provider);
+    if (activeProviderId.isEmpty) activeProviderId = provider.id;
     await _persistProviders();
     notifyListeners();
   }
@@ -549,7 +789,7 @@ class AppState extends ChangeNotifier {
     if (!provider.isCustom) return;
     providers.removeWhere((item) => item.id == provider.id);
     if (activeProviderId == provider.id) {
-      activeProviderId = providers.first.id;
+      activeProviderId = providers.isEmpty ? '' : providers.first.id;
       await store.write(_kActiveProvider, activeProviderId);
     }
     await _persistProviders();
@@ -559,6 +799,17 @@ class AppState extends ChangeNotifier {
   Future<void> setActiveProvider(String id) async {
     activeProviderId = id;
     await store.write(_kActiveProvider, id);
+    notifyListeners();
+  }
+
+  /// Switches to a specific provider/model without mutating its saved model.
+  Future<void> setActiveModel(String providerId, String model) async {
+    final index = providers.indexWhere((provider) => provider.id == providerId);
+    if (index < 0) return;
+    providers[index] = providers[index].copyWith(model: model);
+    activeProviderId = providerId;
+    await _persistProviders();
+    await store.write(_kActiveProvider, providerId);
     notifyListeners();
   }
 
@@ -624,7 +875,6 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Imports a `.md` or `.txt` file as a skill whose instructions are its text.
   Future<Skill?> importSkillFile(String path) async {
     final file = File(path);
     if (!await file.exists()) return null;
@@ -632,6 +882,7 @@ class AppState extends ChangeNotifier {
     final lower = name.toLowerCase();
     if (!lower.endsWith('.md') && !lower.endsWith('.txt')) return null;
     final content = await file.readAsString();
+    if (content.length > 200000) return null;
     final title = name.substring(0, name.lastIndexOf('.')).replaceAll(
           RegExp(r'[-_]+'),
           ' ',
@@ -670,28 +921,171 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<String> testGithub() =>
-      GitHubClient(integrations.githubToken, client: httpClient).login();
+  Future<IntegrationAccount> addAccount({
+    required IntegrationKind kind,
+    required String token,
+    String label = '',
+  }) async {
+    final trimmed = token.trim();
+    if (trimmed.isEmpty) {
+      throw IntegrationException('Paste a token first.');
+    }
+    final username = kind == IntegrationKind.github
+        ? await GitHubClient(trimmed, client: httpClient).login()
+        : await VercelClient(trimmed, client: httpClient).login();
+    final account = IntegrationAccount(
+      id: '${kind.name}-${DateTime.now().microsecondsSinceEpoch}',
+      kind: kind,
+      label: label.trim(),
+      username: username,
+      token: trimmed,
+      createdAt: DateTime.now(),
+    );
+    await saveIntegrations(integrations.addOrReplace(account));
+    return account;
+  }
 
-  Future<String> testVercel() =>
-      VercelClient(integrations.vercelToken, client: httpClient).login();
+  Future<void> removeAccount(IntegrationAccount account) =>
+      saveIntegrations(integrations.remove(account.id));
 
-  Future<IntegrationResult> pushToGithub(
-    Project project, {
+  Future<void> activateAccount(IntegrationAccount account) =>
+      saveIntegrations(integrations.activate(account));
+
+  Future<String> testGithubToken(String token) =>
+      GitHubClient(token, client: httpClient).login();
+
+  Future<String> testVercelToken(String token) =>
+      VercelClient(token, client: httpClient).login();
+
+  Future<List<String>> githubBranches(
+    IntegrationAccount account,
+    String owner,
+    String repo,
+  ) =>
+      GitHubClient(account.token, client: httpClient).branches(owner, repo);
+
+  Future<PushState> pushStateFor(Project project) async {
+    final cached = _pushStates[project.id];
+    if (cached != null) return cached;
+    final loaded = await PushStore.load(fsFor(project));
+    return _pushStates[project.id] = loaded;
+  }
+
+  Future<PushState> savePushState(Project project, PushState state) async {
+    _pushStates[project.id] = state;
+    await PushStore.save(fsFor(project), state);
+    notifyListeners();
+    return state;
+  }
+
+  Future<List<RepoChange>> changesFor(Project project) async {
+    final state = await pushStateFor(project);
+    final current = await fsFor(project).textFiles();
+    final paths = <String>{...state.baseline.keys, ...current.keys}.toList()
+      ..sort();
+    final changes = <RepoChange>[];
+    for (final path in paths) {
+      final before = state.baseline[path];
+      final after = current[path];
+      if (after == null) continue;
+      if (before == after) continue;
+      final diff = computeDiff(before ?? '', after);
+      changes.add(RepoChange(
+        path: path,
+        status:
+            before == null ? RepoChangeStatus.added : RepoChangeStatus.modified,
+        before: before ?? '',
+        after: after,
+        added: diff.added,
+        removed: diff.removed,
+      ));
+    }
+    return changes;
+  }
+
+  Future<int> pendingCommitsFor(Project project) async {
+    final state = await pushStateFor(project);
+    final parts = project.repo.split('/');
+    final owner = state.owner.isNotEmpty
+        ? state.owner
+        : (parts.length == 2 ? parts.first : '');
+    final repo = state.repo.isNotEmpty
+        ? state.repo
+        : (parts.length == 2 ? parts.last : '');
+    final branch = project.branch;
+    return state.pendingFor(owner, repo, branch);
+  }
+
+  Future<GitHubCommit> createGithubCommit(
+    IntegrationAccount account, {
+    required String owner,
     required String repo,
-    required bool private,
+    required String branch,
+    required String message,
+    required Map<String, String> files,
+    String? parentSha,
+  }) =>
+      GitHubClient(account.token, client: httpClient).createCommit(
+        owner: owner,
+        repo: repo,
+        branch: branch,
+        message: message,
+        files: files,
+        parentSha: parentSha,
+      );
+
+  Future<void> pushGithubRef(
+    IntegrationAccount account, {
+    required String owner,
+    required String repo,
+    required String branch,
+    required String sha,
+  }) =>
+      GitHubClient(account.token, client: httpClient).pushRef(
+        owner: owner,
+        repo: repo,
+        branch: branch,
+        sha: sha,
+      );
+
+  Future<IntegrationResult> deployToVercel(
+    Project project,
+    IntegrationAccount account, {
+    required String name,
   }) async {
     final files = await fsFor(project).textFiles();
-    return GitHubClient(integrations.githubToken, client: httpClient)
-        .push(repoName: repo, private: private, files: files);
-  }
-
-  Future<IntegrationResult> deployToVercel(Project project,
-      {required String name}) async {
-    final files = await fsFor(project).textFiles();
-    return VercelClient(integrations.vercelToken, client: httpClient)
+    return VercelClient(account.token, client: httpClient)
         .deploy(name: name, files: files);
   }
+
+  // ---------------------------------------------------------------- usage
+
+  void _loadUsage() {
+    usageEvents.clear();
+    final raw = store.read(_kUsage);
+    if (raw == null) return;
+    try {
+      for (final item in jsonDecode(raw) as List) {
+        if (item is Map) {
+          final event = UsageEvent.fromJson(item.cast<String, dynamic>());
+          if (event != null) usageEvents.add(event);
+        }
+      }
+    } catch (_) {
+      usageEvents.clear();
+    }
+    if (usageEvents.isNotEmpty) _lastUsage = usageEvents.last;
+  }
+
+  Future<void> _persistUsage() => store.write(
+        _kUsage,
+        jsonEncode(usageEvents.map((event) => event.toJson()).toList()),
+      );
+
+  int? contextUsedFor(String providerId, String model) =>
+      usage.latestFor(providerId, model)?.promptTokens;
+
+  int? contextLimitFor(String model) => contextWindowFor(model);
 
   // -------------------------------------------------------------- settings
 
@@ -713,6 +1107,12 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setDarkMode(bool value) async {
+    darkMode = value;
+    await store.write(_kDarkMode, value.toString());
+    notifyListeners();
+  }
+
   Future<void> resetEverything() async {
     final projectsDir = Directory('${root.path}/projects');
     if (await projectsDir.exists()) await projectsDir.delete(recursive: true);
@@ -722,6 +1122,10 @@ class AppState extends ChangeNotifier {
     _fs.clear();
     _shells.clear();
     _systemShells.clear();
+    _pushStates.clear();
+    _clearLive();
+    usageEvents.clear();
+    _lastUsage = null;
     for (final key in [
       _kProviders,
       _kSkills,
@@ -730,12 +1134,11 @@ class AppState extends ChangeNotifier {
       _kWordWrap,
       _kAutoNextKey,
       _kAutoNextProvider,
+      _kUsage,
     ]) {
       await store.remove(key);
     }
-    providers
-      ..clear()
-      ..addAll(kProviderPresets);
+    providers.clear();
     skills
       ..clear()
       ..add(const Skill(
@@ -745,13 +1148,22 @@ class AppState extends ChangeNotifier {
             'Keep replies short and always name the files you changed.',
       ));
     integrations = const Integrations();
-    activeProviderId = providers.first.id;
+    activeProviderId = '';
     wordWrap = false;
     autoNextKey = false;
     autoNextProvider = false;
-    await createProject('hello-dev', ProjectKind.web, persistChat: false);
+    await createProject('hello-praxis', ProjectKind.web, persistChat: false);
     notifyListeners();
   }
+}
+
+String formatDuration(Duration duration) {
+  if (duration.inSeconds < 60) return '${duration.inSeconds}s';
+  final minutes = duration.inMinutes;
+  final seconds = duration.inSeconds.remainder(60);
+  if (minutes < 60) return '${minutes}m ${seconds}s';
+  final hours = duration.inHours;
+  return '${hours}h ${minutes.remainder(60)}m';
 }
 
 class AppScope extends InheritedNotifier<AppState> {

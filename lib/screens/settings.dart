@@ -1,13 +1,15 @@
-import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../core/integrations.dart';
+import '../core/usage.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/ui.dart';
+import 'about_screen.dart';
 import 'provider_form.dart';
+import 'usage_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key, this.project});
@@ -19,20 +21,19 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _githubBusy = false;
-  bool _vercelBusy = false;
+  bool _accountBusy = false;
 
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
-
+    final configured = state.configuredProviders;
     return Scaffold(
       body: SafeArea(
         child: Column(
           children: [
             Container(
               padding: const EdgeInsets.fromLTRB(Sp.x2, Sp.x2, Sp.x2, Sp.x2),
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 border: Border(bottom: BorderSide(color: Pal.line)),
               ),
               child: Row(
@@ -43,7 +44,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onTap: () => Navigator.of(context).maybePop(),
                   ),
                   const SizedBox(width: 4),
-                  const Text('Settings', style: Txt.title),
+                  Text('Settings', style: Txt.title),
                   const Spacer(),
                   const Wordmark(size: 13, showMark: false),
                 ],
@@ -53,41 +54,131 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x10),
                 children: [
-                  SectionLabel(
-                    'MODEL',
-                    trailing:
-                        Text('${state.providers.length}', style: Txt.meta),
+                  const SectionLabel('APPEARANCE'),
+                  _ThemeChoices(
+                    dark: state.darkMode,
+                    onChanged: state.setDarkMode,
                   ),
-                  const Text(
-                    'Every provider uses your own key; add several so the agent '
-                    'can move on when one runs out. Pick the active one with the '
-                    'Providers pill inside a project. Ollama is the keyless '
-                    'option on your own network.',
+                  const SectionLabel('USAGE'),
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const UsageScreen()),
+                    ),
+                    behavior: HitTestBehavior.opaque,
+                    child: Panel(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: Sp.x3, vertical: Sp.x3),
+                      child: Row(
+                        children: [
+                          GlyphBadge(
+                            icon: Icons.insights_rounded,
+                            color: Pal.ember,
+                            size: 34,
+                            iconSize: 17,
+                          ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${compactTokens(state.usage.totalTokens)} tokens',
+                                  style: Txt.title.copyWith(fontSize: 15),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  state.usage.events.isEmpty
+                                      ? 'No model calls yet'
+                                      : '${state.usage.events.length} calls · ${compactTokens(state.usage.todayTokens)} today',
+                                  style: Txt.meta.copyWith(fontSize: 9.5),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Text('View',
+                              style: Txt.meta.copyWith(color: Pal.ember)),
+                          const SizedBox(width: 2),
+                          Icon(Icons.chevron_right_rounded,
+                              size: 17, color: Pal.textDim),
+                        ],
+                      ),
+                    ),
+                  ),
+                  SectionLabel(
+                    'PROVIDERS',
+                    trailing: Text('${configured.length}', style: Txt.meta),
+                  ),
+                  Text(
+                    'Only providers you have connected appear here. Add several '
+                    'keys to one provider and Praxis can move through them when '
+                    'a limit is reached.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x3),
-                  for (final provider in state.providers)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: _ProviderRow(
-                        provider: provider,
-                        active: provider.id == state.activeProviderId,
-                        onTap: () => _editProvider(provider),
+                  if (configured.isEmpty)
+                    Panel(
+                      padding: const EdgeInsets.all(Sp.x3),
+                      child: Row(
+                        children: [
+                          Icon(Icons.key_off_rounded,
+                              size: 18, color: Pal.amber),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              'No provider connected yet. Add one to start '
+                              'using the agent.',
+                              style: Txt.bodySoft.copyWith(fontSize: 12.5),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else
+                    for (final provider in configured)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _ProviderRow(
+                          provider: provider,
+                          active: provider.id == state.activeProviderId,
+                          onTap: () => _editProvider(provider),
+                        ),
+                      ),
+                  const SizedBox(height: 8),
+                  GestureDetector(
+                    onTap: () => _addProvider(state),
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      height: 44,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        borderRadius: Rd.sm,
+                        border: Border.all(color: Pal.ember.withOpacity(0.4)),
+                        color: Pal.ember.withOpacity(0.06),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.add_rounded, size: 17, color: Pal.ember),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Add provider',
+                            style: Txt.label.copyWith(
+                              color: Pal.ember,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  const SizedBox(height: Sp.x2),
-                  GhostButton(
-                    label: 'Add custom endpoint',
-                    icon: Icons.add_rounded,
-                    onTap: () => _editProvider(state.newCustomProvider()),
                   ),
                   SectionLabel(
                     'SKILLS',
                     trailing: Text(
-                        '${state.skills.where((s) => s.enabled).length} on',
-                        style: Txt.meta),
+                      '${state.skills.where((skill) => skill.enabled).length} on',
+                      style: Txt.meta,
+                    ),
                   ),
-                  const Text(
+                  Text(
                     'Skills are extra instructions added to every agent run. '
                     'They are local prompt fragments, not plugins.',
                     style: Txt.bodySoft,
@@ -132,14 +223,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                       ),
                     ),
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
                     children: [
                       GhostButton(
                         label: 'Add skill',
                         icon: Icons.add_rounded,
                         onTap: () => _editSkill(state.newSkill()),
                       ),
-                      const SizedBox(width: 8),
                       GhostButton(
                         label: 'Import .md / .txt',
                         icon: Icons.upload_file_rounded,
@@ -148,61 +240,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                   const SectionLabel('INTEGRATIONS'),
-                  const Text(
-                    'Tokens are stored on this device only and sent straight to '
-                    'the provider you name.',
+                  Text(
+                    'Add as many accounts as you use. The active account is '
+                    'offered first in Push and Deploy; you can switch it there '
+                    'too. Tokens stay on this device.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x3),
-                  _IntegrationPanel(
-                    icon: Icons.code_rounded,
-                    title: 'GitHub',
-                    status: state.integrations.githubToken.isEmpty
-                        ? 'No token'
-                        : 'Token saved',
-                    ready: state.integrations.githubToken.isNotEmpty,
-                    description:
-                        'Creates or updates a repo and commits every text file in this project.',
-                    actions: [
-                      GhostButton(
-                        label: 'Token',
-                        onTap: () => _editGithubToken(state),
-                      ),
-                      GhostButton(
-                        label: _githubBusy ? 'Testing…' : 'Test',
-                        onTap: _githubBusy ||
-                                state.integrations.githubToken.isEmpty
-                            ? null
-                            : () => _testGithub(state),
-                      ),
-                    ],
+                  _IntegrationCard(
+                    kind: IntegrationKind.github,
+                    accounts: state.integrations.ofKind(IntegrationKind.github),
+                    activeId: state.activeGithub?.id ?? '',
+                    busy: _accountBusy,
+                    onAdd: () => _addAccount(IntegrationKind.github),
+                    onActivate: state.activateAccount,
+                    onRemove: _removeAccount,
                   ),
                   const SizedBox(height: 8),
-                  _IntegrationPanel(
-                    icon: Icons.change_history_rounded,
-                    title: 'Vercel',
-                    status: state.integrations.vercelToken.isEmpty
-                        ? 'No token'
-                        : 'Token saved',
-                    ready: state.integrations.vercelToken.isNotEmpty,
-                    description:
-                        'Uploads the project’s text files as a static deployment and returns its URL.',
-                    actions: [
-                      GhostButton(
-                        label: 'Token',
-                        onTap: () => _editVercelToken(state),
-                      ),
-                      GhostButton(
-                        label: _vercelBusy ? 'Testing…' : 'Test',
-                        onTap: _vercelBusy ||
-                                state.integrations.vercelToken.isEmpty
-                            ? null
-                            : () => _testVercel(state),
-                      ),
-                    ],
+                  _IntegrationCard(
+                    kind: IntegrationKind.vercel,
+                    accounts: state.integrations.ofKind(IntegrationKind.vercel),
+                    activeId: state.activeVercel?.id ?? '',
+                    busy: _accountBusy,
+                    onAdd: () => _addAccount(IntegrationKind.vercel),
+                    onActivate: state.activateAccount,
+                    onRemove: _removeAccount,
                   ),
                   const SectionLabel('CONTINUATION'),
-                  const Text(
+                  Text(
                     'What happens when a key or a provider runs out. With both '
                     'off, the agent stops and asks before switching.',
                     style: Txt.bodySoft,
@@ -244,8 +309,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               Text('Wrap long lines',
                                   style: Txt.title.copyWith(fontSize: 14)),
                               const SizedBox(height: 2),
-                              const Text(
-                                  'Softer reading for prose and markdown',
+                              Text('Soft wrapping for prose and markdown',
                                   style: Txt.meta),
                             ],
                           ),
@@ -265,14 +329,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         Text('Erase everything',
                             style: Txt.title.copyWith(fontSize: 14)),
                         const SizedBox(height: 4),
-                        const Text(
+                        Text(
                           'Deletes all projects, chats, keys and tokens from this '
-                          'device and starts again with one empty web project.',
+                          'device and starts again with one empty project.',
                           style: Txt.bodySoft,
                         ),
                         const SizedBox(height: Sp.x3),
                         GhostButton(
-                          label: 'Reset DevNest',
+                          label: 'Reset Praxis',
                           icon: Icons.delete_forever_outlined,
                           onTap: () => _reset(state),
                         ),
@@ -280,33 +344,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SectionLabel('ABOUT'),
-                  const Panel(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            BrandMark(size: 22),
-                            SizedBox(width: 9),
-                            Text('DevNest', style: Txt.title),
-                            Spacer(),
-                            Text('1.1.0', style: Txt.meta),
-                          ],
-                        ),
-                        SizedBox(height: 10),
-                        Text(
-                          'A local-first coding workbench for Android: real files, '
-                          'a real project shell, a WebView preview, and an agent '
-                          'that edits those files with your model key.',
-                          style: Txt.bodySoft,
-                        ),
-                        SizedBox(height: 8),
-                        Text(
-                          'No account, no telemetry. Files live in the app’s '
-                          'documents directory.',
-                          style: Txt.meta,
-                        ),
-                      ],
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const AboutScreen()),
+                    ),
+                    behavior: HitTestBehavior.opaque,
+                    child: Panel(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const BrandMark(size: 22),
+                              const SizedBox(width: 9),
+                              Text('Praxis', style: Txt.title),
+                              const Spacer(),
+                              Text('2.0.0', style: Txt.meta),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'A local-first coding workbench: real files, a real '
+                            'shell, a live preview, and an agent that edits the '
+                            'project with your key.',
+                            style: Txt.bodySoft,
+                          ),
+                          const SizedBox(height: 9),
+                          Row(
+                            children: [
+                              Text('Terms · Privacy · Licences',
+                                  style: Txt.meta.copyWith(color: Pal.ember)),
+                              const Spacer(),
+                              Icon(Icons.chevron_right_rounded,
+                                  size: 17, color: Pal.textDim),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -318,13 +392,132 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Future<void> _addProvider(AppState state) async {
+    final selected = await showModalBottomSheet<ProviderConfig>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (_) => _ProviderPickerSheet(presets: state.availablePresets),
+    );
+    if (selected == null || !mounted) return;
+    await _editProvider(selected);
+  }
+
   Future<void> _editProvider(ProviderConfig provider) async {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Pal.surface,
       builder: (_) => ProviderFormSheet(provider: provider),
     );
+  }
+
+  Future<void> _addAccount(IntegrationKind kind) async {
+    if (_accountBusy) return;
+    final token = TextEditingController();
+    final label = TextEditingController();
+    final submitted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: Text('Add ${kind.label} account'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              kind == IntegrationKind.github
+                  ? 'Create a fine-grained personal access token with Contents: '
+                      'read and write access. It is validated against GitHub.'
+                  : 'Create a Vercel access token from Account Settings → Tokens.',
+              style: Txt.bodySoft.copyWith(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: token,
+              autofocus: true,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              style: Txt.code.copyWith(fontSize: 12),
+              cursorColor: Pal.ember,
+              decoration: appField('Paste token'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: label,
+              style: Txt.body.copyWith(fontSize: 13),
+              cursorColor: Pal.ember,
+              decoration: appField('Optional label, e.g. work', label: 'Label'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Add account'),
+          ),
+        ],
+      ),
+    );
+    if (!(submitted ?? false) || !mounted) {
+      token.dispose();
+      label.dispose();
+      return;
+    }
+    setState(() => _accountBusy = true);
+    final state = AppScope.of(context);
+    try {
+      final account = await state.addAccount(
+        kind: kind,
+        token: token.text,
+        label: label.text,
+      );
+      if (!mounted) return;
+      _showResult('${kind.label} connected as @${account.username}');
+    } catch (error) {
+      if (!mounted) return;
+      _showResult('$error');
+    } finally {
+      token.dispose();
+      label.dispose();
+      if (mounted) setState(() => _accountBusy = false);
+    }
+  }
+
+  Future<void> _removeAccount(IntegrationAccount account) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: Text('Remove ${account.displayName}?'),
+        content: Text(
+          'The token is deleted from this device. Projects and deployments '
+          'already made are not affected.',
+          style: Txt.bodySoft,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Pal.rose),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if ((confirmed ?? false) && mounted) {
+      await AppScope.of(context).removeAccount(account);
+    }
   }
 
   Future<void> _importSkill() async {
@@ -413,87 +606,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     instructions.dispose();
   }
 
-  Future<String?> _askToken(String title, String current) {
-    final controller = TextEditingController(text: current);
-    return showDialog<String>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text(title),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          obscureText: true,
-          style: Txt.body,
-          cursorColor: Pal.ember,
-          decoration: appField('Paste token'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () =>
-                Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    ).whenComplete(controller.dispose);
-  }
-
-  Future<void> _editGithubToken(AppState state) async {
-    final token =
-        await _askToken('GitHub token', state.integrations.githubToken);
-    if (token == null) return;
-    await state
-        .saveIntegrations(state.integrations.copyWith(githubToken: token));
-  }
-
-  Future<void> _editVercelToken(AppState state) async {
-    final token =
-        await _askToken('Vercel token', state.integrations.vercelToken);
-    if (token == null) return;
-    await state
-        .saveIntegrations(state.integrations.copyWith(vercelToken: token));
-  }
-
-  Future<void> _testGithub(AppState state) async {
-    setState(() => _githubBusy = true);
-    try {
-      final login = await state.testGithub();
-      _showResult('GitHub connected as $login');
-    } on IntegrationException catch (error) {
-      _showResult(error.message);
-    } catch (error) {
-      _showResult('$error');
-    } finally {
-      if (mounted) setState(() => _githubBusy = false);
-    }
-  }
-
-  Future<void> _testVercel(AppState state) async {
-    setState(() => _vercelBusy = true);
-    try {
-      final account = await state.testVercel();
-      _showResult('Vercel connected as $account');
-    } on IntegrationException catch (error) {
-      _showResult(error.message);
-    } catch (error) {
-      _showResult('$error');
-    } finally {
-      if (mounted) setState(() => _vercelBusy = false);
-    }
-  }
-
   Future<void> _reset(AppState state) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         backgroundColor: Pal.surface,
         title: const Text('Erase all local data?'),
-        content: const Text(
+        content: Text(
           'Projects, chats, provider keys and integration tokens are deleted from '
           'this device. This cannot be undone.',
           style: Txt.bodySoft,
@@ -513,35 +632,280 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (confirmed ?? false) {
       await state.resetEverything();
-      _showResult('DevNest was reset to a clean state.');
+      if (mounted) _showResult('Praxis was reset to a clean state.');
     }
   }
 
-  void _showResult(String message, [String? url]) {
+  void _showResult(String message) {
     if (!mounted) return;
     showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         backgroundColor: Pal.surface,
         title: const Text('Result'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SelectableText(message, style: Txt.bodySoft),
-            if (url != null) ...[
-              const SizedBox(height: 10),
-              SelectableText(
-                url,
-                style: Txt.code.copyWith(color: Pal.ember, fontSize: 12),
-              ),
-            ],
-          ],
-        ),
+        content: SelectableText(message, style: Txt.bodySoft),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(),
             child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ThemeChoices extends StatelessWidget {
+  const _ThemeChoices({required this.dark, required this.onChanged});
+
+  final bool dark;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: _ThemeCard(
+            label: 'Light',
+            icon: Icons.light_mode_outlined,
+            active: !dark,
+            preview: const Color(0xFFF7F3EC),
+            onTap: () => onChanged(false),
+          ),
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: _ThemeCard(
+            label: 'Dark',
+            icon: Icons.dark_mode_outlined,
+            active: dark,
+            preview: const Color(0xFF12100E),
+            onTap: () => onChanged(true),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ThemeCard extends StatelessWidget {
+  const _ThemeCard({
+    required this.label,
+    required this.icon,
+    required this.active,
+    required this.preview,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool active;
+  final Color preview;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: Motion.fast,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Pal.surface,
+          borderRadius: Rd.md,
+          border: Border.all(
+            color: active ? Pal.ember : Pal.line,
+            width: active ? 1.4 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 26,
+              height: 26,
+              decoration: BoxDecoration(
+                color: preview,
+                borderRadius: const BorderRadius.all(Radius.circular(7)),
+                border: Border.all(color: active ? Pal.ember : Pal.lineStrong),
+              ),
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                label,
+                style: Txt.label.copyWith(
+                  color: active ? Pal.text : Pal.textMuted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Icon(
+              active ? Icons.check_circle_rounded : icon,
+              size: 16,
+              color: active ? Pal.ember : Pal.textDim,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProviderPickerSheet extends StatelessWidget {
+  const _ProviderPickerSheet({required this.presets});
+
+  final List<ProviderConfig> presets;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: MediaQuery.sizeOf(context).height * 0.72,
+      child: Column(
+        children: [
+          const SheetHandle(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.x3, Sp.x2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Add provider', style: Txt.headline),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Choose one endpoint. You can add its keys and pick '
+                        'models on the next screen.',
+                        style: Txt.meta.copyWith(height: 1.4),
+                      ),
+                    ],
+                  ),
+                ),
+                IconAction(
+                  icon: Icons.close_rounded,
+                  tooltip: 'Close',
+                  onTap: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+          ),
+          const Hairline(),
+          Expanded(
+            child: ListView(
+              padding:
+                  const EdgeInsets.fromLTRB(Sp.page, Sp.x2, Sp.page, Sp.x6),
+              children: [
+                for (final preset in presets)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 7),
+                    child: GestureDetector(
+                      onTap: () => Navigator.of(context).pop(preset),
+                      behavior: HitTestBehavior.opaque,
+                      child: Panel(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: Sp.x3, vertical: 10),
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: SvgPicture.asset(
+                                preset.icon,
+                                colorFilter: ColorFilter.mode(
+                                  Pal.text,
+                                  BlendMode.srcIn,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 11),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    preset.name,
+                                    style: Txt.title.copyWith(fontSize: 14),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    preset.requiresKey
+                                        ? preset.model
+                                        : '${preset.model} · keyless',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Txt.meta.copyWith(fontSize: 9.5),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(Icons.add_rounded, size: 18, color: Pal.ember),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                if (presets.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: Sp.x3),
+                    child: Text(
+                      'Every built-in provider is already connected. Use a '
+                      'custom endpoint for anything else.',
+                      style: Txt.bodySoft,
+                    ),
+                  ),
+                GestureDetector(
+                  onTap: () => Navigator.of(context).pop(
+                    ProviderConfig(
+                      id: 'custom-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
+                      name: 'Custom endpoint',
+                      icon: 'assets/icons/opencode.svg',
+                      baseUrl: 'https://',
+                      model: '',
+                      flavor: ApiFlavor.openai,
+                      hint: 'Any OpenAI-compatible URL',
+                      isCustom: true,
+                    ),
+                  ),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: Sp.x3, vertical: 13),
+                    decoration: BoxDecoration(
+                      borderRadius: Rd.sm,
+                      border: Border.all(color: Pal.lineStrong),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.tune_rounded,
+                            size: 18, color: Pal.textMuted),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Custom provider',
+                                  style: Txt.label.copyWith(
+                                    color: Pal.text,
+                                    fontWeight: FontWeight.w600,
+                                  )),
+                              const SizedBox(height: 2),
+                              Text(
+                                'OpenAI-compatible or Anthropic-style endpoint',
+                                style: Txt.meta.copyWith(fontSize: 9.5),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.chevron_right_rounded,
+                            size: 18, color: Pal.textDim),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -599,7 +963,7 @@ class _ProviderRow extends StatelessWidget {
                       ),
                       if (active) ...[
                         const SizedBox(width: 7),
-                        const StatusPill('active', color: Pal.ember),
+                        StatusPill('active', color: Pal.ember),
                       ],
                     ],
                   ),
@@ -622,8 +986,7 @@ class _ProviderRow extends StatelessWidget {
               color: provider.ready ? Pal.mint : Pal.amber,
             ),
             const SizedBox(width: 4),
-            const Icon(Icons.chevron_right_rounded,
-                size: 17, color: Pal.textDim),
+            Icon(Icons.chevron_right_rounded, size: 17, color: Pal.textDim),
           ],
         ),
       ),
@@ -631,25 +994,28 @@ class _ProviderRow extends StatelessWidget {
   }
 }
 
-class _IntegrationPanel extends StatelessWidget {
-  const _IntegrationPanel({
-    required this.icon,
-    required this.title,
-    required this.status,
-    required this.ready,
-    required this.description,
-    required this.actions,
+class _IntegrationCard extends StatelessWidget {
+  const _IntegrationCard({
+    required this.kind,
+    required this.accounts,
+    required this.activeId,
+    required this.busy,
+    required this.onAdd,
+    required this.onActivate,
+    required this.onRemove,
   });
 
-  final IconData icon;
-  final String title;
-  final String status;
-  final bool ready;
-  final String description;
-  final List<Widget> actions;
+  final IntegrationKind kind;
+  final List<IntegrationAccount> accounts;
+  final String activeId;
+  final bool busy;
+  final VoidCallback onAdd;
+  final Future<void> Function(IntegrationAccount) onActivate;
+  final Future<void> Function(IntegrationAccount) onRemove;
 
   @override
   Widget build(BuildContext context) {
+    final github = kind == IntegrationKind.github;
     return Panel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -657,21 +1023,111 @@ class _IntegrationPanel extends StatelessWidget {
           Row(
             children: [
               GlyphBadge(
-                icon: icon,
-                color: ready ? Pal.mint : Pal.textDim,
+                icon:
+                    github ? Icons.code_rounded : Icons.change_history_rounded,
+                color: accounts.isEmpty ? Pal.textDim : Pal.mint,
                 size: 30,
                 iconSize: 15,
               ),
               const SizedBox(width: 10),
               Expanded(
-                  child: Text(title, style: Txt.title.copyWith(fontSize: 14))),
-              StatusPill(status, color: ready ? Pal.mint : Pal.amber),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(kind.label, style: Txt.title.copyWith(fontSize: 14)),
+                    const SizedBox(height: 2),
+                    Text(
+                      github
+                          ? 'Commit and push real branches'
+                          : 'Static deployments',
+                      style: Txt.meta.copyWith(fontSize: 9.5),
+                    ),
+                  ],
+                ),
+              ),
+              StatusPill(
+                accounts.isEmpty
+                    ? 'not connected'
+                    : '${accounts.length} account${accounts.length == 1 ? '' : 's'}',
+                color: accounts.isEmpty ? Pal.textDim : Pal.mint,
+              ),
             ],
           ),
-          const SizedBox(height: 8),
-          Text(description, style: Txt.bodySoft.copyWith(fontSize: 12.5)),
           const SizedBox(height: 10),
-          Wrap(spacing: 8, runSpacing: 8, children: actions),
+          Text(
+            github
+                ? 'A GitHub token with Contents read/write. Pushes are real git '
+                    'commits built with the Git Data API.'
+                : 'A Vercel token used to upload this project as a static '
+                    'deployment.',
+            style: Txt.bodySoft.copyWith(fontSize: 12),
+          ),
+          if (accounts.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            for (final account in accounts)
+              GestureDetector(
+                onTap: () => onActivate(account),
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(8, 7, 4, 7),
+                    decoration: BoxDecoration(
+                      color: account.id == activeId
+                          ? Pal.raised
+                          : Colors.transparent,
+                      borderRadius: Rd.sm,
+                      border: Border.all(
+                        color: account.id == activeId
+                            ? Pal.lineStrong
+                            : Colors.transparent,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          account.id == activeId
+                              ? Icons.radio_button_checked_rounded
+                              : Icons.radio_button_off_rounded,
+                          size: 15,
+                          color:
+                              account.id == activeId ? Pal.ember : Pal.textDim,
+                        ),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          child: Text(
+                            account.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Txt.label.copyWith(
+                              color: Pal.text,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        if (account.username.isNotEmpty)
+                          Text(
+                            '@${account.username}',
+                            style: Txt.meta.copyWith(fontSize: 9),
+                          ),
+                        IconAction(
+                          icon: Icons.close_rounded,
+                          tooltip: 'Remove account',
+                          size: 15,
+                          onTap: () => onRemove(account),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+          const SizedBox(height: 8),
+          GhostButton(
+            label: accounts.isEmpty ? 'Add account' : 'Add another account',
+            icon: Icons.add_rounded,
+            onTap: busy ? null : onAdd,
+          ),
         ],
       ),
     );

@@ -18,6 +18,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
   late final TextEditingController _name;
   late final TextEditingController _model;
   late final TextEditingController _baseUrl;
+  late final TextEditingController _search;
   late final List<TextEditingController> _keys;
   late final List<bool> _reveal;
   late final List<String> _models;
@@ -36,6 +37,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     _name = TextEditingController(text: widget.provider.name);
     _model = TextEditingController(text: widget.provider.model);
     _baseUrl = TextEditingController(text: widget.provider.baseUrl);
+    _search = TextEditingController();
     final stored =
         widget.provider.keys.where((key) => key.trim().isNotEmpty).toList();
     _keys = (stored.isEmpty ? [''] : stored)
@@ -54,6 +56,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     _name.dispose();
     _model.dispose();
     _baseUrl.dispose();
+    _search.dispose();
     for (final controller in _keys) {
       controller.dispose();
     }
@@ -81,10 +84,19 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
       );
 
   void _addKey() {
+    FocusScope.of(context).unfocus();
     setState(() {
       _keys.add(TextEditingController());
       _reveal.add(false);
     });
+  }
+
+  List<String> get _filteredModels {
+    final query = _search.text.trim().toLowerCase();
+    if (query.isEmpty) return _models;
+    return _models
+        .where((model) => model.toLowerCase().contains(query))
+        .toList();
   }
 
   void _removeKey(int index) {
@@ -185,10 +197,17 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
 
   Future<void> _save({required bool activate}) async {
     if (_saving) return;
+    final keys = _liveKeys;
+    if (widget.provider.requiresKey && keys.isEmpty) {
+      setState(() {
+        _status = 'Add at least one key before saving this provider.';
+        _statusError = true;
+      });
+      return;
+    }
     setState(() => _saving = true);
     final state = AppScope.of(context);
     final navigator = Navigator.of(context);
-    final keys = _liveKeys;
     final provider = widget.provider.copyWith(
       name:
           _name.text.trim().isEmpty ? widget.provider.name : _name.text.trim(),
@@ -296,7 +315,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
                         controller: _keys[i],
                         style: Txt.code.copyWith(fontSize: 12),
                         cursorColor: Pal.ember,
-                        obscureText: _reveal[i],
+                        obscureText: !_reveal[i],
                         autocorrect: false,
                         enableSuggestions: false,
                         decoration: appField(
@@ -401,6 +420,27 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
             ),
             if (_models.isNotEmpty) ...[
               const SizedBox(height: 8),
+              TextField(
+                controller: _search,
+                style: Txt.body.copyWith(fontSize: 12),
+                cursorColor: Pal.ember,
+                onChanged: (_) => setState(() {}),
+                decoration: appField(
+                  'Search ${_models.length} models',
+                  suffix: _search.text.isEmpty
+                      ? const Icon(Icons.search_rounded, size: 17)
+                      : IconAction(
+                          icon: Icons.close_rounded,
+                          tooltip: 'Clear search',
+                          size: 16,
+                          onTap: () {
+                            _search.clear();
+                            setState(() {});
+                          },
+                        ),
+                ),
+              ),
+              const SizedBox(height: 8),
               Container(
                 height: 240,
                 decoration: BoxDecoration(
@@ -410,9 +450,9 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
                 ),
                 child: ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 4),
-                  itemCount: _models.length,
+                  itemCount: _filteredModels.length,
                   itemBuilder: (context, index) {
-                    final model = _models[index];
+                    final model = _filteredModels[index];
                     final checked = _selected.contains(model);
                     final active = _model.text.trim() == model;
                     return InkWell(
@@ -449,7 +489,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
                               ),
                             ),
                             if (active)
-                              const StatusPill('active', color: Pal.mint)
+                              StatusPill('active', color: Pal.mint)
                             else
                               TextButton(
                                 onPressed: () => _useModel(model),

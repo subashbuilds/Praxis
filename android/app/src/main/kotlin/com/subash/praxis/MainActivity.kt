@@ -1,4 +1,4 @@
-package com.subash.devnest
+package com.subash.praxis
 
 import io.flutter.embedding.android.FlutterActivity
 

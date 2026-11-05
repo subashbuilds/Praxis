@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
@@ -202,10 +204,7 @@ List<InlineSpan> _highlight(String text, CodeLanguage language) {
 
   final keywords = _keywords[language];
   if (keywords != null && keywords.isNotEmpty) {
-    scan(
-      RegExp(r'\b(?:' + keywords.join('|') + r')\b'),
-      Pal.ghKeyword,
-    );
+    scan(RegExp(r'\b(?:' + keywords.join('|') + r')\b'), Pal.ghKeyword);
   }
 
   switch (language) {
@@ -237,7 +236,7 @@ List<InlineSpan> _highlight(String text, CodeLanguage language) {
       scan(RegExp(r'\b\d+(?:\.\d+)?\b'), Pal.ghNumber);
       scan(RegExp(r'\b[A-Za-z_]\w*(?=\s*\()'), Pal.ghAttr);
     case CodeLanguage.json:
-      scan(RegExp(r'''"[^"\n]*"'''), Pal.ghString);
+      scan(RegExp(r'"[^"\n]*"'), Pal.ghString);
       scan(RegExp(r'\b-?\d+(?:\.\d+)?\b'), Pal.ghNumber);
     case CodeLanguage.markdown:
       scan(RegExp(r'^#{1,6} .*$', multiLine: true), Pal.ghNumber);
@@ -282,8 +281,8 @@ List<InlineSpan> _highlight(String text, CodeLanguage language) {
   return spans;
 }
 
-/// A [TextEditingController] that paints GitHub-dark syntax colours while
-/// staying fully editable.
+/// A [TextEditingController] that paints GitHub syntax colours while staying
+/// fully editable.
 class CodeController extends TextEditingController {
   CodeController({required this.language});
 
@@ -300,6 +299,9 @@ class CodeController extends TextEditingController {
   }
 }
 
+/// A code editor whose gutter is laid out from the same metrics as the text.
+/// Wrapping is a real preference: when it is off the code scrolls horizontally
+/// and every logical line keeps exactly one number.
 class CodeEditor extends StatefulWidget {
   const CodeEditor({
     super.key,
@@ -319,130 +321,260 @@ class CodeEditor extends StatefulWidget {
 }
 
 class _CodeEditorState extends State<CodeEditor> {
-  final _scroll = ScrollController();
-  double _offset = 0;
-  bool _wired = false;
+  final _vertical = ScrollController();
+  final _horizontal = ScrollController();
+  final _focus = FocusNode();
 
+  static const _gutter = 46.0;
   static const _fontSize = 12.5;
-  static const _lineHeight = 1.62;
-  static const _padding = 14.0;
+  static const _lineHeight = 1.5;
+  static const _top = 14.0;
+  static const _bottom = 40.0;
+  static const _left = 14.0;
+  static const _right = 16.0;
+  static double get _row => _fontSize * _lineHeight;
 
-  double get _rowHeight => _fontSize * _lineHeight;
+  List<double> _lineHeights = const [];
+  double _viewportWidth = 0;
+
+  TextStyle get _style => Txt.code.copyWith(
+        fontSize: _fontSize,
+        height: _lineHeight,
+        color: Pal.ghText,
+        letterSpacing: 0,
+      );
+
+  StrutStyle get _strut => const StrutStyle(
+        fontFamily: Txt.mono,
+        fontSize: _fontSize,
+        height: _lineHeight,
+        forceStrutHeight: true,
+      );
 
   @override
   void initState() {
     super.initState();
-    _scroll.addListener(_onScroll);
-    widget.controller.addListener(_onText);
+    widget.controller.addListener(_onChanged);
   }
 
   @override
   void didUpdateWidget(covariant CodeEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
-      oldWidget.controller.removeListener(_onText);
-      widget.controller.addListener(_onText);
+      oldWidget.controller.removeListener(_onChanged);
+      widget.controller.addListener(_onChanged);
     }
+    if (oldWidget.wrap != widget.wrap) _lineHeights = const [];
   }
 
   @override
   void dispose() {
-    widget.controller.removeListener(_onText);
-    _scroll.removeListener(_onScroll);
-    _scroll.dispose();
+    widget.controller.removeListener(_onChanged);
+    _vertical.dispose();
+    _horizontal.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
-  void _onScroll() {
+  void _onChanged() {
     if (!mounted) return;
-    if ((_scroll.offset - _offset).abs() < 0.5) return;
-    setState(() => _offset = _scroll.offset);
+    _lineHeights = const [];
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealCaret());
   }
 
-  void _onText() {
-    if (!mounted) return;
-    if (!_wired) _wired = true;
-    setState(() {});
+  void _revealCaret() {
+    if (!mounted || !_focus.hasFocus) return;
+    final selection = widget.controller.selection;
+    if (!selection.isValid) return;
+    final text = widget.controller.text;
+    final offset = selection.baseOffset.clamp(0, text.length);
+    final lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+    final lineEnd = text.indexOf('\n', offset);
+    final lineText = text.substring(
+      lineStart,
+      lineEnd < 0 ? text.length : lineEnd,
+    );
+    final lineIndex = '\n'.allMatches(text.substring(0, lineStart)).length;
+    final heights = _lineHeights;
+    if (heights.isEmpty || lineIndex >= heights.length) return;
+
+    var top = 0.0;
+    for (var i = 0; i < lineIndex; i++) {
+      top += heights[i];
+    }
+    final caretLineHeight = heights[lineIndex];
+    if (_vertical.hasClients) {
+      final viewport = _vertical.position.viewportDimension;
+      final target = _top + top;
+      if (target < _vertical.offset + 12) {
+        _vertical.jumpTo(math.max(0, target - _top - 12));
+      } else if (target + caretLineHeight > _vertical.offset + viewport - 28) {
+        _vertical.jumpTo(math.min(_vertical.position.maxScrollExtent,
+            target + caretLineHeight - viewport + 40));
+      }
+    }
+
+    if (!widget.wrap && _horizontal.hasClients) {
+      final before = lineText.substring(
+        0,
+        (offset - lineStart).clamp(0, lineText.length),
+      );
+      final painter = TextPainter(
+        text: TextSpan(text: before, style: _style),
+        textDirection: TextDirection.ltr,
+        strutStyle: _strut,
+      )..layout();
+      final caret = _left + painter.width;
+      final viewport = _horizontal.position.viewportDimension;
+      if (caret < _horizontal.offset + 12) {
+        _horizontal.jumpTo(math.max(0, caret - 40));
+      } else if (caret > _horizontal.offset + viewport - 24) {
+        _horizontal.jumpTo(math.min(
+          _horizontal.position.maxScrollExtent,
+          caret - viewport + 48,
+        ));
+      }
+    }
+  }
+
+  double _longestLineWidth(String text) {
+    var max = 0.0;
+    for (final line in text.split('\n')) {
+      final painter = TextPainter(
+        text: TextSpan(text: line.isEmpty ? ' ' : line, style: _style),
+        textDirection: TextDirection.ltr,
+        strutStyle: _strut,
+      )..layout();
+      max = math.max(max, painter.width);
+    }
+    return max;
+  }
+
+  List<double> _measure(String text, double width) {
+    if (!widget.wrap) {
+      final count = text.split('\n').length;
+      return List<double>.filled(count, _row);
+    }
+    return [
+      for (final line in text.split('\n'))
+        () {
+          final painter = TextPainter(
+            text: TextSpan(text: line.isEmpty ? ' ' : line, style: _style),
+            textDirection: TextDirection.ltr,
+            strutStyle: _strut,
+          )..layout(maxWidth: math.max(20, width));
+          return math.max(_row, painter.height);
+        }(),
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
-    final lines = widget.controller.text.split('\n').length;
-    final showGutter = !widget.wrap && lines <= 1500;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final text = widget.controller.text;
+        final codeViewport =
+            math.max(80.0, constraints.maxWidth - _gutter - _left - _right);
+        if (_viewportWidth != codeViewport) {
+          _viewportWidth = codeViewport;
+          _lineHeights = const [];
+        }
+        final codeWidth = widget.wrap
+            ? codeViewport
+            : math.max(codeViewport, _longestLineWidth(text) + 18);
+        final heights = _lineHeights.isNotEmpty && widget.wrap
+            ? _lineHeights
+            : _measure(text, codeWidth);
+        _lineHeights = heights;
+        final total = _top +
+            heights.fold<double>(0, (sum, value) => sum + value) +
+            _bottom;
 
-    return Container(
-      color: Pal.ghBg,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (showGutter)
-            Container(
-              width: 46,
-              decoration: const BoxDecoration(
-                color: Pal.ghPanel,
-                border: Border(right: BorderSide(color: Pal.ghLine)),
-              ),
-              child: ClipRect(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: _padding),
-                  child: Stack(
-                    children: [
-                      Transform.translate(
-                        offset: Offset(0, -_offset),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            for (var i = 1; i <= lines; i++)
-                              SizedBox(
-                                height: _rowHeight,
-                                child: Padding(
-                                  padding: const EdgeInsets.only(right: 10),
-                                  child: Text(
-                                    '$i',
-                                    textAlign: TextAlign.right,
-                                    style: Txt.meta.copyWith(
-                                      fontSize: 10.5,
-                                      height: 1,
-                                      color: Pal.ghMuted,
-                                    ),
-                                  ),
-                                ),
+        final gutter = Container(
+          width: _gutter,
+          color: Pal.ghPanel,
+          padding: const EdgeInsets.only(top: _top, right: 9),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var i = 0; i < heights.length; i++)
+                SizedBox(
+                  height: heights[i],
+                  child: Text(
+                    '${i + 1}',
+                    textAlign: TextAlign.right,
+                    style: Txt.meta.copyWith(
+                      fontSize: 10,
+                      height: _lineHeight,
+                      color: Pal.ghMuted,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+
+        final field = TextField(
+          controller: widget.controller,
+          focusNode: _focus,
+          maxLines: null,
+          minLines: null,
+          expands: false,
+          scrollPhysics: const NeverScrollableScrollPhysics(),
+          textAlignVertical: TextAlignVertical.top,
+          style: _style,
+          strutStyle: _strut,
+          cursorColor: Pal.ember,
+          autocorrect: false,
+          enableSuggestions: false,
+          keyboardType: TextInputType.multiline,
+          onChanged: widget.onChanged,
+          decoration: const InputDecoration(
+            isCollapsed: true,
+            border: InputBorder.none,
+            contentPadding: EdgeInsets.fromLTRB(_left, _top, _right, _bottom),
+          ),
+        );
+
+        return Container(
+          color: Pal.ghBg,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              gutter,
+              Container(width: 1, height: total, color: Pal.ghLine),
+              Expanded(
+                child: Scrollbar(
+                  controller: _vertical,
+                  child: SingleChildScrollView(
+                    controller: _vertical,
+                    padding: EdgeInsets.zero,
+                    child: widget.wrap
+                        ? SizedBox(
+                            width: codeViewport + _left + _right,
+                            child: field,
+                          )
+                        : Scrollbar(
+                            controller: _horizontal,
+                            notificationPredicate: (notification) =>
+                                notification.metrics.axis == Axis.horizontal,
+                            child: SingleChildScrollView(
+                              controller: _horizontal,
+                              scrollDirection: Axis.horizontal,
+                              child: SizedBox(
+                                width: codeWidth + _left + _right,
+                                child: field,
                               ),
-                          ],
-                        ),
-                      ),
-                    ],
+                            ),
+                          ),
                   ),
                 ),
               ),
-            ),
-          Expanded(
-            child: TextField(
-              controller: widget.controller,
-              scrollController: _scroll,
-              expands: true,
-              maxLines: null,
-              minLines: null,
-              textAlignVertical: TextAlignVertical.top,
-              style: Txt.code.copyWith(
-                fontSize: _fontSize,
-                height: _lineHeight,
-                color: Pal.ghText,
-              ),
-              cursorColor: Pal.ember,
-              autocorrect: false,
-              enableSuggestions: false,
-              keyboardType: TextInputType.multiline,
-              onChanged: widget.onChanged,
-              decoration: const InputDecoration(
-                isCollapsed: true,
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.fromLTRB(_padding, _padding, 10, 30),
-              ),
-            ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

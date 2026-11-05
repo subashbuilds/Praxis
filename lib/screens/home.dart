@@ -31,9 +31,9 @@ class HomeScreen extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 30),
-            const Text('Your pocket\ndev box.', style: Txt.display),
+            Text('Your pocket\ndev box.', style: Txt.display),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               'Edit files, run a shell, preview the app, and let an agent change '
               'it — all on this phone, in one folder you can read.',
               style: Txt.bodySoft,
@@ -47,6 +47,12 @@ class HomeScreen extends StatelessWidget {
               label: 'New project',
               icon: Icons.add_rounded,
               onTap: () => _newProject(context),
+            ),
+            const SizedBox(height: 8),
+            GhostButton(
+              label: 'Clone a repository',
+              icon: Icons.call_split_rounded,
+              onTap: () => _newProject(context, clone: true),
             ),
             SectionLabel(
               'PROJECTS',
@@ -76,7 +82,7 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
             const SizedBox(height: Sp.x5),
-            const Text(
+            Text(
               'Files, keys and chats stay on this device.',
               style: Txt.meta,
             ),
@@ -91,13 +97,14 @@ class HomeScreen extends StatelessWidget {
         .push(MaterialPageRoute(builder: (_) => const SettingsScreen()));
   }
 
-  Future<void> _newProject(BuildContext context) async {
+  Future<void> _newProject(BuildContext context, {bool clone = false}) async {
     final navigator = Navigator.of(context);
     final created = await showModalBottomSheet<Project>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Pal.surface,
-      builder: (_) => const _NewProjectSheet(),
+      builder: (_) => _NewProjectSheet(clone: clone),
     );
     if (created != null && navigator.mounted) {
       await navigator.push(
@@ -175,8 +182,7 @@ class _ModelLine extends StatelessWidget {
             const SizedBox(width: 6),
             Text(ready ? 'ready' : 'set up', style: Txt.meta),
             const SizedBox(width: 2),
-            const Icon(Icons.chevron_right_rounded,
-                size: 16, color: Pal.textDim),
+            Icon(Icons.chevron_right_rounded, size: 16, color: Pal.textDim),
           ],
         ),
       ),
@@ -239,8 +245,7 @@ class _ProjectCard extends StatelessWidget {
               size: 18,
               onTap: onDelete,
             ),
-            const Icon(Icons.chevron_right_rounded,
-                size: 18, color: Pal.textDim),
+            Icon(Icons.chevron_right_rounded, size: 18, color: Pal.textDim),
           ],
         ),
       ),
@@ -249,31 +254,67 @@ class _ProjectCard extends StatelessWidget {
 }
 
 class _NewProjectSheet extends StatefulWidget {
-  const _NewProjectSheet();
+  const _NewProjectSheet({this.clone = false});
+
+  final bool clone;
 
   @override
   State<_NewProjectSheet> createState() => _NewProjectSheetState();
 }
 
 class _NewProjectSheetState extends State<_NewProjectSheet> {
-  final _name = TextEditingController(text: 'my-project');
+  late final TextEditingController _name;
+  final _repo = TextEditingController();
+  final _branch = TextEditingController(text: 'main');
+  late bool _clone;
   ProjectKind _kind = ProjectKind.web;
   bool _creating = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _clone = widget.clone;
+    _name = TextEditingController(
+      text: widget.clone ? '' : 'my-project',
+    );
+  }
 
   @override
   void dispose() {
     _name.dispose();
+    _repo.dispose();
+    _branch.dispose();
     super.dispose();
   }
 
   Future<void> _create() async {
     if (_creating) return;
-    setState(() => _creating = true);
+    setState(() {
+      _creating = true;
+      _error = null;
+    });
     final state = AppScope.of(context);
     final navigator = Navigator.of(context);
-    final project = await state.createProject(_name.text, _kind);
-    if (!mounted) return;
-    navigator.pop(project);
+    try {
+      final project = _clone
+          ? await state.cloneProject(
+              name: _name.text,
+              repoUrl: _repo.text,
+              branch:
+                  _branch.text.trim().isEmpty ? 'main' : _branch.text.trim(),
+              token: state.activeGithub?.token ?? '',
+            )
+          : await state.createProject(_name.text, _kind);
+      if (!mounted) return;
+      navigator.pop(project);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _creating = false;
+        _error = '$error';
+      });
+    }
   }
 
   @override
@@ -287,40 +328,95 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
           mainAxisSize: MainAxisSize.min,
           children: [
             const SheetHandle(),
-            const Text('Create project', style: Txt.headline),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _clone ? 'Clone a repository' : 'Create project',
+                    style: Txt.headline,
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _clone = !_clone),
+                  behavior: HitTestBehavior.opaque,
+                  child: Text(
+                    _clone ? 'Start blank' : 'Clone repo',
+                    style: Txt.meta.copyWith(color: Pal.ember),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 6),
-            const Text(
-              'A folder is created under the app’s documents directory. '
-              'Everything works offline except model calls.',
+            Text(
+              _clone
+                  ? 'The selected GitHub branch is downloaded as a real project. '
+                      'It uses your active GitHub account for private repositories.'
+                  : 'A folder is created under the app’s documents directory. '
+                      'Everything works offline except model calls.',
               style: Txt.bodySoft,
             ),
             const SizedBox(height: Sp.x4),
+            if (_clone) ...[
+              TextField(
+                controller: _repo,
+                autofocus: true,
+                style: Txt.body,
+                cursorColor: Pal.ember,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration: appField(
+                  'owner/repo or github.com URL',
+                  label: 'Repository',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _branch,
+                style: Txt.code.copyWith(fontSize: 12),
+                cursorColor: Pal.ember,
+                autocorrect: false,
+                decoration: appField('main', label: 'Branch'),
+              ),
+              const SizedBox(height: 10),
+            ],
             TextField(
               controller: _name,
               style: Txt.body,
               cursorColor: Pal.ember,
               textInputAction: TextInputAction.done,
-              decoration: appField('project name'),
+              decoration: appField(
+                _clone
+                    ? 'Optional — defaults to repository name'
+                    : 'project name',
+                label: _clone ? 'Project name (optional)' : null,
+              ),
             ),
-            const SizedBox(height: Sp.x4),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final kind in ProjectKind.values)
-                  _KindChip(
-                    kind: kind,
-                    selected: kind == _kind,
-                    onTap: () => setState(() => _kind = kind),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(_kind.blurb, style: Txt.meta),
+            if (!_clone) ...[
+              const SizedBox(height: Sp.x4),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final kind in ProjectKind.values)
+                    _KindChip(
+                      kind: kind,
+                      selected: kind == _kind,
+                      onTap: () => setState(() => _kind = kind),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(_kind.blurb, style: Txt.meta),
+            ],
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(_error!, style: Txt.bodySoft.copyWith(color: Pal.rose)),
+            ],
             const SizedBox(height: Sp.x5),
             EmberButton(
-              label: 'Create project',
-              icon: Icons.arrow_forward_rounded,
+              label: _clone ? 'Clone repository' : 'Create project',
+              icon:
+                  _clone ? Icons.download_rounded : Icons.arrow_forward_rounded,
               loading: _creating,
               onTap: _create,
             ),

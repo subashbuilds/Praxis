@@ -1,7 +1,7 @@
 import 'dart:io';
 
-import 'package:devnest/core/shell.dart';
-import 'package:devnest/core/vfs.dart';
+import 'package:praxis/core/shell.dart';
+import 'package:praxis/core/vfs.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

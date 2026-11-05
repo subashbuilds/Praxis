@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/push_state.dart';
 import '../core/vfs.dart';
 import '../models.dart';
 import '../screens/editor.dart';
@@ -18,13 +19,23 @@ class FilesTab extends StatefulWidget {
 }
 
 class _FilesTabState extends State<FilesTab> {
-  Future<List<FileEntry>>? _future;
+  Future<_FilesData>? _future;
 
   void _refresh() {
     final state = AppScope.of(context);
     setState(() {
-      _future = state.filesOf(widget.project);
+      _future = _load(state);
     });
+  }
+
+  Future<_FilesData> _load(AppState state) async {
+    final files = await state.filesOf(widget.project);
+    final changes = await state.changesFor(widget.project);
+    return _FilesData(
+      files,
+      {for (final change in changes) change.path: change},
+      await state.pendingCommitsFor(widget.project),
+    );
   }
 
   Future<void> _newFile() async {
@@ -125,12 +136,17 @@ class _FilesTabState extends State<FilesTab> {
 
   @override
   Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final project = state.projectById(widget.project.id);
     return Column(
       children: [
-        ProjectActionsBar(project: widget.project),
+        ProjectActionsBar(
+          project: project,
+          onChanged: _refresh,
+        ),
         Container(
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: Pal.line)),
           ),
           child: Row(
@@ -138,6 +154,11 @@ class _FilesTabState extends State<FilesTab> {
               Text(
                 'EXPLORER',
                 style: Txt.overline.copyWith(fontSize: 9.5),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'changes since last push',
+                style: Txt.meta.copyWith(fontSize: 8.5),
               ),
               const Spacer(),
               IconAction(
@@ -162,8 +183,8 @@ class _FilesTabState extends State<FilesTab> {
           ),
         ),
         Expanded(
-          child: FutureBuilder<List<FileEntry>>(
-            future: _future ??= AppScope.of(context).filesOf(widget.project),
+          child: FutureBuilder<_FilesData>(
+            future: _future ??= _load(state),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(
@@ -183,8 +204,8 @@ class _FilesTabState extends State<FilesTab> {
                   ),
                 );
               }
-              final files = snapshot.data ?? const <FileEntry>[];
-              if (files.isEmpty) {
+              final data = snapshot.data ?? const _FilesData([], {}, 0);
+              if (data.files.isEmpty) {
                 return const Padding(
                   padding: EdgeInsets.all(Sp.page),
                   child: EmptyState(
@@ -197,9 +218,10 @@ class _FilesTabState extends State<FilesTab> {
               }
               return ListView.builder(
                 padding: const EdgeInsets.symmetric(vertical: Sp.x2),
-                itemCount: files.length,
+                itemCount: data.files.length,
                 itemBuilder: (context, index) {
-                  final entry = files[index];
+                  final entry = data.files[index];
+                  final change = data.changes[entry.path];
                   return InkWell(
                     onTap: () => _open(entry),
                     onLongPress: () => _delete(entry),
@@ -226,6 +248,10 @@ class _FilesTabState extends State<FilesTab> {
                               ),
                             ),
                           ),
+                          if (change != null) ...[
+                            _ChangeBadge(change: change),
+                            const SizedBox(width: 7),
+                          ],
                           if (!entry.isDir)
                             Text(humanSize(entry.size),
                                 style: Txt.meta.copyWith(fontSize: 9.5)),
@@ -241,12 +267,20 @@ class _FilesTabState extends State<FilesTab> {
         Container(
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x2),
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(top: BorderSide(color: Pal.line)),
           ),
-          child: Text(
-            'tap to edit · long-press to delete',
-            style: Txt.meta.copyWith(fontSize: 9.5),
+          child: FutureBuilder<_FilesData>(
+            future: _future,
+            builder: (context, snapshot) {
+              final pending = snapshot.data?.pending ?? 0;
+              return Text(
+                pending > 0
+                    ? '$pending unpushed commit${pending == 1 ? '' : 's'} · tap to edit · long-press to delete'
+                    : 'tap to edit · long-press to delete',
+                style: Txt.meta.copyWith(fontSize: 9.5),
+              );
+            },
           ),
         ),
       ],
@@ -265,5 +299,46 @@ class _FilesTabState extends State<FilesTab> {
       'yaml' || 'yml' => Icons.tune_rounded,
       _ => Icons.insert_drive_file_outlined,
     };
+  }
+}
+
+class _FilesData {
+  const _FilesData(this.files, this.changes, this.pending);
+  final List<FileEntry> files;
+  final Map<String, RepoChange> changes;
+  final int pending;
+}
+
+class _ChangeBadge extends StatelessWidget {
+  const _ChangeBadge({required this.change});
+
+  final RepoChange change;
+
+  @override
+  Widget build(BuildContext context) {
+    final added = change.status == RepoChangeStatus.added;
+    final color = added ? Pal.mint : Pal.amber;
+    return Tooltip(
+      message: added ? 'New since last push' : 'Modified since last push',
+      child: Container(
+        width: 19,
+        height: 19,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.12),
+          borderRadius: const BorderRadius.all(Radius.circular(5)),
+          border: Border.all(color: color.withOpacity(0.42)),
+        ),
+        child: Text(
+          change.status.letter,
+          style: Txt.meta.copyWith(
+            fontSize: 9,
+            height: 1,
+            color: color,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
   }
 }
