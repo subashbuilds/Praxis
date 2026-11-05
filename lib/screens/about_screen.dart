@@ -103,7 +103,7 @@ class AboutScreen extends StatelessWidget {
                         children: [
                           Text('Praxis', style: Txt.headline),
                           const SizedBox(height: 2),
-                          Text('Version 2.1.0', style: Txt.meta),
+                          Text('Version 2.2.0', style: Txt.meta),
                         ],
                       ),
                     ],
@@ -152,7 +152,7 @@ class AboutScreen extends StatelessWidget {
                     onTap: () => showLicensePage(
                       context: context,
                       applicationName: 'Praxis',
-                      applicationVersion: '2.1.0',
+                      applicationVersion: '2.2.0',
                       applicationLegalese:
                           'Praxis is an independent local-first app. '
                           'Third-party packages retain their own licences.',
@@ -271,7 +271,7 @@ class LegalScreen extends StatelessWidget {
                     const EdgeInsets.fromLTRB(Sp.page, Sp.x4, Sp.page, Sp.x8),
                 children: [
                   Text(
-                    'Praxis 2.1.0',
+                    'Praxis 2.2.0',
                     style: Txt.meta,
                   ),
                   const SizedBox(height: Sp.x3),

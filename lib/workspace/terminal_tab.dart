@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../core/file_types.dart';
+import '../core/project_skills.dart';
 import '../core/shell.dart';
 import '../models.dart';
 import '../state/app_state.dart';
@@ -32,6 +34,132 @@ class _TerminalTabState extends State<TerminalTab> {
     ),
   ];
   bool _running = false;
+  bool _loadedSkills = false;
+  List<ProjectSkill> _skills = const [];
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_loadedSkills) return;
+    _loadedSkills = true;
+    _refreshSkills();
+  }
+
+  Future<void> _refreshSkills() async {
+    final skills =
+        await AppScope.of(context).installedSkillsFor(widget.project);
+    if (mounted) setState(() => _skills = skills);
+  }
+
+  Future<void> _showSkills() async {
+    await _refreshSkills();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (sheetContext) => SafeArea(
+        child: DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.55,
+          minChildSize: 0.3,
+          maxChildSize: 0.9,
+          builder: (_, scrollController) => ListView(
+            controller: scrollController,
+            padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x5),
+            children: [
+              const Center(child: SheetHandle()),
+              const SizedBox(height: Sp.x3),
+              Text('Project skills',
+                  style: Txt.headline.copyWith(fontSize: 21)),
+              const SizedBox(height: 4),
+              Text(
+                'Installed in .praxis/skills. Every folder holds a SKILL.md and '
+                'loads into the next agent turn for this project.',
+                style: Txt.bodySoft.copyWith(height: 1.5),
+              ),
+              const SizedBox(height: Sp.x3),
+              Container(
+                padding: const EdgeInsets.all(Sp.x3),
+                decoration: BoxDecoration(
+                  color: Pal.raised,
+                  borderRadius: Rd.sm,
+                  border: Border.all(color: Pal.line),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.folder_outlined, size: 16, color: Pal.amber),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '.praxis/skills/  ·  ${_skills.length} installed',
+                        style: Txt.code.copyWith(fontSize: 11),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: Sp.x3),
+              if (_skills.isEmpty)
+                Text(
+                  'No skills yet. Ask the agent to install one from a GitHub '
+                  'repository or paste a SKILL.md, and it appears here.',
+                  style: Txt.meta.copyWith(height: 1.5),
+                )
+              else
+                for (final skill in _skills) ...[
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(Sp.x3),
+                    decoration: BoxDecoration(
+                      color: Pal.surface,
+                      borderRadius: Rd.sm,
+                      border: Border.all(color: Pal.line),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(Icons.extension_outlined,
+                                size: 16, color: Pal.mint),
+                            const SizedBox(width: 7),
+                            Expanded(
+                              child: Text(skill.name,
+                                  style: Txt.label.copyWith(fontSize: 12)),
+                            ),
+                            Text(
+                              humanFileSize(skill.size),
+                              style: Txt.meta.copyWith(fontSize: 9),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          skill.folder,
+                          style: Txt.code
+                              .copyWith(fontSize: 9.5, color: Pal.textDim),
+                        ),
+                        if (skill.description.isNotEmpty) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            skill.description,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: Txt.meta.copyWith(height: 1.4),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   void dispose() {
@@ -73,7 +201,8 @@ class _TerminalTabState extends State<TerminalTab> {
     _stderr.clear();
     setState(() {
       _running = true;
-      _lines.add(ShellLine('\$ $command', ShellTone.command));
+      _lines.add(
+          ShellLine('${shell.promptDisplay} \$ $command', ShellTone.command));
     });
     _scrollToEnd();
 
@@ -135,6 +264,31 @@ class _TerminalTabState extends State<TerminalTab> {
                     style: Txt.meta.copyWith(fontSize: 10.5),
                   ),
                 ),
+                GestureDetector(
+                  onTap: _showSkills,
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Pal.raised,
+                      borderRadius: Rd.pill,
+                      border: Border.all(color: Pal.line),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.extension_outlined,
+                            size: 12, color: Pal.amber),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${_skills.length}',
+                          style: Txt.meta.copyWith(fontSize: 9.5),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
                 if (_running)
                   IconAction(
                     icon: Icons.stop_circle_outlined,
@@ -194,7 +348,7 @@ class _TerminalTabState extends State<TerminalTab> {
             child: Row(
               children: [
                 Text(
-                  '\$',
+                  shell.promptDisplay,
                   style: Txt.code.copyWith(
                     fontSize: 12,
                     color: Pal.ember,

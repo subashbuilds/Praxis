@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 class ProviderFormSheet extends StatefulWidget {
@@ -100,29 +101,16 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
   }
 
   Future<void> _removeKey(int index) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text('Delete key ${index + 1}?'),
-        content: Text(
-          'The key is removed from this device. This cannot be undone.',
-          style: Txt.bodySoft,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Delete key'),
-          ),
-        ],
-      ),
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Delete key ${index + 1}?',
+      body: 'The key is removed from this device. This cannot be undone.',
+      confirmLabel: 'Delete key',
+      destructive: true,
+      icon: Icons.key_off_outlined,
+      details: [ConfirmDetail('Provider', widget.provider.name)],
     );
-    if (!(confirmed ?? false) || !mounted) return;
+    if (!confirmed || !mounted) return;
     setState(() {
       _keys.removeAt(index).dispose();
       _reveal.removeAt(index);
@@ -252,30 +240,17 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
   Future<void> _delete() async {
     final state = AppScope.of(context);
     final navigator = Navigator.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text('Delete ${widget.provider.name}?'),
-        content: Text(
-          'The provider, its keys and saved model choices are removed from '
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Delete ${widget.provider.name}?',
+      body: 'The provider, its keys and saved model choices are removed from '
           'this device. This cannot be undone.',
-          style: Txt.bodySoft,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Delete provider'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Delete provider',
+      destructive: true,
+      icon: Icons.delete_outline_rounded,
+      details: [ConfirmDetail('Provider', widget.provider.name)],
     );
-    if (!(confirmed ?? false) || !mounted) return;
+    if (!confirmed || !mounted) return;
     await state.deleteProvider(widget.provider);
     if (!mounted) return;
     navigator.pop();

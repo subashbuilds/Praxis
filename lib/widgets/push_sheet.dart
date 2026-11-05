@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../core/diff.dart';
+import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/push_state.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 class PushSheet extends StatefulWidget {
@@ -185,7 +187,7 @@ class _PushSheetState extends State<PushSheet> {
     final alreadyCompared = _push.owner == _ownerText &&
         _push.repo == _repoText &&
         _push.branch == _branchText &&
-        _push.baseline.isNotEmpty;
+        _push.synced;
     if (alreadyCompared) return;
     setState(() {
       _syncing = true;
@@ -410,11 +412,9 @@ class _PushSheetState extends State<PushSheet> {
       setState(() => _error = 'Add the GitHub username and repository name.');
       return;
     }
-    final files = <String, String>{
-      for (final change in _changes)
-        if (_selected.contains(change.path)) change.path: change.after,
-    };
-    if (files.isEmpty) {
+    final selectedChanges =
+        _changes.where((change) => _selected.contains(change.path)).toList();
+    if (selectedChanges.isEmpty) {
       setState(() => _error = 'Select at least one file for the commit.');
       return;
     }
@@ -444,6 +444,18 @@ class _PushSheetState extends State<PushSheet> {
       _status = null;
     });
     try {
+      final files = <String, List<int>>{};
+      final texts = <String, String>{};
+      final hashes = <String, String>{};
+      for (final change in selectedChanges) {
+        final bytes = await state.readFileBytes(
+          state.projectById(widget.project.id),
+          change.path,
+        );
+        files[change.path] = bytes;
+        hashes[change.path] = gitBlobSha(bytes);
+        if (!change.isBinary) texts[change.path] = change.after;
+      }
       final parent = _push.lastPendingFor(_ownerText, _repoText, _branchText);
       final commit = await state.createGithubCommit(
         account,
@@ -460,7 +472,7 @@ class _PushSheetState extends State<PushSheet> {
             repo: _repoText,
             branch: _branchText,
           )
-          .withBaseline(files)
+          .withBaseline(texts, hashes: hashes)
           .withPending(PendingCommit(
             sha: commit.sha,
             message: _message.text.trim(),
@@ -468,7 +480,8 @@ class _PushSheetState extends State<PushSheet> {
             owner: _ownerText,
             repo: _repoText,
             branch: _branchText,
-            files: files,
+            files: texts,
+            hashes: hashes,
           ));
       await state.savePushState(widget.project, next);
       await state.updateProjectGit(
@@ -476,18 +489,15 @@ class _PushSheetState extends State<PushSheet> {
         repo: '$_ownerText/$_repoText',
         branch: _branchText,
       );
-      final changes = await state.changesFor(widget.project);
       if (!mounted) return;
       setState(() {
         _push = next;
-        _changes = changes;
-        _selected
-          ..clear()
-          ..addAll(changes.map((change) => change.path));
+        _changes = const [];
+        _selected.clear();
         _message.clear();
         _messageError = null;
         _status =
-            'Committed ${commit.sha.substring(0, 7)}. Commit again only when new changes appear.';
+            'Committed ${commit.sha.substring(0, 7)}. Push when you are ready.';
       });
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -500,42 +510,30 @@ class _PushSheetState extends State<PushSheet> {
     final commits = _push.pending
         .where((commit) => commit.matches(_ownerText, _repoText, _branchText))
         .toList();
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: const Text('Push to GitHub?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Check the destination before anything leaves this device.',
-              style: Txt.bodySoft,
-            ),
-            const SizedBox(height: 14),
-            _ConfirmRow(label: 'Username', value: _ownerText),
-            _ConfirmRow(label: 'Repository', value: _repoText),
-            _ConfirmRow(label: 'Branch', value: _branchText),
-            _ConfirmRow(
-              label: 'Commits',
-              value: '${commits.length}',
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Push now'),
-          ),
-        ],
-      ),
+    var files = 0;
+    final unique = <String>{};
+    for (final commit in commits) {
+      unique.addAll(commit.hashes.keys);
+      unique.addAll(commit.files.keys);
+    }
+    files = unique.length;
+    return showPraxisConfirm(
+      context,
+      title: 'Push to GitHub?',
+      body: 'Check the destination before anything leaves this device.',
+      confirmLabel: commits.length == 1
+          ? 'Push 1 commit'
+          : 'Push ${commits.length} commits',
+      icon: Icons.cloud_upload_outlined,
+      details: [
+        ConfirmDetail('Repository', '$_ownerText/$_repoText'),
+        ConfirmDetail('Branch', _branchText),
+        ConfirmDetail('Commits', '${commits.length}'),
+        ConfirmDetail('Files', '$files'),
+      ],
+      note:
+          'Only committed files are uploaded. Binary files keep their exact bytes.',
     );
-    return confirmed ?? false;
   }
 
   Future<void> _pushCommits() async {
@@ -549,9 +547,11 @@ class _PushSheetState extends State<PushSheet> {
         .toList();
     final confirmed = await _confirmPush();
     if (!confirmed || !mounted) return;
-    final pushedFiles = <String, String>{};
+    final pushedTexts = <String, String>{};
+    final pushedHashes = <String, String>{};
     for (final commit in pending) {
-      pushedFiles.addAll(commit.files);
+      pushedTexts.addAll(commit.files);
+      pushedHashes.addAll(commit.hashes);
     }
     FocusScope.of(context).unfocus();
     setState(() {
@@ -568,7 +568,7 @@ class _PushSheetState extends State<PushSheet> {
         sha: last.sha,
       );
       final next = _push
-          .withBaseline(pushedFiles)
+          .withBaseline(pushedTexts, hashes: pushedHashes)
           .withoutPending(pending.map((commit) => commit.sha))
           .copyWith(
             owner: _ownerText,
@@ -581,14 +581,11 @@ class _PushSheetState extends State<PushSheet> {
         repo: '$_ownerText/$_repoText',
         branch: _branchText,
       );
-      final changes = await state.changesFor(widget.project);
       if (!mounted) return;
       setState(() {
         _push = next;
-        _changes = changes;
-        _selected
-          ..clear()
-          ..addAll(changes.map((change) => change.path));
+        _changes = const [];
+        _selected.clear();
         _status = 'Pushed to github.com/$_ownerText/$_repoText/$_branchText';
       });
     } catch (error) {
@@ -1195,15 +1192,22 @@ class _PushFileRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 7),
-            Text(
-              '+${change.added}',
-              style: Txt.meta.copyWith(fontSize: 9, color: Pal.ghAddText),
-            ),
-            const SizedBox(width: 4),
-            Text(
-              '-${change.removed}',
-              style: Txt.meta.copyWith(fontSize: 9, color: Pal.ghDelText),
-            ),
+            if (change.isBinary)
+              Text(
+                humanFileSize(change.size),
+                style: Txt.meta.copyWith(fontSize: 9, color: Pal.sky),
+              )
+            else ...[
+              Text(
+                '+${change.added}',
+                style: Txt.meta.copyWith(fontSize: 9, color: Pal.ghAddText),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '-${change.removed}',
+                style: Txt.meta.copyWith(fontSize: 9, color: Pal.ghDelText),
+              ),
+            ],
             const SizedBox(width: 2),
             Icon(Icons.chevron_right_rounded, size: 15, color: Pal.textDim),
           ],
@@ -1220,9 +1224,11 @@ class _PushDiffDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final diff = computeDiff(change.before, change.after);
+    final diff =
+        change.isBinary ? null : computeDiff(change.before, change.after);
     final rows =
-        diff.rows.where((row) => row.kind != DiffKind.context).toList();
+        diff?.rows.where((row) => row.kind != DiffKind.context).toList() ??
+            const [];
     return Dialog(
       backgroundColor: Pal.surface,
       insetPadding: const EdgeInsets.all(Sp.x3),
@@ -1594,29 +1600,6 @@ class _BranchChoiceSheet extends StatelessWidget {
       ),
     );
   }
-}
-
-class _ConfirmRow extends StatelessWidget {
-  const _ConfirmRow({required this.label, required this.value});
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 7),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 82,
-              child: Text(label, style: Txt.meta.copyWith(fontSize: 10)),
-            ),
-            Expanded(
-              child: Text(value, style: Txt.body.copyWith(fontSize: 12.5)),
-            ),
-          ],
-        ),
-      );
 }
 
 class _PushError extends StatelessWidget {

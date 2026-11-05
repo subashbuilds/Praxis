@@ -1,6 +1,9 @@
 import 'dart:io';
 
+import 'package:praxis/core/file_types.dart';
+import 'package:praxis/core/readme_html.dart';
 import 'package:praxis/core/shell.dart';
+import 'package:praxis/core/system_shell.dart';
 import 'package:praxis/core/vfs.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -41,6 +44,51 @@ void main() {
       await fs.delete('src');
       expect(await fs.exists('src'), isFalse);
     });
+
+    test('preserves binary bytes and never decodes them as text', () async {
+      final bytes = <int>[0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10, 0x42];
+      await fs.writeBytes('assets/aiva.png', bytes);
+      expect(await fs.readBytes('assets/aiva.png'), bytes);
+      await expectLater(
+        fs.read('assets/aiva.png'),
+        throwsA(isA<FsError>()),
+      );
+      final snapshot = await fs.localSnapshot();
+      expect(snapshot.hashes['assets/aiva.png'], gitBlobSha(bytes));
+      expect(snapshot.texts.containsKey('assets/aiva.png'), isFalse);
+      await fs.copy('assets/aiva.png', 'assets/copy.png');
+      expect(await fs.readBytes('assets/copy.png'), bytes);
+    });
+
+    test('keeps hidden repository files while hiding app state', () async {
+      await fs.write('.github/workflows/ci.yml', 'name: CI');
+      await fs.write('.gitignore', 'build/');
+      expect((await fs.list()).map((entry) => entry.path),
+          isNot(contains('.gitignore')));
+      final all = await fs.list(includeHidden: true);
+      expect(all.map((entry) => entry.path),
+          containsAll(['.gitignore', '.github/workflows/ci.yml']));
+      await fs.write('.praxis/push.json', '{}');
+      expect(
+        (await fs.list(includeHidden: true)).map((entry) => entry.path),
+        isNot(contains('.praxis/push.json')),
+      );
+    });
+  });
+
+  group('README HTML', () {
+    test('turns common README HTML into visible Markdown', () {
+      final markdown = markdownFromReadme(
+        '<h2 align="center">Telegram MediaInfoBot</h2>\n'
+        '<p><img src="https://example.test/badge.svg" alt="build"/> '
+        '<b>fast</b></p>\n'
+        '# Real heading',
+      );
+      expect(markdown, contains('## Telegram MediaInfoBot'));
+      expect(markdown, contains('![build](https://example.test/badge.svg)'));
+      expect(markdown, contains('**fast**'));
+      expect(markdown, contains('# Real heading'));
+    });
   });
 
   group('Shell', () {
@@ -55,6 +103,15 @@ void main() {
       expect(shell.cwd, 'lib');
       result = await shell.run('pwd');
       expect(result.lines.single.text, '/lib');
+    });
+
+    test('the device shell prompt follows the working directory', () async {
+      if (Platform.isAndroid) return;
+      await fs.createDir('.praxis');
+      final shell = SystemShell(fs);
+      expect(shell.promptDisplay, '~/');
+      await shell.run('cd .praxis');
+      expect(shell.promptDisplay, '.praxis/');
     });
 
     test('echo with redirection creates a real file', () async {

@@ -1,6 +1,9 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:http/http.dart' as http;
+
+import 'file_types.dart';
 
 class IntegrationException implements Exception {
   IntegrationException(this.message);
@@ -33,10 +36,21 @@ class GitHubRepo {
 }
 
 class GitHubSnapshot {
-  const GitHubSnapshot({required this.headSha, required this.files});
+  const GitHubSnapshot({
+    required this.headSha,
+    required this.treeSha,
+    required this.files,
+    required this.hashes,
+  });
 
   final String? headSha;
+  final String? treeSha;
+
+  /// Remote text, used for offline diffs and deployments.
   final Map<String, String> files;
+
+  /// Git blob sha for every file in the tree, including binary files.
+  final Map<String, String> hashes;
 }
 
 class GitHubCommit {
@@ -72,29 +86,6 @@ class GitHubClient {
         ..._headers,
         'Content-Type': 'application/json',
       };
-
-  static const _binaryFileExtensions = {
-    'png',
-    'jpg',
-    'jpeg',
-    'gif',
-    'webp',
-    'ico',
-    'ttf',
-    'otf',
-    'woff',
-    'woff2',
-    'zip',
-    'gz',
-    'xz',
-    'apk',
-    'so',
-    'jar',
-    'mp3',
-    'mp4',
-    'pdf',
-    'aab',
-  };
 
   Future<String> login() async {
     if (_loginCache != null) return _loginCache!;
@@ -218,7 +209,12 @@ class GitHubClient {
   ) async {
     final head = await headSha(owner, repo, branch);
     if (head == null) {
-      return const GitHubSnapshot(headSha: null, files: {});
+      return const GitHubSnapshot(
+        headSha: null,
+        treeSha: null,
+        files: {},
+        hashes: {},
+      );
     }
     final treeResponse = await _client
         .get(
@@ -228,7 +224,12 @@ class GitHubClient {
         )
         .timeout(const Duration(seconds: 45));
     if (treeResponse.statusCode == 404) {
-      return GitHubSnapshot(headSha: head, files: const {});
+      return GitHubSnapshot(
+        headSha: head,
+        treeSha: null,
+        files: const {},
+        hashes: const {},
+      );
     }
     if (treeResponse.statusCode != 200) {
       throw IntegrationException(
@@ -237,19 +238,28 @@ class GitHubClient {
     final treeBody = jsonDecode(treeResponse.body) as Map<String, dynamic>;
     final tree = treeBody['tree'];
     if (tree is! List) {
-      return GitHubSnapshot(headSha: head, files: const {});
+      return GitHubSnapshot(
+        headSha: head,
+        treeSha: treeBody['sha'] as String?,
+        files: const {},
+        hashes: const {},
+      );
     }
+    final hashes = <String, String>{};
     final blobs = <Map<String, dynamic>>[];
     for (final item in tree) {
       if (item is! Map || item['type'] != 'blob') continue;
       final path = item['path'] as String? ?? '';
+      final sha = item['sha'] as String? ?? '';
+      if (path.isEmpty || sha.isEmpty) continue;
+      hashes[path] = sha;
       final size = item['size'] as int? ?? 0;
-      if (path.isEmpty || size > 200000 || !_isTextPath(path)) continue;
+      if (size > 200000 || !classifyFile(path).isText) continue;
       blobs.add(item.cast<String, dynamic>());
     }
     final files = <String, String>{};
-    for (var offset = 0; offset < blobs.length; offset += 8) {
-      final chunk = blobs.skip(offset).take(8);
+    for (var offset = 0; offset < blobs.length; offset += 6) {
+      final chunk = blobs.skip(offset).take(6);
       final results = await Future.wait(chunk.map((item) async {
         final response = await _client
             .get(
@@ -278,14 +288,12 @@ class GitHubClient {
         }
       }
     }
-    return GitHubSnapshot(headSha: head, files: files);
-  }
-
-  bool _isTextPath(String path) {
-    final name = path.split('/').last.toLowerCase();
-    final dot = name.lastIndexOf('.');
-    final extension = dot <= 0 ? '' : name.substring(dot + 1);
-    return !_binaryFileExtensions.contains(extension);
+    return GitHubSnapshot(
+      headSha: head,
+      treeSha: treeBody['sha'] as String?,
+      files: files,
+      hashes: hashes,
+    );
   }
 
   Future<void> createBranch({
@@ -359,45 +367,57 @@ class GitHubClient {
     required String repo,
     required String branch,
     required String message,
-    required Map<String, String> files,
+    required Map<String, List<int>> files,
     String? parentSha,
   }) async {
     if (files.isEmpty) {
       throw IntegrationException('Select at least one file to commit.');
     }
-    await ensureRepo(owner, repo);
     final parent = parentSha ?? await headSha(owner, repo, branch);
+    if (parent == null) await ensureRepo(owner, repo);
     final baseTree =
         parent == null ? null : await _treeForCommit(owner, repo, parent);
 
-    final treeEntries = <Map<String, dynamic>>[];
-    for (final entry in files.entries) {
-      final blob = await _client
-          .post(
-            Uri.parse('https://api.github.com/repos/$owner/$repo/git/blobs'),
-            headers: _jsonHeaders,
-            body: jsonEncode({
-              'content': base64Encode(utf8.encode(entry.value)),
-              'encoding': 'base64',
-            }),
-          )
-          .timeout(const Duration(seconds: 45));
-      if (blob.statusCode != 201) {
-        throw IntegrationException(
-            _error(blob, 'Could not upload ${entry.key}'));
-      }
-      final blobSha =
-          (jsonDecode(blob.body) as Map<String, dynamic>)['sha'] as String?;
-      if (blobSha == null) {
-        throw IntegrationException('GitHub returned no blob for ${entry.key}.');
-      }
-      treeEntries.add({
-        'path': entry.key,
-        'mode': '100644',
-        'type': 'blob',
-        'sha': blobSha,
-      });
-    }
+    final paths = files.keys.toList();
+    final uploaded = await _mapConcurrent<String, String>(
+      paths,
+      6,
+      (path) async {
+        final bytes = files[path]!;
+        if (bytes.length > 100 * 1024 * 1024) {
+          throw IntegrationException(
+              '$path is larger than GitHub’s 100 MB blob limit.');
+        }
+        final blob = await _client
+            .post(
+              Uri.parse('https://api.github.com/repos/$owner/$repo/git/blobs'),
+              headers: _jsonHeaders,
+              body: jsonEncode({
+                'content': base64Encode(bytes),
+                'encoding': 'base64',
+              }),
+            )
+            .timeout(const Duration(seconds: 60));
+        if (blob.statusCode != 201) {
+          throw IntegrationException(_error(blob, 'Could not upload $path'));
+        }
+        final blobSha =
+            (jsonDecode(blob.body) as Map<String, dynamic>)['sha'] as String?;
+        if (blobSha == null) {
+          throw IntegrationException('GitHub returned no blob for $path.');
+        }
+        return blobSha;
+      },
+    );
+    final treeEntries = <Map<String, dynamic>>[
+      for (var i = 0; i < paths.length; i++)
+        {
+          'path': paths[i],
+          'mode': '100644',
+          'type': 'blob',
+          'sha': uploaded[i],
+        },
+    ];
 
     final tree = await _client
         .post(
@@ -408,7 +428,7 @@ class GitHubClient {
             'tree': treeEntries,
           }),
         )
-        .timeout(const Duration(seconds: 45));
+        .timeout(const Duration(seconds: 60));
     if (tree.statusCode != 201) {
       throw IntegrationException(
           _error(tree, 'Could not build the commit tree'));
@@ -488,6 +508,26 @@ class GitHubClient {
     }
     return '$fallback (HTTP ${response.statusCode}).';
   }
+}
+
+Future<List<T>> _mapConcurrent<A, T>(
+  List<A> items,
+  int maxActive,
+  Future<T> Function(A item) task,
+) async {
+  final results = List<T?>.filled(items.length, null);
+  var next = 0;
+  Future<void> worker() async {
+    while (true) {
+      final index = next++;
+      if (index >= items.length) return;
+      results[index] = await task(items[index]);
+    }
+  }
+
+  final workers = math.min(maxActive, items.length);
+  await Future.wait(List.generate(workers, (_) => worker()));
+  return results.cast<T>();
 }
 
 /// Vercel REST client: verifies the token and deploys the project's text files

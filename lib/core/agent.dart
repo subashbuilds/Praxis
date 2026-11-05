@@ -1,9 +1,12 @@
-import 'dart:io';
+import 'dart:convert';
 
 import '../models.dart';
 import 'ai.dart';
 import 'diff.dart';
+import 'file_types.dart';
+import 'project_skills.dart';
 import 'shell.dart';
+import 'system_shell.dart';
 import 'vfs.dart';
 
 enum AgentEventKind { text, tool, error }
@@ -71,29 +74,47 @@ typedef ProviderLimitHandler = Future<ProviderConfig?> Function(
   AiProviderException error,
 );
 
-const kAgentTools = <AiToolSpec>[
+typedef AgentFetchText = Future<String> Function(String url);
+typedef AgentFetchBytes = Future<List<int>> Function(String url);
+typedef AgentGitAction = Future<String> Function(String message);
+typedef AgentPullAction = Future<String> Function();
+
+const _baseAgentTools = <AiToolSpec>[
   AiToolSpec(
     name: 'list_files',
-    description: 'List every file in the project, recursively, with sizes.',
+    description:
+        'List project files with sizes. The project tree is already in the system prompt; '
+        'use this only when you need a directory deeper than that listing.',
     parameters: {
       'type': 'object',
       'properties': {
         'path': {
           'type': 'string',
-          'description': 'Directory relative to the project root.'
+          'description': 'Directory relative to the project root.',
         },
       },
     },
   ),
   AiToolSpec(
     name: 'read_file',
-    description: 'Read a UTF-8 text file from the project.',
+    description:
+        'Read a UTF-8 text file by line. Long files are paged: the result ends with the exact '
+        'next offset. Never request the same path and offset twice; continue from that offset '
+        'or work with the text already returned. Binary files are reported, not decoded.',
     parameters: {
       'type': 'object',
       'properties': {
         'path': {
           'type': 'string',
-          'description': 'File path relative to the project root.'
+          'description': 'File path relative to the project root.',
+        },
+        'offset': {
+          'type': 'integer',
+          'description': 'First line to return, 1-based. Defaults to 1.',
+        },
+        'limit': {
+          'type': 'integer',
+          'description': 'Maximum number of lines to return. Defaults to 350.',
         },
       },
       'required': ['path'],
@@ -102,13 +123,14 @@ const kAgentTools = <AiToolSpec>[
   AiToolSpec(
     name: 'write_file',
     description:
-        'Create or overwrite a file with the complete new contents. Always send the whole file.',
+        'Create or overwrite a UTF-8 file with complete contents. Always send the whole file. '
+        'For a simple edit, read only that file and write it back; do not explore first.',
     parameters: {
       'type': 'object',
       'properties': {
         'path': {
           'type': 'string',
-          'description': 'File path relative to the project root.'
+          'description': 'File path relative to the project root.',
         },
         'content': {'type': 'string', 'description': 'Full file contents.'},
       },
@@ -118,45 +140,79 @@ const kAgentTools = <AiToolSpec>[
   AiToolSpec(
     name: 'install_skill',
     description:
-        'Save a reusable skill for this project. Use only when the user asks '
-        'to install or remember a skill. Skills are stored as a SKILL.md folder '
-        'and are loaded into every future agent prompt.',
+        'Install a reusable project skill at .praxis/skills/<name>/SKILL.md. Provide instructions, '
+        'or provide source_url for a raw SKILL.md, GitHub file, GitHub folder or repository. '
+        'Installed skills load into every future prompt for every provider.',
     parameters: {
       'type': 'object',
       'properties': {
         'name': {
           'type': 'string',
-          'description': 'Short skill name, for example telegram-voice-notes.'
+          'description': 'Short skill name, e.g. telegram-voice-notes.',
         },
         'description': {
           'type': 'string',
-          'description': 'One line explaining when the skill should be used.'
+          'description': 'One line explaining when the skill should be used.',
         },
         'instructions': {
           'type': 'string',
-          'description': 'The complete reusable instructions in Markdown.'
+          'description':
+              'Complete Markdown instructions. May be omitted with source_url.',
+        },
+        'source_url': {
+          'type': 'string',
+          'description':
+              'URL to a SKILL.md, GitHub file or folder, or repository.',
         },
       },
-      'required': ['name', 'instructions'],
+      'required': [],
     },
   ),
   AiToolSpec(
     name: 'run_command',
     description:
-        'Run a shell command against the project files (ls, cat, grep, wc, tree, mkdir, mv, rm). '
-        'The agent shell is sandboxed and has no node, python, git or flutter binaries.',
+        'Run a command in the device shell inside the project. This is the real /system/bin/sh, '
+        'not a file-ops imitation. Commands include ls, cat, grep, sed, awk, tar and any binary '
+        'installed on the phone. node, npm, git and python are not bundled by Praxis; check with '
+        'command -v before using them. Network commands work if curl or wget exists.',
     parameters: {
       'type': 'object',
       'properties': {
         'command': {
           'type': 'string',
-          'description': 'Command line to execute.'
+          'description': 'Command line to execute.',
         },
       },
       'required': ['command'],
     },
   ),
 ];
+
+const _gitPushTool = AiToolSpec(
+  name: 'commit_and_push',
+  description:
+      'Commit all changed project files and push the current branch to the connected GitHub '
+      'repository. Ask the user first in your reply; Praxis also shows a destination confirmation '
+      'before anything leaves the device. Use only after the user explicitly asks to publish.',
+  parameters: {
+    'type': 'object',
+    'properties': {
+      'message': {
+        'type': 'string',
+        'description': 'Clear commit message describing the changes.',
+      },
+    },
+    'required': ['message'],
+  },
+);
+
+const _gitPullTool = AiToolSpec(
+  name: 'pull_latest',
+  description:
+      'Pull the latest commit of the current GitHub branch into this project. Local edits are '
+      'preserved when safe; conflicts stop the pull. The user confirms first.',
+  parameters: {'type': 'object', 'properties': {}},
+);
 
 class Agent {
   Agent({
@@ -166,26 +222,68 @@ class Agent {
     required this.shell,
     required this.skills,
     required this.onEvent,
+    this.deviceShell,
+    this.fetchText,
+    this.fetchBytes,
+    this.onCommitAndPush,
+    this.onPullLatest,
     this.onProviderLimit,
     this.onTextDelta,
     this.onThinkingDelta,
     this.onToolStart,
     this.onReply,
-    this.maxRounds = 40,
+    this.maxRounds = 24,
   });
 
   final AiClient client;
   final ProviderConfig provider;
   final ProjectFs fs;
+
+  /// File-ops fallback used by unit tests and platforms without a process
+  /// shell. In the app this is replaced by [deviceShell].
   final Shell shell;
+  final SystemShell? deviceShell;
   final List<Skill> skills;
   final void Function(AgentEvent event) onEvent;
+  final AgentFetchText? fetchText;
+  final AgentFetchBytes? fetchBytes;
+  final AgentGitAction? onCommitAndPush;
+  final AgentPullAction? onPullLatest;
   final ProviderLimitHandler? onProviderLimit;
   final void Function(String delta)? onTextDelta;
   final void Function(String delta)? onThinkingDelta;
   final void Function(AiToolCall call)? onToolStart;
   final void Function(AiReply reply, ProviderConfig provider)? onReply;
   final int maxRounds;
+
+  final Map<String, int> _readCache = {};
+  String? _lastCallSignature;
+  int _repeatedCalls = 0;
+
+  List<AiToolSpec> get _tools => [
+        ..._baseAgentTools,
+        if (fetchBytes != null) _downloadTool,
+        if (onCommitAndPush != null) _gitPushTool,
+        if (onPullLatest != null) _gitPullTool,
+      ];
+
+  static const _downloadTool = AiToolSpec(
+    name: 'download_file',
+    description:
+        'Download a URL into the project, preserving bytes. Use for images, assets, archives or '
+        'skill files. Authorization for a connected GitHub account is added automatically.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'url': {'type': 'string', 'description': 'HTTP or HTTPS URL.'},
+        'path': {
+          'type': 'string',
+          'description': 'Destination path relative to the project root.',
+        },
+      },
+      'required': ['url', 'path'],
+    },
+  );
 
   Future<void> run({
     required List<AiTurn> history,
@@ -207,7 +305,7 @@ class Agent {
             provider: current,
             system: system,
             turns: turns,
-            tools: kAgentTools,
+            tools: _tools,
             onText: onTextDelta,
             onThinking: onThinkingDelta,
           );
@@ -240,6 +338,20 @@ class Agent {
       }
       for (final call in reply.calls) {
         if (isCancelled?.call() ?? false) return;
+        final signature = '${call.name}:${jsonEncode(call.arguments)}';
+        if (signature == _lastCallSignature) {
+          _repeatedCalls++;
+        } else {
+          _lastCallSignature = signature;
+          _repeatedCalls = 1;
+        }
+        if (_repeatedCalls >= 4) {
+          onEvent(AgentEvent.error(
+            'Stopped: the model repeated the same ${call.name} call four times. '
+            'Try a more specific request, or send “continue” to resume with a different approach.',
+          ));
+          return;
+        }
         onToolStart?.call(call);
         final result = await _execute(call);
         onEvent(AgentEvent.tool(
@@ -268,60 +380,56 @@ class Agent {
     ]
         .map((skill) => '- ${skill.name}: ${skill.instructions.trim()}')
         .join('\n');
+    final fullShell = deviceShell != null;
     return '''
 You are Praxis, an AI coding agent running on the user's Android phone.
 You work on a real project folder on the device. The user sees your replies,
 your reasoning behind a collapsed pill, and every tool call with its diff in a
 chat next to the code, a terminal and a live preview.
 
-Work with the tools. Do not claim to have changed a file unless write_file
-succeeded. Keep edits focused and complete: write_file replaces the whole file,
-so send full contents. Prefer a small number of decisive edits over exploration.
+How to work:
+- Finish the request with the fewest model rounds. Do not narrate a plan before
+  acting, and do not run a command just to confirm something already visible.
+- The project tree below is current. Skip list_files for simple edits. Read only
+  the file you must change, then write it. Group independent tool calls in one
+  reply.
+- read_file is paged. When it says "Next offset", use that offset to continue.
+  Never repeat a range you already received; if the needed code is in context,
+  act on it.
+- write_file replaces the whole file, so send complete contents. Stop as soon
+  as the requested result is ready.
+- Do not claim to have changed a file unless write_file succeeded.
 
 Project files:
 $files
 
-Constraints:
-- Your run_command shell is sandboxed to file operations. The user has a
-  separate real device shell; do not claim you can run git, node or python.
-- A web project previews when it has an index.html; link its CSS and JS by
-  relative path so the preview can load them.
+Environment:
+- ${fullShell ? 'run_command is the real device shell (/system/bin/sh) inside the project. Use it for git, grep, archives, builds and any tool installed on the phone. Check `command -v name` first; Node, npm, Python and git are not bundled by Praxis.' : 'run_command is the file-ops shell; this test environment has no device binaries.'}
+- download_file preserves binary bytes and adds the active GitHub token for GitHub URLs.
+- install_skill can read instructions you provide or fetch source_url from the web.
+- ${onCommitAndPush != null ? 'commit_and_push commits and pushes when the user explicitly asks; it asks for destination confirmation first.' : 'Git push is not available in this run.'}
+- ${onPullLatest != null ? 'pull_latest updates from the current GitHub branch after confirmation.' : 'Git pull is not available in this run.'}
+- A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
+- Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
 ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
 ''';
   }
 
   /// Project-installed skills use the Claude-style layout:
-  /// `.praxis/skills/<name>/SKILL.md`. They travel with the project and are
-  /// loaded for every prompt regardless of provider or model.
+  /// `.praxis/skills/<name>/SKILL.md`. They are loaded for every prompt
+  /// regardless of provider or model.
   Future<List<Skill>> _installedSkills() async {
-    final root = Directory('${fs.rootPath}/.praxis/skills');
-    if (!await root.exists()) return const [];
-    final result = <Skill>[];
-    await for (final entity in root.list(followLinks: false)) {
-      if (entity is! Directory || result.length >= 30) continue;
-      final file = File('${entity.path}/SKILL.md');
-      if (!await file.exists()) continue;
-      final raw = await file.readAsString();
-      if (raw.trim().isEmpty) continue;
-      final frontMatter =
-          RegExp(r'^---\r?\n([\s\S]*?)\r?\n---\r?\n?').firstMatch(raw);
-      final meta = frontMatter?.group(1) ?? '';
-      final name = RegExp(r'^name:\s*(.+)$', multiLine: true)
-          .firstMatch(meta)
-          ?.group(1)
-          ?.trim();
-      final body = frontMatter == null
-          ? raw.trim()
-          : raw.substring(frontMatter.end).trim();
-      if (body.isEmpty) continue;
-      result.add(Skill(
-        id: 'project:${entity.path.split('/').last}',
-        name: name == null || name.isEmpty ? entity.path.split('/').last : name,
-        instructions: body,
-      ));
-    }
-    return result;
+    final installed = await ProjectSkillsStore.load(fs);
+    return [
+      for (final skill in installed)
+        if (skill.instructions.isNotEmpty)
+          Skill(
+            id: 'project:${skill.slug}',
+            name: skill.name,
+            instructions: skill.instructions,
+          ),
+    ];
   }
 
   String _slug(String value) {
@@ -339,13 +447,13 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
 
   Future<String> _fileTree() async {
     try {
-      final entries = await fs.list();
+      final entries = await fs.list(includeHidden: true);
       if (entries.isEmpty) return '(empty project)';
       return entries
-          .take(80)
+          .take(120)
           .map((entry) => entry.isDir
               ? '${entry.path}/'
-              : '${entry.path} (${entry.size} B)')
+              : '${entry.path} (${humanFileSize(entry.size)})')
           .join('\n');
     } on FsError {
       return '(project folder is empty)';
@@ -357,59 +465,57 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
       switch (call.name) {
         case 'list_files':
           final path = (call.arguments['path'] as String? ?? '').trim();
-          final entries = await fs.list(path: path);
+          final entries = await fs.list(path: path, includeHidden: true);
           if (entries.isEmpty) return const _ToolOutcome('(empty)');
           return _ToolOutcome(entries
-              .map((e) => e.isDir ? '${e.path}/' : '${e.path} (${e.size} B)')
+              .map((e) => e.isDir
+                  ? '${e.path}/'
+                  : '${e.path} (${humanFileSize(e.size)})')
               .join('\n'));
         case 'read_file':
-          final path = (call.arguments['path'] as String? ?? '').trim();
-          if (path.isEmpty) {
-            return const _ToolOutcome('Error: path is required');
-          }
-          final content = await fs.read(path);
-          return _ToolOutcome(content.length > 16000
-              ? '${content.substring(0, 16000)}\n… truncated'
-              : content);
+          return await _readFile(call);
         case 'write_file':
           final path = (call.arguments['path'] as String? ?? '').trim();
           final content = call.arguments['content'] as String? ?? '';
           if (path.isEmpty) {
             return const _ToolOutcome('Error: path is required');
           }
-          final before = await fs.exists(path) ? await fs.read(path) : '';
+          String before = '';
+          try {
+            before = await fs.exists(path) ? await fs.read(path) : '';
+          } on FsError {
+            before = '';
+          }
           final bytes = await fs.write(path, content);
           final diff = computeDiff(before, content);
+          _resetRepeat();
           return _ToolOutcome(
             'Wrote $bytes bytes to $path',
             diff: diff.isEmpty ? null : diff,
           );
         case 'install_skill':
-          final name = (call.arguments['name'] as String? ?? '').trim();
-          final description =
-              (call.arguments['description'] as String? ?? '').trim();
-          final instructions =
-              (call.arguments['instructions'] as String? ?? '').trim();
-          if (name.isEmpty || instructions.isEmpty) {
-            return const _ToolOutcome(
-                'Error: name and instructions are required');
-          }
-          final slug = _slug(name);
-          final path = '.praxis/skills/$slug/SKILL.md';
-          final content = '---\n'
-              'name: ${_yamlLine(name)}\n'
-              'description: ${_yamlLine(description)}\n'
-              '---\n\n'
-              '$instructions\n';
-          await fs.write(path, content);
-          return _ToolOutcome(
-            'Installed skill “$name” at $path. It is available to every '
-            'future prompt for this project.',
-          );
+          return await _installSkill(call);
+        case 'download_file':
+          return await _downloadFile(call);
         case 'run_command':
           final command = (call.arguments['command'] as String? ?? '').trim();
           if (command.isEmpty) {
             return const _ToolOutcome('Error: command is required');
+          }
+          _resetRepeat();
+          if (deviceShell != null) {
+            final result = await deviceShell!.run(
+              command,
+              timeout: const Duration(seconds: 180),
+            );
+            final text = result.output.trim();
+            final output = text.length > 12000
+                ? '${text.substring(0, 12000)}\n… output truncated'
+                : text;
+            return _ToolOutcome(
+              'cwd: ${result.cwd}\nexit: ${result.exitCode}\n'
+              '${output.isEmpty ? '(no output)' : output}',
+            );
           }
           final result = await shell.run(command);
           if (result.lines.isEmpty) return const _ToolOutcome('(no output)');
@@ -417,9 +523,27 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
               .map((line) => line.text)
               .where((line) => line.isNotEmpty)
               .join('\n');
-          return _ToolOutcome(output.length > 8000
-              ? '${output.substring(0, 8000)}\n… truncated'
+          return _ToolOutcome(output.length > 12000
+              ? '${output.substring(0, 12000)}\n… output truncated'
               : output);
+        case 'commit_and_push':
+          final action = onCommitAndPush;
+          if (action == null) {
+            return const _ToolOutcome('Error: GitHub push is not connected.');
+          }
+          final message = (call.arguments['message'] as String? ?? '').trim();
+          if (message.isEmpty) {
+            return const _ToolOutcome('Error: a commit message is required.');
+          }
+          _resetRepeat();
+          return _ToolOutcome(await action(message));
+        case 'pull_latest':
+          final action = onPullLatest;
+          if (action == null) {
+            return const _ToolOutcome('Error: GitHub pull is not connected.');
+          }
+          _resetRepeat();
+          return _ToolOutcome(await action());
         default:
           return _ToolOutcome('Error: unknown tool ${call.name}');
       }
@@ -430,17 +554,151 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
     }
   }
 
+  void _resetRepeat() {
+    _lastCallSignature = null;
+    _repeatedCalls = 0;
+  }
+
+  Future<_ToolOutcome> _readFile(AiToolCall call) async {
+    final path = (call.arguments['path'] as String? ?? '').trim();
+    if (path.isEmpty) return const _ToolOutcome('Error: path is required');
+    final offset = _positiveInt(call.arguments['offset'], 1);
+    final limit = _positiveInt(call.arguments['limit'], 350).clamp(1, 1200);
+    final cacheKey = '$path\u0000$offset\u0000$limit';
+    final content = await fs.read(path);
+    final lines = content.split('\n');
+    final total = lines.length;
+    final start = offset - 1;
+    if (start >= total) {
+      return _ToolOutcome(
+        'No lines at offset $offset: $path has $total lines. '
+        'Do not read this file again at another offset unless you need a specific earlier range.',
+      );
+    }
+    final selected = <String>[];
+    var characters = 0;
+    var end = start;
+    while (end < total && selected.length < limit) {
+      final line = lines[end];
+      final nextLength = characters + line.length + (selected.isEmpty ? 0 : 1);
+      if (selected.isNotEmpty && nextLength > 15000) break;
+      selected.add(line);
+      characters = nextLength;
+      end++;
+    }
+    final nextOffset = end < total ? end + 1 : null;
+    final repeats = (_readCache[cacheKey] ?? 0) + 1;
+    _readCache[cacheKey] = repeats;
+    final header = '[$path · lines ${start + 1}–$end of $total]';
+    final footer = nextOffset == null
+        ? 'End of file.'
+        : 'Next offset: $nextOffset. Continue there only if you need more; do not repeat this range.';
+    if (repeats > 1) {
+      return _ToolOutcome(
+        '$header\nThis exact range was already returned. Use the content in the '
+        'conversation instead of reading it again.\n$footer',
+      );
+    }
+    return _ToolOutcome('$header\n${selected.join('\n')}\n\n$footer');
+  }
+
+  int _positiveInt(Object? raw, int fallback) {
+    final value = switch (raw) {
+      int v => v,
+      num v => v.toInt(),
+      String v => int.tryParse(v),
+      _ => null,
+    };
+    if (value == null || value < 1) return fallback;
+    return value;
+  }
+
+  Future<_ToolOutcome> _installSkill(AiToolCall call) async {
+    var name = (call.arguments['name'] as String? ?? '').trim();
+    var description = (call.arguments['description'] as String? ?? '').trim();
+    var instructions = (call.arguments['instructions'] as String? ?? '').trim();
+    final sourceUrl = (call.arguments['source_url'] as String? ?? '').trim();
+    if (instructions.isEmpty && sourceUrl.isNotEmpty) {
+      final fetch = fetchText;
+      if (fetch == null) {
+        return const _ToolOutcome(
+            'Error: this session cannot download skill sources.');
+      }
+      final raw = await fetch(sourceUrl);
+      final parsed = ProjectSkillsStore.parse(raw);
+      if (name.isEmpty) name = parsed.name;
+      if (description.isEmpty) description = parsed.description;
+      instructions = parsed.body;
+    }
+    if (instructions.isEmpty) {
+      return const _ToolOutcome(
+          'Error: provide instructions or a source_url that contains a SKILL.md.');
+    }
+    if (name.isEmpty) {
+      name = sourceUrl.isEmpty
+          ? 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}'
+          : sourceUrl
+              .split('/')
+              .where((part) => part.isNotEmpty)
+              .last
+              .replaceAll(
+                  RegExp(r'\.(md|markdown)$', caseSensitive: false), '');
+    }
+    final slug = _slug(name);
+    final path = '.praxis/skills/$slug/SKILL.md';
+    final content = '---\n'
+        'name: ${_yamlLine(name)}\n'
+        'description: ${_yamlLine(description)}\n'
+        '---\n\n'
+        '$instructions\n';
+    await fs.write(path, content);
+    _resetRepeat();
+    return _ToolOutcome(
+      'Installed skill “$name” at $path. It is available to every future '
+      'prompt for this project.',
+    );
+  }
+
+  Future<_ToolOutcome> _downloadFile(AiToolCall call) async {
+    final url = (call.arguments['url'] as String? ?? '').trim();
+    final path = (call.arguments['path'] as String? ?? '').trim();
+    if (url.isEmpty || path.isEmpty) {
+      return const _ToolOutcome('Error: url and path are required');
+    }
+    final fetch = fetchBytes;
+    if (fetch == null) {
+      return const _ToolOutcome(
+          'Error: downloads are unavailable in this session.');
+    }
+    final uri = Uri.tryParse(url);
+    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+      return const _ToolOutcome(
+          'Error: only http and https URLs are supported.');
+    }
+    final bytes = await fetch(url);
+    await fs.writeBytes(path, bytes);
+    _resetRepeat();
+    return _ToolOutcome(
+      'Downloaded ${humanFileSize(bytes.length)} to $path.',
+    );
+  }
+
   String _detail(AiToolCall call) {
     final args = call.arguments;
     switch (call.name) {
       case 'write_file':
-        return '${args['path'] ?? '?'}';
       case 'read_file':
         return '${args['path'] ?? '?'}';
       case 'run_command':
         return '${args['command'] ?? '?'}';
       case 'install_skill':
-        return '${args['name'] ?? 'skill'}';
+        return '${args['name'] ?? args['source_url'] ?? 'skill'}';
+      case 'download_file':
+        return '${args['path'] ?? args['url'] ?? '?'}';
+      case 'commit_and_push':
+        return '${args['message'] ?? 'commit'}';
+      case 'pull_latest':
+        return 'latest commit';
       case 'list_files':
         return (args['path'] as String? ?? '.').isEmpty
             ? '.'

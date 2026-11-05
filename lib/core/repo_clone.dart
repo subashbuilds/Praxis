@@ -132,7 +132,11 @@ class RepoCloneService {
       final relative = path.startsWith(prefix)
           ? path.substring(prefix.length)
           : path.substring(slash + 1);
-      if (relative.isEmpty || relative.startsWith('.')) continue;
+      if (relative.isEmpty ||
+          relative == '.git' ||
+          relative.startsWith('.git/')) {
+        continue;
+      }
       files[relative] = Uint8List.fromList(file.content as List<int>);
     }
     if (files.isEmpty) {

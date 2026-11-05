@@ -28,6 +28,12 @@ class SystemShell {
   Process? _active;
 
   String get cwdDisplay => cwd.isEmpty ? fs.rootPath : fs.absolute(cwd);
+
+  /// A short prompt label: `.praxis/` inside a folder, `~/` at the project
+  /// root. The absolute path is too long for a phone prompt and made every
+  /// command look like it was still at the root.
+  String get promptDisplay => cwd.isEmpty ? '~/' : '$cwd/';
+
   bool get running => _active != null;
 
   static String get shellPath =>

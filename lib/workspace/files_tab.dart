@@ -7,6 +7,7 @@ import '../screens/editor.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/project_actions.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 class FilesTab extends StatefulWidget {
@@ -113,31 +114,18 @@ class _FilesTabState extends State<FilesTab> {
 
   Future<void> _delete(FileEntry entry) async {
     final state = AppScope.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text('Delete ${entry.name}?'),
-        content: Text(
-          entry.isDir
-              ? 'The folder and every file inside it is removed from the device. This cannot be undone.'
-              : 'The file is removed from the device. This cannot be undone.',
-          style: Txt.bodySoft,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Delete ${entry.name}?',
+      body: entry.isDir
+          ? 'The folder and every file inside it is removed from the device. This cannot be undone.'
+          : 'The file is removed from the device. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+      icon: Icons.delete_outline_rounded,
+      details: [ConfirmDetail('Path', entry.path)],
     );
-    if ((confirmed ?? false) && mounted) {
+    if (confirmed && mounted) {
       await state.deletePath(widget.project, entry.path);
       if (mounted) _refresh();
     }

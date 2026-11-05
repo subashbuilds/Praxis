@@ -7,6 +7,7 @@ import '../core/diff.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 class AgentTab extends StatefulWidget {
@@ -32,12 +33,16 @@ class _AgentTabState extends State<AgentTab> {
     final state = AppScope.of(context);
     _state = state;
     state.limitPrompt = _askLimit;
+    state.confirmPrompt = _askConfirm;
   }
 
   @override
   void dispose() {
     final state = _state;
-    if (state != null) state.limitPrompt = null;
+    if (state != null) {
+      state.limitPrompt = null;
+      state.confirmPrompt = null;
+    }
     _composer.dispose();
     _scroll.dispose();
     super.dispose();
@@ -45,25 +50,28 @@ class _AgentTabState extends State<AgentTab> {
 
   Future<bool> _askLimit(String title, String body, String accept) async {
     if (!mounted) return false;
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text(title),
-        content: Text(body, style: Txt.bodySoft),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Stop'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(accept),
-          ),
-        ],
-      ),
+    return showPraxisConfirm(
+      context,
+      title: title,
+      body: body,
+      confirmLabel: accept,
+      cancelLabel: 'Stop',
+      icon: Icons.bolt_outlined,
     );
-    return result ?? false;
+  }
+
+  Future<bool> _askConfirm(String title, String body, String accept) async {
+    if (!mounted) return false;
+    final pull = title.toLowerCase().contains('pull');
+    return showPraxisConfirm(
+      context,
+      title: title,
+      body: body,
+      confirmLabel: accept,
+      icon: pull ? Icons.cloud_download_outlined : Icons.cloud_upload_outlined,
+      note:
+          'The agent pauses here for your approval. Nothing leaves the device until you confirm.',
+    );
   }
 
   void _scrollToEnd() {

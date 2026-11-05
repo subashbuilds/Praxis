@@ -192,7 +192,10 @@ void main() {
   });
 
   test('agent keeps going past six tool rounds', () async {
-    await fs.write('README.md', '# project');
+    await fs.write(
+      'README.md',
+      List.generate(40, (index) => 'line ${index + 1}').join('\n'),
+    );
     var calls = 0;
     final client = MockClient((request) async {
       calls++;
@@ -210,7 +213,8 @@ void main() {
                       'type': 'function',
                       'function': {
                         'name': 'read_file',
-                        'arguments': jsonEncode({'path': 'README.md'}),
+                        'arguments':
+                            jsonEncode({'path': 'README.md', 'offset': calls}),
                       },
                     },
                   ],
@@ -253,6 +257,58 @@ void main() {
         events.where((event) => event.kind == AgentEventKind.tool).length, 8);
     expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
     expect(events.last.text, contains('Finished'));
+  });
+
+  test('stops a model that repeats the same read call', () async {
+    await fs.write('README.md', '# project');
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': '',
+                'tool_calls': [
+                  {
+                    'id': 'call_$calls',
+                    'type': 'function',
+                    'function': {
+                      'name': 'read_file',
+                      'arguments': jsonEncode({'path': 'README.md'}),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    final events = <AgentEvent>[];
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+    ).run(history: const [], prompt: 'read it forever');
+
+    expect(calls, 4);
+    expect(
+        events.where((event) => event.kind == AgentEventKind.tool).length, 3);
+    expect(
+      events.any((event) =>
+          event.kind == AgentEventKind.error &&
+          event.text.contains('four times')),
+      isTrue,
+    );
   });
 
   test('installs a folder skill that is available to later prompts', () async {

@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
+import '../core/file_types.dart';
+import '../core/readme_html.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/code_editor.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -21,14 +25,30 @@ class EditorScreen extends StatefulWidget {
 class _EditorScreenState extends State<EditorScreen> {
   late final CodeController _controller =
       CodeController(language: languageForPath(widget.path));
+  late FileTypeInfo _type = classifyFile(widget.path);
   bool _loading = true;
   bool _dirty = false;
   bool _saving = false;
+  bool _binary = false;
+  bool _image = false;
+  bool _svg = false;
+  bool _preview = false;
+  Uint8List? _bytes;
   String? _error;
-  late bool _preview = _isMarkdown;
   final _previewScroll = ScrollController();
 
   bool get _isMarkdown => languageForPath(widget.path) == CodeLanguage.markdown;
+  bool get _canEdit => !_image && !_binary;
+  bool get _hasPreview => _isMarkdown || _svg;
+
+  String get _typeLabel {
+    if (_svg) return 'SVG';
+    if (_image) return _type.label;
+    if (_isMarkdown) return 'Markdown';
+    return languageForPath(widget.path).label;
+  }
+
+  int get _lineCount => _controller.text.split('\n').length;
 
   @override
   void initState() {
@@ -54,11 +74,23 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<void> _load() async {
     try {
-      final content =
-          await AppScope.of(context).readFile(widget.project, widget.path);
+      final bytes =
+          await AppScope.of(context).readFileBytes(widget.project, widget.path);
+      final type = classifyFile(widget.path, bytes: bytes);
+      final image = type.kind == FileKind.image;
+      final svg = type.kind == FileKind.svg;
+      final text = image ? null : decodeUtf8(bytes, allowEmpty: true);
+      final binary =
+          !svg && (image || type.kind == FileKind.binary || text == null);
       if (!mounted) return;
       setState(() {
-        _controller.text = content;
+        _type = type;
+        _bytes = bytes;
+        _image = image;
+        _svg = svg;
+        _binary = binary;
+        _preview = svg || (_isMarkdown && !binary);
+        if (!binary && text != null) _controller.text = text;
         _loading = false;
       });
     } catch (error) {
@@ -71,7 +103,7 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   Future<void> _save() async {
-    if (_saving) return;
+    if (_saving || !_canEdit) return;
     setState(() => _saving = true);
     final messenger = ScaffoldMessenger.of(context);
     try {
@@ -97,34 +129,23 @@ class _EditorScreenState extends State<EditorScreen> {
       Navigator.of(context).pop();
       return;
     }
-    final leave = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: const Text('Discard changes?'),
-        content: Text('${widget.path} has unsaved edits.', style: Txt.bodySoft),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Keep editing'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Discard'),
-          ),
-        ],
-      ),
+    final leave = await showPraxisConfirm(
+      context,
+      title: 'Discard changes?',
+      body: '${widget.path} has unsaved edits. Leaving now keeps the version '
+          'that is already on this device.',
+      confirmLabel: 'Discard edits',
+      cancelLabel: 'Keep editing',
+      destructive: true,
+      icon: Icons.edit_off_rounded,
     );
-    if ((leave ?? false) && mounted) Navigator.of(context).pop();
+    if (leave && mounted) Navigator.of(context).pop();
   }
 
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
     final language = languageForPath(widget.path);
-    final lines = _controller.text.split('\n').length;
-
     return Scaffold(
       backgroundColor: _preview ? Pal.canvas : Pal.ghBg,
       body: SafeArea(
@@ -132,7 +153,7 @@ class _EditorScreenState extends State<EditorScreen> {
           children: [
             Container(
               color: Pal.ghPanel,
-              padding: const EdgeInsets.fromLTRB(Sp.x2, Sp.x2, Sp.x2, Sp.x2),
+              padding: const EdgeInsets.all(Sp.x2),
               child: Row(
                 children: [
                   IconAction(
@@ -156,16 +177,20 @@ class _EditorScreenState extends State<EditorScreen> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            MonoChip(_isMarkdown && _preview
-                                ? 'Markdown'
-                                : language.label),
+                            MonoChip(_typeLabel),
                           ],
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          _dirty
-                              ? 'unsaved changes · $lines lines'
-                              : 'saved on device · $lines lines',
+                          _loading
+                              ? 'reading file…'
+                              : _binary || _image
+                                  ? '${humanFileSize(_bytes?.length ?? 0)} · saved on device'
+                                  : _dirty
+                                      ? 'unsaved changes · $_lineCount lines'
+                                      : 'saved on device · $_lineCount lines',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: Txt.meta.copyWith(
                             fontSize: 10,
                             color: _dirty ? Pal.amber : Pal.textDim,
@@ -174,7 +199,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       ],
                     ),
                   ),
-                  if (_isMarkdown)
+                  if (_hasPreview)
                     GestureDetector(
                       onTap: _togglePreview,
                       behavior: HitTestBehavior.opaque,
@@ -209,7 +234,7 @@ class _EditorScreenState extends State<EditorScreen> {
                         ),
                       ),
                     ),
-                  if (!_preview)
+                  if (!_preview && _canEdit)
                     IconAction(
                       icon: state.wordWrap
                           ? Icons.wrap_text_rounded
@@ -220,50 +245,142 @@ class _EditorScreenState extends State<EditorScreen> {
                       onTap: () => state.setWordWrap(!state.wordWrap),
                     ),
                   const SizedBox(width: 2),
-                  EmberButton(
-                    label: _saving ? 'Saving' : 'Save',
-                    compact: true,
-                    loading: _saving,
-                    onTap: _save,
-                  ),
+                  if (_canEdit)
+                    EmberButton(
+                      label: _saving ? 'Saving' : 'Save',
+                      compact: true,
+                      loading: _saving,
+                      onTap: _save,
+                    ),
                 ],
               ),
             ),
-            Expanded(
-              child: _loading
-                  ? const Center(
-                      child: SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    )
-                  : _error != null
-                      ? Padding(
-                          padding: const EdgeInsets.all(Sp.page),
-                          child: Text(
-                            _error!,
-                            style: Txt.bodySoft.copyWith(color: Pal.rose),
-                          ),
-                        )
-                      : _preview
-                          ? _MarkdownPreview(
-                              data: _controller.text,
-                              path: widget.path,
-                              controller: _previewScroll,
-                            )
-                          : CodeEditor(
-                              controller: _controller,
-                              language: language,
-                              wrap: state.wordWrap,
-                              onChanged: (_) {
-                                if (!_dirty) setState(() => _dirty = true);
-                              },
-                            ),
-            ),
+            Expanded(child: _content(language, state.wordWrap)),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _content(CodeLanguage language, bool wrap) {
+    if (_loading) {
+      return const Center(
+        child: SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (_error != null) {
+      return ListView(
+        padding: const EdgeInsets.all(Sp.page),
+        children: [
+          EmptyState(
+            icon: Icons.warning_amber_rounded,
+            title: 'Could not open this file',
+            body: _error!,
+          ),
+        ],
+      );
+    }
+    if (_image && _preview) return _imagePreview();
+    if (_svg && _preview) return _svgPreview();
+    if (_binary) return _binaryPreview();
+    if (_isMarkdown && _preview) {
+      return _MarkdownPreview(
+        data: markdownFromReadme(_controller.text),
+        controller: _previewScroll,
+      );
+    }
+    return CodeEditor(
+      controller: _controller,
+      language: language,
+      wrap: wrap,
+      onChanged: (_) {
+        if (!_dirty) setState(() => _dirty = true);
+      },
+    );
+  }
+
+  Widget _imagePreview() {
+    final bytes = _bytes;
+    if (bytes == null) return const SizedBox.shrink();
+    return Container(
+      color: Pal.canvas,
+      padding: const EdgeInsets.all(Sp.x4),
+      child: Center(
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 5,
+          child: Image.memory(
+            bytes,
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => Text(
+              'This image format cannot be rendered on this device.\n'
+              'The file is intact and will still be committed byte for byte.',
+              textAlign: TextAlign.center,
+              style: Txt.bodySoft,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _svgPreview() {
+    try {
+      return Container(
+        color: Pal.canvas,
+        padding: const EdgeInsets.all(Sp.x4),
+        child: Center(
+          child: InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 6,
+            child: SvgPicture.string(
+              _controller.text,
+              fit: BoxFit.contain,
+            ),
+          ),
+        ),
+      );
+    } catch (_) {
+      return Center(
+        child: Text('This SVG could not be rendered. Use Code to inspect it.',
+            style: Txt.bodySoft),
+      );
+    }
+  }
+
+  Widget _binaryPreview() {
+    return ListView(
+      padding: const EdgeInsets.all(Sp.page),
+      children: [
+        EmptyState(
+          icon: Icons.data_object_rounded,
+          title: 'Binary file',
+          body: '${widget.path} is ${humanFileSize(_bytes?.length ?? 0)} of '
+              '${_type.mime ?? 'binary data'}. Praxis keeps the original bytes '
+              'untouched; there is no text representation to edit here.',
+        ),
+        const SizedBox(height: Sp.x4),
+        Panel(
+          padding: const EdgeInsets.all(Sp.x3),
+          child: Row(
+            children: [
+              Icon(Icons.verified_outlined, size: 16, color: Pal.mint),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Safe to browse, copy and commit. The text editor will not '
+                  'attempt to decode it.',
+                  style: Txt.meta.copyWith(height: 1.45),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -271,12 +388,10 @@ class _EditorScreenState extends State<EditorScreen> {
 class _MarkdownPreview extends StatelessWidget {
   const _MarkdownPreview({
     required this.data,
-    required this.path,
     required this.controller,
   });
 
   final String data;
-  final String path;
   final ScrollController controller;
 
   @override

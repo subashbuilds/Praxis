@@ -1,7 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+
+import 'file_types.dart';
 
 class FsError implements Exception {
   FsError(this.message);
@@ -23,6 +27,20 @@ class FileEntry {
   final String name;
   final bool isDir;
   final int size;
+}
+
+/// Text content plus a Git object id for every file. Built in one pass so
+/// cloning and pulling never decode binary files as UTF-8.
+class LocalSnapshot {
+  const LocalSnapshot({
+    required this.texts,
+    required this.hashes,
+    required this.sizes,
+  });
+
+  final Map<String, String> texts;
+  final Map<String, String> hashes;
+  final Map<String, int> sizes;
 }
 
 /// A sandboxed view of one project directory. Every path is normalised and
@@ -70,12 +88,44 @@ class ProjectFs {
         FileSystemEntityType.directory;
   }
 
-  Future<String> read(String path) async {
+  Future<Uint8List> readBytes(String path) async {
     final rel = normalize(path);
     if (rel.isEmpty) throw FsError('Is a directory: /');
     final file = File(absolute(rel));
     if (!await file.exists()) throw FsError('No such file: $rel');
-    return file.readAsString();
+    return file.readAsBytes();
+  }
+
+  Future<String> read(String path) async {
+    final rel = normalize(path);
+    final bytes = await readBytes(rel);
+    final text = decodeUtf8(bytes, allowEmpty: true);
+    if (text == null) {
+      throw FsError(
+        '$rel is a binary file (${humanFileSize(bytes.length)}). '
+        'Open it in Files to preview it instead of the text editor.',
+      );
+    }
+    return text;
+  }
+
+  /// Reads only what is needed to distinguish a text source from a binary
+  /// asset. Known text extensions do not pay for a disk read.
+  Future<bool> isTextFile(String path) async {
+    final rel = normalize(path);
+    final known = classifyFile(rel);
+    if (known.known) return known.isText;
+    final file = File(absolute(rel));
+    if (!await file.exists()) throw FsError('No such file: $rel');
+    final length = await file.length();
+    if (length == 0) return true;
+    final handle = await file.open();
+    try {
+      final sample = await handle.read(math.min(8192, length));
+      return classifyFile(rel, bytes: sample).isText;
+    } finally {
+      await handle.close();
+    }
   }
 
   /// Copies a file that lives outside the project (a picker result) into it.
@@ -88,12 +138,9 @@ class ProjectFs {
   }
 
   Future<int> write(String path, String content) async {
-    final rel = normalize(path);
-    if (rel.isEmpty) throw FsError('Not a file: /');
-    final file = File(absolute(rel));
-    await file.parent.create(recursive: true);
-    await file.writeAsString(content);
-    return content.length;
+    final bytes = utf8.encode(content);
+    await writeBytes(path, bytes);
+    return bytes.length;
   }
 
   Future<int> writeBytes(String path, List<int> bytes) async {
@@ -101,18 +148,18 @@ class ProjectFs {
     if (rel.isEmpty) throw FsError('Not a file: /');
     final file = File(absolute(rel));
     await file.parent.create(recursive: true);
-    await file.writeAsBytes(bytes);
+    await file.writeAsBytes(bytes, flush: true);
     return bytes.length;
   }
 
   /// Everything the user can see, including binary assets, as a ZIP. Hidden
   /// app state (`.praxis`) is intentionally excluded.
   Future<Uint8List> zipBytes() async {
-    final entries = await list();
+    final entries = await list(includeHidden: true);
     final archive = Archive();
     for (final entry in entries) {
       if (entry.isDir) continue;
-      final bytes = await File(absolute(entry.path)).readAsBytes();
+      final bytes = await readBytes(entry.path);
       archive.addFile(ArchiveFile(entry.path, bytes.length, bytes));
     }
     final encoded = ZipEncoder().encode(archive);
@@ -168,13 +215,14 @@ class ProjectFs {
     if (type != FileSystemEntityType.file) {
       throw FsError('Only files can be copied: $source');
     }
-    final content = await File(absolute(source)).readAsString();
-    await write(target, content);
+    final bytes = await File(absolute(source)).readAsBytes();
+    await writeBytes(target, bytes);
   }
 
   Future<List<FileEntry>> list({
     String path = '',
     bool recursive = true,
+    bool includeHidden = false,
   }) async {
     final rel = normalize(path);
     final dir = Directory(absolute(rel));
@@ -184,11 +232,23 @@ class ProjectFs {
     final entries = <FileEntry>[];
     await for (final entity
         in dir.list(recursive: recursive, followLinks: false)) {
-      if (entity.path.contains('/.')) continue;
       final relative =
           entity.path.substring(root.path.length + 1).replaceAll('\\', '/');
+      // App state is never part of the project's content. Everything else,
+      // including .github and .gitignore, is preserved when hidden files are
+      // requested for snapshots and export.
+      if (relative == '.project.json' ||
+          relative == '.praxis' ||
+          relative.startsWith('.praxis/') ||
+          relative == '.git' ||
+          relative.startsWith('.git/')) {
+        continue;
+      }
       final name = relative.split('/').last;
-      if (name.startsWith('.')) continue;
+      if (!includeHidden &&
+          (entity.path.contains('/.') || name.startsWith('.'))) {
+        continue;
+      }
       final type = await FileSystemEntity.type(entity.path);
       entries.add(FileEntry(
         path: relative,
@@ -206,43 +266,39 @@ class ProjectFs {
     return entries;
   }
 
-  /// Text files small enough to push to an integration.
+  /// Text files small enough to push to an integration. A file that claims a
+  /// text extension but contains invalid UTF-8 is skipped instead of aborting
+  /// the entire operation.
   Future<Map<String, String>> textFiles({int maxBytes = 200000}) async {
-    final entries = await list();
+    final entries = await list(includeHidden: true);
     final result = <String, String>{};
     for (final entry in entries) {
       if (entry.isDir || entry.size > maxBytes) continue;
-      if (_binaryExtensions.contains(_extension(entry.path))) continue;
-      result[entry.path] = await read(entry.path);
+      if (!await isTextFile(entry.path)) continue;
+      try {
+        result[entry.path] = await read(entry.path);
+      } on FsError {
+        // A malformed text file is not a reason to fail a deploy or baseline.
+      }
     }
     return result;
   }
 
-  static String _extension(String path) {
-    final name = path.split('/').last;
-    final dot = name.lastIndexOf('.');
-    return dot <= 0 ? '' : name.substring(dot + 1).toLowerCase();
+  Future<LocalSnapshot> localSnapshot({int maxTextBytes = 200000}) async {
+    final entries = await list(includeHidden: true);
+    final texts = <String, String>{};
+    final hashes = <String, String>{};
+    final sizes = <String, int>{};
+    for (final entry in entries) {
+      if (entry.isDir) continue;
+      final bytes = await readBytes(entry.path);
+      hashes[entry.path] = gitBlobSha(bytes);
+      sizes[entry.path] = bytes.length;
+      if (bytes.length <= maxTextBytes && await isTextFile(entry.path)) {
+        final text = decodeUtf8(bytes, allowEmpty: true);
+        if (text != null) texts[entry.path] = text;
+      }
+    }
+    return LocalSnapshot(texts: texts, hashes: hashes, sizes: sizes);
   }
-
-  static const _binaryExtensions = {
-    'png',
-    'jpg',
-    'jpeg',
-    'gif',
-    'webp',
-    'ico',
-    'ttf',
-    'otf',
-    'woff',
-    'woff2',
-    'zip',
-    'gz',
-    'xz',
-    'apk',
-    'so',
-    'jar',
-    'mp3',
-    'mp4',
-    'pdf',
-  };
 }

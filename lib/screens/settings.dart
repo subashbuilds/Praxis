@@ -6,6 +6,7 @@ import '../core/usage.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 import 'about_screen.dart';
 import 'provider_form.dart';
@@ -367,7 +368,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               const SizedBox(width: 9),
                               Text('Praxis', style: Txt.title),
                               const Spacer(),
-                              Text('2.1.0', style: Txt.meta),
+                              Text('2.2.0', style: Txt.meta),
                             ],
                           ),
                           const SizedBox(height: 10),
@@ -500,30 +501,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _removeAccount(IntegrationAccount account) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text('Remove ${account.displayName}?'),
-        content: Text(
-          'The token is deleted from this device. Projects and deployments '
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Remove ${account.displayName}?',
+      body: 'The token is deleted from this device. Projects and deployments '
           'already made are not affected.',
-          style: Txt.bodySoft,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Remove account',
+      destructive: true,
+      icon: Icons.logout_rounded,
+      details: [
+        ConfirmDetail('Integration', account.kind.label),
+        ConfirmDetail('Account', account.displayName),
+      ],
     );
-    if ((confirmed ?? false) && mounted) {
+    if (confirmed && mounted) {
       await AppScope.of(context).removeAccount(account);
     }
   }
@@ -615,30 +606,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _reset(AppState state) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: const Text('Erase all local data?'),
-        content: Text(
-          'Projects, chats, provider keys and integration tokens are deleted from '
-          'this device. This cannot be undone.',
-          style: Txt.bodySoft,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Erase'),
-          ),
-        ],
-      ),
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Erase all local data?',
+      body: 'Projects, chats, provider keys and integration tokens are deleted '
+          'from this device. This cannot be undone.',
+      confirmLabel: 'Erase everything',
+      destructive: true,
+      icon: Icons.delete_forever_rounded,
+      note: 'GitHub repositories and deployed sites are not changed.',
     );
-    if (confirmed ?? false) {
+    if (confirmed) {
       await state.resetEverything();
       if (mounted) _showResult('Praxis was reset to a clean state.');
     }

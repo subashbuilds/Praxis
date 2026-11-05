@@ -10,8 +10,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/agent.dart';
 import '../core/ai.dart';
 import '../core/diff.dart';
+import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/model_info.dart';
+import '../core/project_skills.dart';
 import '../core/push_state.dart';
 import '../core/repo_clone.dart';
 import '../core/shell.dart';
@@ -28,6 +30,40 @@ typedef LimitPrompt = Future<bool> Function(
   String body,
   String acceptLabel,
 );
+
+/// The UI supplies this for agent-initiated Git actions. A null callback means
+/// the action is unavailable, so the agent can never bypass confirmation.
+typedef ConfirmPrompt = Future<bool> Function(
+  String title,
+  String body,
+  String acceptLabel,
+);
+
+class PullResult {
+  const PullResult({
+    required this.updated,
+    required this.added,
+    required this.deleted,
+    required this.keptLocal,
+  });
+
+  final int updated;
+  final int added;
+  final int deleted;
+  final int keptLocal;
+
+  int get changed => updated + added + deleted;
+
+  String get summary {
+    final parts = <String>[
+      if (updated > 0) '$updated updated',
+      if (added > 0) '$added added',
+      if (deleted > 0) '$deleted removed',
+      if (keptLocal > 0) '$keptLocal local kept',
+    ];
+    return parts.isEmpty ? 'Already up to date' : parts.join(' · ');
+  }
+}
 
 class AppState extends ChangeNotifier {
   AppState({
@@ -78,6 +114,7 @@ class AppState extends ChangeNotifier {
   /// Set by the agent tab while it is on screen. Without it a limit stops the
   /// run instead of guessing.
   LimitPrompt? limitPrompt;
+  ConfirmPrompt? confirmPrompt;
 
   bool _cancelled = false;
   int _entrySeq = 0;
@@ -258,12 +295,14 @@ class AppState extends ChangeNotifier {
         branch: cloned.branch,
       );
       await _writeProjectMeta(dir, project);
-      final baseline = await fs.textFiles();
+      final snapshot = await fs.localSnapshot();
       final initialPush = PushState(
         owner: ref.owner,
         repo: ref.name,
         branch: cloned.branch,
-        baseline: baseline,
+        baseline: snapshot.texts,
+        hashes: snapshot.hashes,
+        synced: true,
       );
       _pushStates[id] = initialPush;
       await PushStore.save(fs, initialPush);
@@ -309,15 +348,22 @@ class AppState extends ChangeNotifier {
     return next;
   }
 
-  Future<List<FileEntry>> filesOf(Project project) => fsFor(project).list();
+  Future<List<FileEntry>> filesOf(Project project) =>
+      fsFor(project).list(includeHidden: true);
 
   Future<String> readFile(Project project, String path) =>
       fsFor(project).read(path);
+
+  Future<Uint8List> readFileBytes(Project project, String path) =>
+      fsFor(project).readBytes(path);
 
   Future<void> writeFile(Project project, String path, String content) async {
     await fsFor(project).write(path, content);
     notifyListeners();
   }
+
+  Future<List<ProjectSkill>> installedSkillsFor(Project project) =>
+      ProjectSkillsStore.load(fsFor(project));
 
   Future<void> deletePath(Project project, String path) async {
     await fsFor(project).delete(path);
@@ -337,14 +383,35 @@ class AppState extends ChangeNotifier {
 
   Future<String?> previewFile(Project project) async {
     final fs = fsFor(project);
-    if (await fs.exists('index.html')) return fs.absolute('index.html');
-    final entries = await fs.list();
-    for (final entry in entries) {
-      if (!entry.isDir && entry.path.endsWith('.html')) {
-        return fs.absolute(entry.path);
-      }
+    const candidates = [
+      'index.html',
+      'dist/index.html',
+      'build/web/index.html',
+      'build/index.html',
+      'public/index.html',
+      'out/index.html',
+      'web/index.html',
+    ];
+    for (final candidate in candidates) {
+      if (await fs.exists(candidate)) return fs.absolute(candidate);
     }
-    return null;
+    final entries = await fs.list();
+    final html = entries
+        .where((entry) =>
+            !entry.isDir && entry.path.toLowerCase().endsWith('.html'))
+        .toList()
+      ..sort((a, b) {
+        final aName = a.name.toLowerCase();
+        final bName = b.name.toLowerCase();
+        final aIndex = aName == 'index.html' ? 0 : 1;
+        final bIndex = bName == 'index.html' ? 0 : 1;
+        if (aIndex != bIndex) return aIndex.compareTo(bIndex);
+        final aDepth = '/'.allMatches(a.path).length;
+        final bDepth = '/'.allMatches(b.path).length;
+        if (aDepth != bDepth) return aDepth.compareTo(bDepth);
+        return a.path.compareTo(b.path);
+      });
+    return html.isEmpty ? null : fs.absolute(html.first.path);
   }
 
   Future<Uint8List> exportZip(Project project) => fsFor(project).zipBytes();
@@ -515,7 +582,15 @@ class AppState extends ChangeNotifier {
       provider: provider,
       fs: fsFor(project),
       shell: shellFor(project),
+      deviceShell: systemShellFor(project),
       skills: skills,
+      fetchText: _fetchSkillText,
+      fetchBytes: _fetchUrlBytes,
+      onCommitAndPush: activeGithub == null
+          ? null
+          : (message) => agentCommitAndPush(projectId, message),
+      onPullLatest:
+          activeGithub == null ? null : () => agentPullLatest(projectId),
       onProviderLimit: _handleProviderLimit,
       onTextDelta: (delta) {
         liveText += delta;
@@ -644,8 +719,14 @@ class AppState extends ChangeNotifier {
   String _toolDetail(AiToolCall call) {
     final args = call.arguments;
     return switch (call.name) {
-      'write_file' || 'read_file' => '${args['path'] ?? '?'}',
+      'write_file' ||
+      'read_file' ||
+      'download_file' =>
+        '${args['path'] ?? '?'}',
       'run_command' => '${args['command'] ?? '?'}',
+      'install_skill' => '${args['name'] ?? args['source_url'] ?? 'skill'}',
+      'commit_and_push' => '${args['message'] ?? 'commit'}',
+      'pull_latest' => 'latest commit',
       'list_files' =>
         (args['path'] as String? ?? '').isEmpty ? '.' : '${args['path']}',
       _ => '',
@@ -1020,7 +1101,7 @@ class AppState extends ChangeNotifier {
     final sameTarget = current.owner == owner &&
         current.repo == repo &&
         current.branch == branch;
-    if (sameTarget && current.baseline.isNotEmpty) return current;
+    if (sameTarget && current.synced) return current;
     final snapshot = await GitHubClient(account.token, client: httpClient)
         .snapshot(owner, repo, branch);
     final next = current.copyWith(
@@ -1028,6 +1109,8 @@ class AppState extends ChangeNotifier {
       repo: repo,
       branch: branch,
       baseline: snapshot.files,
+      hashes: snapshot.hashes,
+      synced: true,
     );
     return savePushState(project, next);
   }
@@ -1048,24 +1131,37 @@ class AppState extends ChangeNotifier {
 
   Future<List<RepoChange>> changesFor(Project project) async {
     final state = await pushStateFor(project);
-    final current = await fsFor(project).textFiles();
-    final paths = <String>{...state.baseline.keys, ...current.keys}.toList()
+    final current = await fsFor(project).localSnapshot();
+    final paths = <String>{
+      ...state.hashes.keys,
+      ...state.baseline.keys,
+      ...current.hashes.keys,
+    }.toList()
       ..sort();
     final changes = <RepoChange>[];
     for (final path in paths) {
+      final localHash = current.hashes[path];
+      if (localHash == null) continue;
+      var remoteHash = state.hashes[path];
       final before = state.baseline[path];
-      final after = current[path];
-      if (after == null) continue;
-      if (before == after) continue;
-      final diff = computeDiff(before ?? '', after);
+      if (remoteHash == null && before != null) {
+        remoteHash = gitBlobSha(utf8.encode(before));
+      }
+      if (remoteHash == localHash) continue;
+      final after = current.texts[path];
+      final isBinary = after == null;
+      final diff = isBinary ? null : computeDiff(before ?? '', after);
       changes.add(RepoChange(
         path: path,
-        status:
-            before == null ? RepoChangeStatus.added : RepoChangeStatus.modified,
+        status: before == null && remoteHash == null
+            ? RepoChangeStatus.added
+            : RepoChangeStatus.modified,
         before: before ?? '',
-        after: after,
-        added: diff.added,
-        removed: diff.removed,
+        after: after ?? '',
+        added: diff?.added ?? 0,
+        removed: diff?.removed ?? 0,
+        isBinary: isBinary,
+        size: current.sizes[path] ?? 0,
       ));
     }
     return changes;
@@ -1090,7 +1186,7 @@ class AppState extends ChangeNotifier {
     required String repo,
     required String branch,
     required String message,
-    required Map<String, String> files,
+    required Map<String, List<int>> files,
     String? parentSha,
   }) =>
       GitHubClient(account.token, client: httpClient).createCommit(
@@ -1115,6 +1211,405 @@ class AppState extends ChangeNotifier {
         branch: branch,
         sha: sha,
       );
+
+  /// Downloads the current branch archive and applies it without touching
+  /// local edits that GitHub has not changed. Files changed on both sides stop
+  /// the pull instead of silently overwriting either version.
+  Future<PullResult> pullProject(
+    Project project,
+    IntegrationAccount account, {
+    String? owner,
+    String? repo,
+    String? branch,
+  }) async {
+    final parts = project.repo.split('/');
+    final resolvedOwner = owner?.trim().isNotEmpty == true
+        ? owner!.trim()
+        : parts.length == 2
+            ? parts.first
+            : '';
+    final resolvedRepo = repo?.trim().isNotEmpty == true
+        ? repo!.trim()
+        : parts.length == 2
+            ? parts.last
+            : '';
+    final resolvedBranch =
+        branch?.trim().isNotEmpty == true ? branch!.trim() : project.branch;
+    if (resolvedOwner.isEmpty || resolvedRepo.isEmpty) {
+      throw IntegrationException('Connect a GitHub repository first.');
+    }
+    final state = await pushStateFor(project);
+    if (state.pendingFor(resolvedOwner, resolvedRepo, resolvedBranch) > 0) {
+      throw IntegrationException(
+          'Push your waiting commits before pulling, so nothing is overwritten.');
+    }
+    final cloned = await repoClone.clone(
+      repo: RepoRef(owner: resolvedOwner, name: resolvedRepo),
+      branch: resolvedBranch,
+      token: account.token,
+    );
+    final remoteTexts = <String, String>{};
+    final remoteHashes = <String, String>{};
+    for (final entry in cloned.files.entries) {
+      final bytes = entry.value;
+      remoteHashes[entry.key] = gitBlobSha(bytes);
+      if (bytes.length <= 200000 && classifyFile(entry.key).isText) {
+        final text = decodeUtf8(bytes, allowEmpty: true);
+        if (text != null) remoteTexts[entry.key] = text;
+      }
+    }
+
+    final fs = fsFor(project);
+    final local = await fs.localSnapshot();
+    String? baseHash(String path) {
+      final known = state.hashes[path];
+      if (known != null) return known;
+      final text = state.baseline[path];
+      return text == null ? null : gitBlobSha(utf8.encode(text));
+    }
+
+    final writes = <String, List<int>>{};
+    final deletes = <String>[];
+    final conflicts = <String>[];
+    var keptLocal = 0;
+    for (final path in remoteHashes.keys) {
+      final remoteHash = remoteHashes[path];
+      final localHash = local.hashes[path];
+      final base = baseHash(path);
+      if (localHash == null) {
+        writes[path] = cloned.files[path]!;
+      } else if (localHash == remoteHash) {
+        continue;
+      } else if (base == localHash) {
+        writes[path] = cloned.files[path]!;
+      } else if (base == remoteHash) {
+        keptLocal++;
+      } else {
+        conflicts.add(path);
+      }
+    }
+    for (final path in local.hashes.keys) {
+      if (remoteHashes.containsKey(path)) continue;
+      final base = baseHash(path);
+      if (base == null) {
+        keptLocal++;
+      } else if (base == local.hashes[path]) {
+        deletes.add(path);
+      } else {
+        conflicts.add(path);
+      }
+    }
+    if (conflicts.isNotEmpty) {
+      final shown = conflicts.take(4).join(', ');
+      final more =
+          conflicts.length > 4 ? ' and ${conflicts.length - 4} more' : '';
+      throw IntegrationException(
+          'Pull stopped because these files changed locally and on GitHub: '
+          '$shown$more. Commit or stash them first.');
+    }
+
+    final added =
+        writes.keys.where((path) => !local.hashes.containsKey(path)).length;
+    for (final entry in writes.entries) {
+      await fs.writeBytes(entry.key, entry.value);
+    }
+    for (final path in deletes) {
+      if (await fs.exists(path)) await fs.delete(path);
+    }
+    final next = state.copyWith(
+      owner: resolvedOwner,
+      repo: resolvedRepo,
+      branch: resolvedBranch,
+      baseline: remoteTexts,
+      hashes: remoteHashes,
+      synced: true,
+    );
+    await savePushState(project, next);
+    await updateProjectGit(
+      projectById(project.id),
+      repo: '$resolvedOwner/$resolvedRepo',
+      branch: resolvedBranch,
+    );
+    notifyListeners();
+    return PullResult(
+      updated: writes.length - added,
+      added: added,
+      deleted: deletes.length,
+      keptLocal: keptLocal,
+    );
+  }
+
+  Future<String> _fetchSkillText(String raw) async {
+    final uri = Uri.tryParse(raw.trim());
+    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+      throw IntegrationException(
+          'Use an http or https URL for the skill source.');
+    }
+    if (uri.host == 'github.com') {
+      final parts = uri.pathSegments;
+      if (parts.length >= 5 && parts[2] == 'blob') {
+        final rawUri = Uri.https(
+          'raw.githubusercontent.com',
+          '/${parts[0]}/${parts[1]}/${parts[3]}/${parts.skip(4).join('/')}',
+        );
+        return _decodeRemoteText(await _fetchUrlBytes(rawUri.toString()));
+      }
+      if (parts.length >= 2) {
+        final path = parts.length >= 5 && parts[2] == 'tree'
+            ? parts.skip(4).join('/')
+            : '';
+        final ref = parts.length >= 5 && parts[2] == 'tree' ? parts[3] : null;
+        return _fetchGithubSkill(parts[0], parts[1], path, ref);
+      }
+    }
+    return _decodeRemoteText(await _fetchUrlBytes(uri.toString()));
+  }
+
+  String _decodeRemoteText(List<int> bytes) {
+    final text = decodeUtf8(bytes, allowEmpty: true);
+    if (text == null) {
+      throw IntegrationException('That URL is not a text file.');
+    }
+    return text;
+  }
+
+  Future<String> _fetchGithubSkill(
+    String owner,
+    String repo,
+    String path,
+    String? ref,
+  ) async {
+    final api = Uri.https('api.github.com', '/repos/$owner/$repo');
+    final token = activeGithub?.token ?? '';
+    final headers = <String, String>{
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'Praxis',
+      if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
+    var branch = ref;
+    if (branch == null) {
+      final repoResponse = await httpClient
+          .get(api, headers: headers)
+          .timeout(const Duration(seconds: 30));
+      if (repoResponse.statusCode != 200) {
+        throw IntegrationException(
+            'Could not read $owner/$repo (HTTP ${repoResponse.statusCode}).');
+      }
+      branch =
+          (jsonDecode(repoResponse.body) as Map)['default_branch'] as String?;
+    }
+    final treeUri = Uri.https(
+      'api.github.com',
+      '/repos/$owner/$repo/git/trees/${Uri.encodeComponent(branch ?? 'main')}',
+      {'recursive': '1'},
+    );
+    final treeResponse = await httpClient
+        .get(treeUri, headers: headers)
+        .timeout(const Duration(seconds: 45));
+    if (treeResponse.statusCode != 200) {
+      throw IntegrationException(
+          'Could not search $owner/$repo for a SKILL.md.');
+    }
+    final tree = (jsonDecode(treeResponse.body) as Map)['tree'];
+    if (tree is! List) {
+      throw IntegrationException('That repository has no files.');
+    }
+    final prefix = path.isEmpty ? '' : '${path.replaceAll(RegExp(r'/$'), '')}/';
+    final candidates = tree
+        .whereType<Map>()
+        .map((item) => item['path'] as String? ?? '')
+        .where((item) =>
+            item.toLowerCase().endsWith('skill.md') && item.startsWith(prefix))
+        .toList()
+      ..sort((a, b) => a.split('/').length.compareTo(b.split('/').length));
+    if (candidates.isEmpty) {
+      throw IntegrationException(
+          'No SKILL.md was found at that GitHub location.');
+    }
+    final contentsUri = Uri.https(
+      'api.github.com',
+      '/repos/$owner/$repo/contents/${candidates.first}',
+      branch == null ? null : {'ref': branch},
+    );
+    final contents = await httpClient
+        .get(contentsUri, headers: headers)
+        .timeout(const Duration(seconds: 30));
+    if (contents.statusCode != 200) {
+      throw IntegrationException('Could not read the SKILL.md from GitHub.');
+    }
+    final body = jsonDecode(contents.body);
+    if (body is! Map || body['content'] is! String) {
+      throw IntegrationException(
+          'GitHub did not return the SKILL.md contents.');
+    }
+    final encoded = (body['content'] as String).replaceAll('\n', '');
+    return _decodeRemoteText(base64Decode(encoded));
+  }
+
+  Future<List<int>> _fetchUrlBytes(String raw) async {
+    var uri = Uri.parse(raw);
+    if (uri.host == 'github.com') {
+      final parts = uri.pathSegments;
+      if (parts.length >= 5 && parts[2] == 'blob') {
+        uri = Uri.https(
+          'raw.githubusercontent.com',
+          '/${parts[0]}/${parts[1]}/${parts[3]}/${parts.skip(4).join('/')}',
+        );
+      }
+    }
+    final token = activeGithub?.token ?? '';
+    final headers = <String, String>{
+      'User-Agent': 'Praxis',
+      if (token.isNotEmpty &&
+          (uri.host == 'api.github.com' ||
+              uri.host == 'raw.githubusercontent.com'))
+        'Authorization': 'Bearer $token',
+    };
+    final response = await httpClient
+        .get(uri, headers: headers)
+        .timeout(const Duration(seconds: 90));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw IntegrationException(
+          'Download failed (HTTP ${response.statusCode}) for $uri.');
+    }
+    return response.bodyBytes;
+  }
+
+  Future<String> agentCommitAndPush(String projectId, String message) async {
+    final project = projectById(projectId);
+    final account = activeGithub;
+    if (account == null) {
+      throw IntegrationException('Add a GitHub account first.');
+    }
+    final state = await pushStateFor(project);
+    final parts = project.repo.split('/');
+    final owner = state.owner.isNotEmpty
+        ? state.owner
+        : parts.length == 2
+            ? parts.first
+            : '';
+    final repo = state.repo.isNotEmpty
+        ? state.repo
+        : parts.length == 2
+            ? parts.last
+            : '';
+    final branch = state.branch.isNotEmpty ? state.branch : project.branch;
+    if (owner.isEmpty || repo.isEmpty) {
+      throw IntegrationException(
+          'Connect this project to GitHub from Push first.');
+    }
+    if (state.pendingFor(owner, repo, branch) > 0) {
+      throw IntegrationException(
+          'There are already commits waiting to push. Push those first.');
+    }
+    final changes = await changesFor(project);
+    if (changes.isEmpty) return 'No local changes to commit or push.';
+    final confirm = confirmPrompt;
+    if (confirm == null) {
+      throw IntegrationException(
+          'Push confirmation is unavailable. Open Files → Push and try again.');
+    }
+    final approved = await confirm(
+      'Commit and push?',
+      'The agent wants to commit ${changes.length} changed file${changes.length == 1 ? '' : 's'} '
+          'and push them to $owner/$repo on $branch.',
+      'Commit & push',
+    );
+    if (!approved) throw IntegrationException('Push cancelled by the user.');
+
+    final snapshot = await fsFor(project).localSnapshot();
+    final bytes = <String, List<int>>{};
+    final texts = <String, String>{};
+    final hashes = <String, String>{};
+    for (final change in changes) {
+      bytes[change.path] = await fsFor(project).readBytes(change.path);
+      final text = snapshot.texts[change.path];
+      if (text != null) texts[change.path] = text;
+      hashes[change.path] =
+          snapshot.hashes[change.path] ?? gitBlobSha(bytes[change.path]!);
+    }
+    final parent = state.lastPendingFor(owner, repo, branch);
+    final commit = await createGithubCommit(
+      account,
+      owner: owner,
+      repo: repo,
+      branch: branch,
+      message: message.trim(),
+      files: bytes,
+      parentSha: parent?.sha,
+    );
+    var next = state
+        .copyWith(owner: owner, repo: repo, branch: branch)
+        .withBaseline(texts, hashes: hashes)
+        .withPending(PendingCommit(
+          sha: commit.sha,
+          message: message.trim(),
+          at: DateTime.now(),
+          owner: owner,
+          repo: repo,
+          branch: branch,
+          files: texts,
+          hashes: hashes,
+        ));
+    await savePushState(project, next);
+    await pushGithubRef(
+      account,
+      owner: owner,
+      repo: repo,
+      branch: branch,
+      sha: commit.sha,
+    );
+    next = next.withoutPending([commit.sha]);
+    await savePushState(project, next);
+    await updateProjectGit(project, repo: '$owner/$repo', branch: branch);
+    return 'Committed and pushed ${changes.length} file${changes.length == 1 ? '' : 's'} '
+        'to $owner/$repo on $branch (${commit.sha.substring(0, 7)}).';
+  }
+
+  Future<String> agentPullLatest(String projectId) async {
+    final project = projectById(projectId);
+    final account = activeGithub;
+    if (account == null) {
+      throw IntegrationException('Add a GitHub account first.');
+    }
+    final state = await pushStateFor(project);
+    final parts = project.repo.split('/');
+    final owner = state.owner.isNotEmpty
+        ? state.owner
+        : parts.length == 2
+            ? parts.first
+            : '';
+    final repo = state.repo.isNotEmpty
+        ? state.repo
+        : parts.length == 2
+            ? parts.last
+            : '';
+    final branch = state.branch.isNotEmpty ? state.branch : project.branch;
+    if (owner.isEmpty || repo.isEmpty) {
+      throw IntegrationException('Connect this project to GitHub first.');
+    }
+    final confirm = confirmPrompt;
+    if (confirm == null) {
+      throw IntegrationException('Pull confirmation is unavailable.');
+    }
+    final approved = await confirm(
+      'Pull latest commit?',
+      'Praxis will merge changes from $owner/$repo on $branch into this project. '
+          'Local edits are kept when GitHub has not touched the same file.',
+      'Pull changes',
+    );
+    if (!approved) {
+      throw IntegrationException('Pull cancelled by the user.');
+    }
+    final result = await pullProject(
+      project,
+      account,
+      owner: owner,
+      repo: repo,
+      branch: branch,
+    );
+    return 'Pulled $owner/$repo · $branch: ${result.summary}.';
+  }
 
   Future<IntegrationResult> deployToVercel(
     Project project,

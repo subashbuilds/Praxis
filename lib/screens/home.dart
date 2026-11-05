@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 import 'settings.dart';
 import 'workspace.dart';
@@ -115,30 +116,18 @@ class HomeScreen extends StatelessWidget {
 
   Future<void> _confirmDelete(
       BuildContext context, AppState state, Project project) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: const Text('Delete project?'),
-        content: Text(
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Delete project?',
+      body:
           'This deletes ${project.name} and every file in it from this device. '
           'It cannot be undone.',
-          style: Txt.bodySoft,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Pal.rose),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+      confirmLabel: 'Delete project',
+      destructive: true,
+      icon: Icons.delete_outline_rounded,
+      details: [ConfirmDetail('Project', project.name)],
     );
-    if (confirmed ?? false) {
+    if (confirmed) {
       await state.deleteProject(project);
     }
   }

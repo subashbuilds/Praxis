@@ -7,6 +7,7 @@ import '../core/integrations.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 import 'push_sheet.dart';
 
@@ -31,6 +32,7 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
   int _pending = 0;
   bool _exporting = false;
   bool _branchBusy = false;
+  bool _pulling = false;
 
   @override
   void didChangeDependencies() {
@@ -145,6 +147,45 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
     if (result == true) _snack('Branch pushed to GitHub.');
   }
 
+  Future<void> _pull() async {
+    if (_pulling) return;
+    final state = AppScope.of(context);
+    final project = state.projectById(widget.project.id);
+    final account = state.activeGithub;
+    final parts = project.repo.split('/');
+    if (account == null || parts.length != 2) {
+      _snack('Connect this project to GitHub from Push first.');
+      return;
+    }
+    final approved = await showPraxisConfirm(
+      context,
+      title: 'Pull latest commit?',
+      body: 'Merge the newest commit from GitHub into this project.',
+      confirmLabel: 'Pull changes',
+      icon: Icons.cloud_download_outlined,
+      details: [
+        ConfirmDetail('Repository', project.repo),
+        ConfirmDetail('Branch', project.branch),
+      ],
+      note: 'Local edits are kept when GitHub has not touched the same file. '
+          'If both sides changed a file, Praxis stops before overwriting it.',
+    );
+    if (!approved || !mounted) return;
+    setState(() => _pulling = true);
+    try {
+      final result = await state.pullProject(project, account);
+      if (!mounted) return;
+      _snack('Pulled ${project.branch}: ${result.summary}.');
+      await _refreshMeta();
+      widget.onChanged?.call();
+    } catch (error) {
+      if (!mounted) return;
+      _snack('$error');
+    } finally {
+      if (mounted) setState(() => _pulling = false);
+    }
+  }
+
   Future<void> _deploy() async {
     final result = await showModalBottomSheet<bool>(
       context: context,
@@ -252,6 +293,23 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
               tooltip: 'Export project as ZIP',
               size: 17,
               onTap: _export,
+            ),
+          const SizedBox(width: 2),
+          if (_pulling)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8),
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 1.6),
+              ),
+            )
+          else
+            IconAction(
+              icon: Icons.cloud_download_outlined,
+              tooltip: 'Pull latest commit',
+              size: 17,
+              onTap: _pull,
             ),
           const SizedBox(width: 2),
           _BarButton(
