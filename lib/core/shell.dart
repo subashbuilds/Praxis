@@ -73,7 +73,7 @@ class Shell {
         case 'help':
           return _help();
         case 'whoami':
-          return _out('devnest');
+          return _out('praxis');
         case 'date':
           return _out(DateTime.now().toIso8601String());
         default:
@@ -82,7 +82,7 @@ class Shell {
     } on FsError catch (error) {
       return _err(error.message);
     } catch (error) {
-      return _err('devnest: $error');
+      return _err('praxis: $error');
     }
   }
 
@@ -288,7 +288,7 @@ class Shell {
 
   ShellResult _missing(String command) => ShellResult(
         [
-          ShellLine('devnest: command not found: $command', ShellTone.error),
+          ShellLine('praxis: command not found: $command', ShellTone.error),
           if (const {
             'node',
             'npm',

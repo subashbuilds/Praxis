@@ -36,7 +36,7 @@ flutter run
 
 Toolchain: Flutter 3.24.5, Dart 3.5.4, Android compileSdk 36, minSdk 24.
 CI (`.github/workflows/ci.yml`) runs `dart format`, `flutter analyze`,
-`flutter test`, then builds the release APK artifact `devnest-release-apk`.
+`flutter test`, then builds the release APK artifact `praxis-release-apk`.
 
 Release builds are debug-signed because no release keystore is committed.
 

@@ -6,6 +6,7 @@ import 'package:praxis/core/ai.dart';
 import 'package:praxis/core/diff.dart';
 import 'package:praxis/core/shell.dart';
 import 'package:praxis/core/system_shell.dart';
+import 'package:praxis/core/usage.dart';
 import 'package:praxis/core/vfs.dart';
 import 'package:praxis/models.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -204,5 +205,41 @@ void main() {
 
     final failure = await shell.run('false');
     expect(failure.exitCode, isNot(0));
+  });
+
+  group('usage', () {
+    UsageEvent event(String projectId, int prompt, int completion) =>
+        UsageEvent(
+          at: DateTime(2026, 11, 5, 12),
+          projectId: projectId,
+          providerId: 'provider',
+          providerName: 'Provider',
+          keyIndex: 0,
+          model: 'model',
+          promptTokens: prompt,
+          completionTokens: completion,
+        );
+
+    test('project totals do not include other projects', () {
+      final events = [
+        event('alpha', 100, 20),
+        event('beta', 900, 80),
+        event('alpha', 50, 10),
+      ];
+      final all = UsageStats(events);
+      final alpha =
+          UsageStats(events.where((item) => item.projectId == 'alpha'));
+      expect(all.totalTokens, 1160);
+      expect(alpha.totalTokens, 180);
+      expect(alpha.promptTokens, 150);
+      expect(alpha.completionTokens, 30);
+    });
+
+    test('project id survives persistence', () {
+      final original = event('alpha', 12, 8);
+      final restored = UsageEvent.fromJson(original.toJson());
+      expect(restored?.projectId, 'alpha');
+      expect(restored?.tokens, 20);
+    });
   });
 }

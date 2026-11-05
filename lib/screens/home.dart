@@ -269,7 +269,10 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   late bool _clone;
   ProjectKind _kind = ProjectKind.web;
   bool _creating = false;
+  bool _loadingBranches = false;
   String? _error;
+  String? _branchError;
+  List<String> _branches = const [];
 
   @override
   void initState() {
@@ -288,8 +291,56 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     super.dispose();
   }
 
+  Future<void> _loadBranches() async {
+    if (_loadingBranches || _repo.text.trim().isEmpty) return;
+    final state = AppScope.of(context);
+    setState(() {
+      _loadingBranches = true;
+      _branchError = null;
+    });
+    try {
+      final branches = await state.cloneBranches(
+        _repo.text,
+        token: state.activeGithub?.token ?? '',
+      );
+      if (!mounted) return;
+      setState(() {
+        _branches = branches;
+        if (branches.isNotEmpty && !branches.contains(_branch.text.trim())) {
+          _branch.text = branches.contains('main') ? 'main' : branches.first;
+        }
+        if (branches.isEmpty) {
+          _branchError = 'This repository has no branches to choose from.';
+        }
+      });
+    } catch (error) {
+      if (mounted) setState(() => _branchError = '$error');
+    } finally {
+      if (mounted) setState(() => _loadingBranches = false);
+    }
+  }
+
+  Future<void> _chooseBranch() async {
+    if (_branches.isEmpty) await _loadBranches();
+    if (!mounted || _branches.isEmpty) return;
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (_) => _CloneBranchSheet(
+        branches: _branches,
+        current: _branch.text.trim(),
+      ),
+    );
+    if (chosen != null && mounted) setState(() => _branch.text = chosen);
+  }
+
   Future<void> _create() async {
     if (_creating) return;
+    if (_clone && _branches.isEmpty) {
+      await _loadBranches();
+      if (!mounted) return;
+    }
     setState(() {
       _creating = true;
       _error = null;
@@ -364,19 +415,62 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                 cursorColor: Pal.ember,
                 autocorrect: false,
                 enableSuggestions: false,
+                onSubmitted: (_) => _loadBranches(),
                 decoration: appField(
                   'owner/repo or github.com URL',
                   label: 'Repository',
+                  suffix: _loadingBranches
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 1.5),
+                        )
+                      : IconAction(
+                          icon: Icons.account_tree_outlined,
+                          tooltip: 'Load branches',
+                          size: 17,
+                          onTap: _loadBranches,
+                        ),
                 ),
               ),
               const SizedBox(height: 10),
-              TextField(
-                controller: _branch,
-                style: Txt.code.copyWith(fontSize: 12),
-                cursorColor: Pal.ember,
-                autocorrect: false,
-                decoration: appField('main', label: 'Branch'),
+              GestureDetector(
+                onTap: _chooseBranch,
+                behavior: HitTestBehavior.opaque,
+                child: InputDecorator(
+                  decoration: appField('main', label: 'Branch').copyWith(
+                    suffixIcon: Icon(
+                      Icons.unfold_more_rounded,
+                      size: 18,
+                      color: Pal.textDim,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.account_tree_outlined,
+                          size: 15, color: Pal.textDim),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _branch.text.trim().isEmpty
+                              ? 'Choose a branch'
+                              : _branch.text,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Txt.code.copyWith(fontSize: 12.5),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
+              if (_branchError != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _branchError!,
+                  style: Txt.meta.copyWith(color: Pal.rose, height: 1.35),
+                ),
+              ],
               const SizedBox(height: 10),
             ],
             TextField(
@@ -422,6 +516,63 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _CloneBranchSheet extends StatelessWidget {
+  const _CloneBranchSheet({required this.branches, required this.current});
+
+  final List<String> branches;
+  final String current;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SheetHandle(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x3),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Choose a branch',
+                    style: Txt.headline.copyWith(fontSize: 21)),
+                const SizedBox(height: 3),
+                Text('The repository is downloaded at this branch.',
+                    style: Txt.meta),
+              ],
+            ),
+          ),
+          const Hairline(),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              itemCount: branches.length,
+              itemBuilder: (context, index) {
+                final branch = branches[index];
+                final active = branch == current;
+                return ListTile(
+                  dense: true,
+                  leading: Icon(
+                    Icons.account_tree_outlined,
+                    size: 18,
+                    color: active ? Pal.ember : Pal.textDim,
+                  ),
+                  title: Text(branch, style: Txt.code.copyWith(fontSize: 12.5)),
+                  trailing: active
+                      ? Icon(Icons.check_rounded, size: 17, color: Pal.ember)
+                      : null,
+                  onTap: () => Navigator.of(context).pop(branch),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

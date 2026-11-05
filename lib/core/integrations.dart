@@ -16,6 +16,29 @@ class IntegrationResult {
   final String? url;
 }
 
+class GitHubRepo {
+  const GitHubRepo({
+    required this.owner,
+    required this.name,
+    required this.private,
+    required this.defaultBranch,
+  });
+
+  final String owner;
+  final String name;
+  final bool private;
+  final String defaultBranch;
+
+  String get fullName => '$owner/$name';
+}
+
+class GitHubSnapshot {
+  const GitHubSnapshot({required this.headSha, required this.files});
+
+  final String? headSha;
+  final Map<String, String> files;
+}
+
 class GitHubCommit {
   const GitHubCommit({
     required this.sha,
@@ -49,6 +72,29 @@ class GitHubClient {
         ..._headers,
         'Content-Type': 'application/json',
       };
+
+  static const _binaryFileExtensions = {
+    'png',
+    'jpg',
+    'jpeg',
+    'gif',
+    'webp',
+    'ico',
+    'ttf',
+    'otf',
+    'woff',
+    'woff2',
+    'zip',
+    'gz',
+    'xz',
+    'apk',
+    'so',
+    'jar',
+    'mp3',
+    'mp4',
+    'pdf',
+    'aab',
+  };
 
   Future<String> login() async {
     if (_loginCache != null) return _loginCache!;
@@ -127,6 +173,146 @@ class GitHubClient {
     if (created.statusCode != 201) {
       throw IntegrationException(_error(created, 'Could not create the repo'));
     }
+  }
+
+  Future<List<GitHubRepo>> repositories() async {
+    final repos = <GitHubRepo>[];
+    for (var page = 1; page <= 3; page++) {
+      final response = await _client
+          .get(
+            Uri.parse(
+                'https://api.github.com/user/repos?per_page=100&page=$page'
+                '&sort=updated&affiliation=owner,collaborator,organization_member'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) {
+        throw IntegrationException(
+            _error(response, 'Could not list repositories'));
+      }
+      final body = jsonDecode(response.body);
+      if (body is! List) break;
+      for (final item in body) {
+        if (item is! Map) continue;
+        final owner = (item['owner'] as Map?)?['login'] as String? ?? '';
+        final name = item['name'] as String? ?? '';
+        if (owner.isEmpty || name.isEmpty) continue;
+        repos.add(GitHubRepo(
+          owner: owner,
+          name: name,
+          private: item['private'] as bool? ?? false,
+          defaultBranch: item['default_branch'] as String? ?? 'main',
+        ));
+      }
+      if (body.length < 100) break;
+    }
+    repos.sort(
+        (a, b) => a.fullName.toLowerCase().compareTo(b.fullName.toLowerCase()));
+    return repos;
+  }
+
+  Future<GitHubSnapshot> snapshot(
+    String owner,
+    String repo,
+    String branch,
+  ) async {
+    final head = await headSha(owner, repo, branch);
+    if (head == null) {
+      return const GitHubSnapshot(headSha: null, files: {});
+    }
+    final treeResponse = await _client
+        .get(
+          Uri.parse(
+              'https://api.github.com/repos/$owner/$repo/git/trees/$head?recursive=1'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 45));
+    if (treeResponse.statusCode == 404) {
+      return GitHubSnapshot(headSha: head, files: const {});
+    }
+    if (treeResponse.statusCode != 200) {
+      throw IntegrationException(
+          _error(treeResponse, 'Could not compare with the repository'));
+    }
+    final treeBody = jsonDecode(treeResponse.body) as Map<String, dynamic>;
+    final tree = treeBody['tree'];
+    if (tree is! List) {
+      return GitHubSnapshot(headSha: head, files: const {});
+    }
+    final blobs = <Map<String, dynamic>>[];
+    for (final item in tree) {
+      if (item is! Map || item['type'] != 'blob') continue;
+      final path = item['path'] as String? ?? '';
+      final size = item['size'] as int? ?? 0;
+      if (path.isEmpty || size > 200000 || !_isTextPath(path)) continue;
+      blobs.add(item.cast<String, dynamic>());
+    }
+    final files = <String, String>{};
+    for (var offset = 0; offset < blobs.length; offset += 8) {
+      final chunk = blobs.skip(offset).take(8);
+      final results = await Future.wait(chunk.map((item) async {
+        final response = await _client
+            .get(
+              Uri.parse(
+                  'https://api.github.com/repos/$owner/$repo/git/blobs/${item['sha']}'),
+              headers: _headers,
+            )
+            .timeout(const Duration(seconds: 30));
+        if (response.statusCode != 200) {
+          return const MapEntry<String, String?>('', null);
+        }
+        final body = jsonDecode(response.body) as Map<String, dynamic>;
+        final encoded = (body['content'] as String? ?? '').replaceAll('\n', '');
+        try {
+          return MapEntry(
+            item['path'] as String? ?? '',
+            utf8.decode(base64Decode(encoded)),
+          );
+        } catch (_) {
+          return const MapEntry<String, String?>('', null);
+        }
+      }));
+      for (final entry in results) {
+        if (entry.key.isNotEmpty && entry.value != null) {
+          files[entry.key] = entry.value!;
+        }
+      }
+    }
+    return GitHubSnapshot(headSha: head, files: files);
+  }
+
+  bool _isTextPath(String path) {
+    final name = path.split('/').last.toLowerCase();
+    final dot = name.lastIndexOf('.');
+    final extension = dot <= 0 ? '' : name.substring(dot + 1);
+    return !_binaryFileExtensions.contains(extension);
+  }
+
+  Future<void> createBranch({
+    required String owner,
+    required String repo,
+    required String branch,
+    required String from,
+  }) async {
+    if (branch.trim().isEmpty) {
+      throw IntegrationException('Branch name is required.');
+    }
+    if (branch.trim().contains(' ')) {
+      throw IntegrationException('Branch names cannot contain spaces.');
+    }
+    final sha = await headSha(owner, repo, from);
+    if (sha == null) {
+      throw IntegrationException('The base branch $from does not exist yet.');
+    }
+    final response = await _client
+        .post(
+          Uri.parse('https://api.github.com/repos/$owner/$repo/git/refs'),
+          headers: _jsonHeaders,
+          body: jsonEncode({'ref': 'refs/heads/${branch.trim()}', 'sha': sha}),
+        )
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode == 201) return;
+    throw IntegrationException(_error(response, 'Could not create branch'));
   }
 
   Future<String?> headSha(String owner, String repo, String branch) async {

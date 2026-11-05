@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import '../models.dart';
 import 'ai.dart';
 import 'diff.dart';
@@ -114,6 +116,31 @@ const kAgentTools = <AiToolSpec>[
     },
   ),
   AiToolSpec(
+    name: 'install_skill',
+    description:
+        'Save a reusable skill for this project. Use only when the user asks '
+        'to install or remember a skill. Skills are stored as a SKILL.md folder '
+        'and are loaded into every future agent prompt.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'name': {
+          'type': 'string',
+          'description': 'Short skill name, for example telegram-voice-notes.'
+        },
+        'description': {
+          'type': 'string',
+          'description': 'One line explaining when the skill should be used.'
+        },
+        'instructions': {
+          'type': 'string',
+          'description': 'The complete reusable instructions in Markdown.'
+        },
+      },
+      'required': ['name', 'instructions'],
+    },
+  ),
+  AiToolSpec(
     name: 'run_command',
     description:
         'Run a shell command against the project files (ls, cat, grep, wc, tree, mkdir, mv, rm). '
@@ -144,7 +171,7 @@ class Agent {
     this.onThinkingDelta,
     this.onToolStart,
     this.onReply,
-    this.maxRounds = 6,
+    this.maxRounds = 40,
   });
 
   final AiClient client;
@@ -226,15 +253,19 @@ class Agent {
         turns.add(AiTurn.tool(call.id, call.name, result.text));
       }
     }
-    onEvent(const AgentEvent.error(
-      'Stopped after 6 rounds of tool calls. Ask for a smaller step.',
+    onEvent(AgentEvent.error(
+      'Paused after $maxRounds tool rounds. Send “continue” to keep going.',
     ));
   }
 
   Future<String> _systemPrompt() async {
     final files = await _fileTree();
-    final skillText = skills
-        .where((skill) => skill.enabled && skill.instructions.trim().isNotEmpty)
+    final installed = await _installedSkills();
+    final skillText = [
+      ...skills.where(
+          (skill) => skill.enabled && skill.instructions.trim().isNotEmpty),
+      ...installed,
+    ]
         .map((skill) => '- ${skill.name}: ${skill.instructions.trim()}')
         .join('\n');
     return '''
@@ -259,6 +290,52 @@ Constraints:
 ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
 ''';
   }
+
+  /// Project-installed skills use the Claude-style layout:
+  /// `.praxis/skills/<name>/SKILL.md`. They travel with the project and are
+  /// loaded for every prompt regardless of provider or model.
+  Future<List<Skill>> _installedSkills() async {
+    final root = Directory('${fs.rootPath}/.praxis/skills');
+    if (!await root.exists()) return const [];
+    final result = <Skill>[];
+    await for (final entity in root.list(followLinks: false)) {
+      if (entity is! Directory || result.length >= 30) continue;
+      final file = File('${entity.path}/SKILL.md');
+      if (!await file.exists()) continue;
+      final raw = await file.readAsString();
+      if (raw.trim().isEmpty) continue;
+      final frontMatter =
+          RegExp(r'^---\r?\n([\s\S]*?)\r?\n---\r?\n?').firstMatch(raw);
+      final meta = frontMatter?.group(1) ?? '';
+      final name = RegExp(r'^name:\s*(.+)$', multiLine: true)
+          .firstMatch(meta)
+          ?.group(1)
+          ?.trim();
+      final body = frontMatter == null
+          ? raw.trim()
+          : raw.substring(frontMatter.end).trim();
+      if (body.isEmpty) continue;
+      result.add(Skill(
+        id: 'project:${entity.path.split('/').last}',
+        name: name == null || name.isEmpty ? entity.path.split('/').last : name,
+        instructions: body,
+      ));
+    }
+    return result;
+  }
+
+  String _slug(String value) {
+    final slug = value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    return slug.isEmpty
+        ? 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}'
+        : slug;
+  }
+
+  String _yamlLine(String value) =>
+      value.replaceAll('\r', ' ').replaceAll('\n', ' ').trim();
 
   Future<String> _fileTree() async {
     try {
@@ -307,6 +384,28 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
             'Wrote $bytes bytes to $path',
             diff: diff.isEmpty ? null : diff,
           );
+        case 'install_skill':
+          final name = (call.arguments['name'] as String? ?? '').trim();
+          final description =
+              (call.arguments['description'] as String? ?? '').trim();
+          final instructions =
+              (call.arguments['instructions'] as String? ?? '').trim();
+          if (name.isEmpty || instructions.isEmpty) {
+            return const _ToolOutcome(
+                'Error: name and instructions are required');
+          }
+          final slug = _slug(name);
+          final path = '.praxis/skills/$slug/SKILL.md';
+          final content = '---\n'
+              'name: ${_yamlLine(name)}\n'
+              'description: ${_yamlLine(description)}\n'
+              '---\n\n'
+              '$instructions\n';
+          await fs.write(path, content);
+          return _ToolOutcome(
+            'Installed skill “$name” at $path. It is available to every '
+            'future prompt for this project.',
+          );
         case 'run_command':
           final command = (call.arguments['command'] as String? ?? '').trim();
           if (command.isEmpty) {
@@ -340,6 +439,8 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
         return '${args['path'] ?? '?'}';
       case 'run_command':
         return '${args['command'] ?? '?'}';
+      case 'install_skill':
+        return '${args['name'] ?? 'skill'}';
       case 'list_files':
         return (args['path'] as String? ?? '.').isEmpty
             ? '.'

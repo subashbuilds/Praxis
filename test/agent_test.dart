@@ -190,4 +190,161 @@ void main() {
       )),
     );
   });
+
+  test('agent keeps going past six tool rounds', () async {
+    await fs.write('README.md', '# project');
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      if (calls <= 8) {
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': '',
+                  'tool_calls': [
+                    {
+                      'id': 'call_$calls',
+                      'type': 'function',
+                      'function': {
+                        'name': 'read_file',
+                        'arguments': jsonEncode({'path': 'README.md'}),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'Finished after a longer investigation.',
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    final events = <AgentEvent>[];
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+    ).run(history: const [], prompt: 'investigate thoroughly');
+
+    expect(calls, 9);
+    expect(
+        events.where((event) => event.kind == AgentEventKind.tool).length, 8);
+    expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
+    expect(events.last.text, contains('Finished'));
+  });
+
+  test('installs a folder skill that is available to later prompts', () async {
+    var calls = 0;
+    String? secondSystem;
+    final client = MockClient((request) async {
+      calls++;
+      if (calls == 1) {
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': '',
+                  'tool_calls': [
+                    {
+                      'id': 'call_skill',
+                      'type': 'function',
+                      'function': {
+                        'name': 'install_skill',
+                        'arguments': jsonEncode({
+                          'name': 'Telegram voice notes',
+                          'description':
+                              'Use when adding voice note support to a bot.',
+                          'instructions':
+                              'Prefer OGG/Opus and verify the duration field.',
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (calls == 2) {
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {'role': 'assistant', 'content': 'Skill installed.'},
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      final messages = body['messages'] as List;
+      secondSystem =
+          (messages.first as Map<String, dynamic>)['content'] as String;
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': 'Ready.'},
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: (_) {},
+    ).run(history: const [], prompt: 'install a Telegram skill');
+
+    final file = await fs.read('.praxis/skills/telegram-voice-notes/SKILL.md');
+    expect(file, contains('name: Telegram voice notes'));
+    expect(file, contains('Prefer OGG/Opus'));
+
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: (_) {},
+    ).run(history: const [], prompt: 'add voice notes');
+
+    expect(secondSystem, contains('Telegram voice notes'));
+    expect(secondSystem, contains('Prefer OGG/Opus'));
+  });
 }

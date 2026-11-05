@@ -5,6 +5,7 @@ import 'dart:math' as math;
 class UsageEvent {
   const UsageEvent({
     required this.at,
+    required this.projectId,
     required this.providerId,
     required this.providerName,
     required this.keyIndex,
@@ -14,6 +15,7 @@ class UsageEvent {
   });
 
   final DateTime at;
+  final String projectId;
   final String providerId;
   final String providerName;
   final int keyIndex;
@@ -26,6 +28,7 @@ class UsageEvent {
 
   Map<String, dynamic> toJson() => {
         'at': at.toIso8601String(),
+        'projectId': projectId,
         'providerId': providerId,
         'providerName': providerName,
         'keyIndex': keyIndex,
@@ -39,6 +42,7 @@ class UsageEvent {
     if (at == null) return null;
     return UsageEvent(
       at: at,
+      projectId: json['projectId'] as String? ?? '',
       providerId: json['providerId'] as String? ?? '',
       providerName: json['providerName'] as String? ?? 'Provider',
       keyIndex: json['keyIndex'] as int? ?? 0,

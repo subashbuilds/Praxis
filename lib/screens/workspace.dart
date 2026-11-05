@@ -197,9 +197,14 @@ class _AgentStatusBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final provider = state.activeProvider;
     final ready = provider.isConfigured;
-    final total = state.usage.totalTokens;
-    final today = state.usage.todayTokens;
-    final used = state.contextUsedFor(provider.id, provider.model);
+    final projectUsage = state.usageForProject(project.id);
+    final total = projectUsage.totalTokens;
+    final today = projectUsage.todayTokens;
+    final used = state.contextUsedFor(
+      provider.id,
+      provider.model,
+      projectId: project.id,
+    );
     final context = contextLabel(provider.model, used);
 
     return Container(
@@ -226,14 +231,16 @@ class _AgentStatusBar extends StatelessWidget {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    'TOKENS',
+                    'PROJECT TOKENS',
                     style: Txt.overline.copyWith(fontSize: 8.5),
                   ),
                   const SizedBox(width: 9),
                   Text(
-                    today == 0
-                        ? 'no usage today'
-                        : '+${compactTokens(today)} today',
+                    total == 0
+                        ? 'this project'
+                        : today == 0
+                            ? 'this project · no usage today'
+                            : '+${compactTokens(today)} today',
                     style: Txt.meta.copyWith(fontSize: 9.5),
                   ),
                   const Spacer(),

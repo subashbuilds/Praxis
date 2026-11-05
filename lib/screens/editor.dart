@@ -26,6 +26,7 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _saving = false;
   String? _error;
   late bool _preview = _isMarkdown;
+  final _previewScroll = ScrollController();
 
   bool get _isMarkdown => languageForPath(widget.path) == CodeLanguage.markdown;
 
@@ -38,7 +39,17 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void dispose() {
     _controller.dispose();
+    _previewScroll.dispose();
     super.dispose();
+  }
+
+  void _togglePreview() {
+    setState(() => _preview = !_preview);
+    if (_preview) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_previewScroll.hasClients) _previewScroll.jumpTo(0);
+      });
+    }
   }
 
   Future<void> _load() async {
@@ -165,7 +176,7 @@ class _EditorScreenState extends State<EditorScreen> {
                   ),
                   if (_isMarkdown)
                     GestureDetector(
-                      onTap: () => setState(() => _preview = !_preview),
+                      onTap: _togglePreview,
                       behavior: HitTestBehavior.opaque,
                       child: Container(
                         margin: const EdgeInsets.only(right: 6),
@@ -239,6 +250,7 @@ class _EditorScreenState extends State<EditorScreen> {
                           ? _MarkdownPreview(
                               data: _controller.text,
                               path: widget.path,
+                              controller: _previewScroll,
                             )
                           : CodeEditor(
                               controller: _controller,
@@ -257,66 +269,77 @@ class _EditorScreenState extends State<EditorScreen> {
 }
 
 class _MarkdownPreview extends StatelessWidget {
-  const _MarkdownPreview({required this.data, required this.path});
+  const _MarkdownPreview({
+    required this.data,
+    required this.path,
+    required this.controller,
+  });
 
   final String data;
   final String path;
+  final ScrollController controller;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       color: Pal.canvas,
-      child: Markdown(
-        data: data.isEmpty ? '_This file is empty._' : data,
-        padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, Sp.x8),
-        selectable: true,
-        onTapLink: (text, href, title) {
-          if (href == null || href.isEmpty) return;
-          Clipboard.setData(ClipboardData(text: href));
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Link copied: $href')),
-          );
-        },
-        styleSheet: MarkdownStyleSheet(
-          p: Txt.body.copyWith(height: 1.65),
-          h1: Txt.headline.copyWith(fontSize: 27),
-          h2: Txt.headline.copyWith(fontSize: 22),
-          h3: Txt.title.copyWith(fontSize: 18),
-          h4: Txt.title.copyWith(fontSize: 16),
-          strong: Txt.body.copyWith(fontWeight: FontWeight.w700),
-          em: Txt.body.copyWith(fontStyle: FontStyle.italic),
-          a: Txt.body.copyWith(
-            color: Pal.ember,
-            decoration: TextDecoration.underline,
-            decorationColor: Pal.ember,
+      child: Scrollbar(
+        controller: controller,
+        child: SingleChildScrollView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, Sp.x8),
+          child: MarkdownBody(
+            data: data.isEmpty ? '_This file is empty._' : data,
+            selectable: true,
+            onTapLink: (text, href, title) {
+              if (href == null || href.isEmpty) return;
+              Clipboard.setData(ClipboardData(text: href));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Link copied: $href')),
+              );
+            },
+            styleSheet: MarkdownStyleSheet(
+              p: Txt.body.copyWith(height: 1.65),
+              h1: Txt.headline.copyWith(fontSize: 27),
+              h2: Txt.headline.copyWith(fontSize: 22),
+              h3: Txt.title.copyWith(fontSize: 18),
+              h4: Txt.title.copyWith(fontSize: 16),
+              strong: Txt.body.copyWith(fontWeight: FontWeight.w700),
+              em: Txt.body.copyWith(fontStyle: FontStyle.italic),
+              a: Txt.body.copyWith(
+                color: Pal.ember,
+                decoration: TextDecoration.underline,
+                decorationColor: Pal.ember,
+              ),
+              code: Txt.code.copyWith(
+                fontSize: 12,
+                color: Pal.ghText,
+                backgroundColor: Pal.ghPanel,
+              ),
+              codeblockDecoration: BoxDecoration(
+                color: Pal.ghBg,
+                borderRadius: Rd.sm,
+                border: Border.all(color: Pal.ghLine),
+              ),
+              codeblockPadding: const EdgeInsets.all(Sp.x3),
+              blockquote: Txt.bodySoft.copyWith(
+                fontStyle: FontStyle.italic,
+                color: Pal.textMuted,
+              ),
+              blockquoteDecoration: BoxDecoration(
+                border: Border(left: BorderSide(color: Pal.ember, width: 2)),
+              ),
+              blockquotePadding: const EdgeInsets.only(left: Sp.x4),
+              listBullet: Txt.body,
+              horizontalRuleDecoration: BoxDecoration(
+                border: Border(top: BorderSide(color: Pal.line)),
+              ),
+              tableHead: Txt.label.copyWith(fontWeight: FontWeight.w700),
+              tableBody: Txt.bodySoft,
+              tableBorder: TableBorder.all(color: Pal.line),
+              tableCellsPadding: const EdgeInsets.all(8),
+            ),
           ),
-          code: Txt.code.copyWith(
-            fontSize: 12,
-            color: Pal.ghText,
-            backgroundColor: Pal.ghPanel,
-          ),
-          codeblockDecoration: BoxDecoration(
-            color: Pal.ghBg,
-            borderRadius: Rd.sm,
-            border: Border.all(color: Pal.ghLine),
-          ),
-          codeblockPadding: const EdgeInsets.all(Sp.x3),
-          blockquote: Txt.bodySoft.copyWith(
-            fontStyle: FontStyle.italic,
-            color: Pal.textMuted,
-          ),
-          blockquoteDecoration: BoxDecoration(
-            border: Border(left: BorderSide(color: Pal.ember, width: 2)),
-          ),
-          blockquotePadding: const EdgeInsets.only(left: Sp.x4),
-          listBullet: Txt.body,
-          horizontalRuleDecoration: BoxDecoration(
-            border: Border(top: BorderSide(color: Pal.line)),
-          ),
-          tableHead: Txt.label.copyWith(fontWeight: FontWeight.w700),
-          tableBody: Txt.bodySoft,
-          tableBorder: TableBorder.all(color: Pal.line),
-          tableCellsPadding: const EdgeInsets.all(8),
         ),
       ),
     );

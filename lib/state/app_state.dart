@@ -202,6 +202,18 @@ class AppState extends ChangeNotifier {
 
   /// Downloads a GitHub branch archive, writes it into a real project folder
   /// and records the repo/branch metadata. No git binary is needed.
+  Future<List<String>> cloneBranches(
+    String repoUrl, {
+    String token = '',
+  }) async {
+    final ref = RepoRef.parse(repoUrl);
+    if (ref == null) {
+      throw RepoCloneException(
+          'Use a GitHub repository such as owner/repo or https://github.com/owner/repo.');
+    }
+    return repoClone.branches(ref, token: token);
+  }
+
   Future<Project> cloneProject({
     required String name,
     required String repoUrl,
@@ -246,6 +258,15 @@ class AppState extends ChangeNotifier {
         branch: cloned.branch,
       );
       await _writeProjectMeta(dir, project);
+      final baseline = await fs.textFiles();
+      final initialPush = PushState(
+        owner: ref.owner,
+        repo: ref.name,
+        branch: cloned.branch,
+        baseline: baseline,
+      );
+      _pushStates[id] = initialPush;
+      await PushStore.save(fs, initialPush);
       projects.insert(0, project);
       notifyListeners();
       return project;
@@ -515,7 +536,7 @@ class AppState extends ChangeNotifier {
       onReply: (reply, usedProvider) {
         final tokens = reply.usage;
         if (tokens == null) return;
-        _recordUsage(usedProvider, tokens);
+        _recordUsage(usedProvider, tokens, projectId);
       },
       onEvent: (event) {
         if (event.kind == AgentEventKind.text) {
@@ -596,9 +617,14 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> _recordUsage(ProviderConfig provider, AiUsage tokens) async {
+  Future<void> _recordUsage(
+    ProviderConfig provider,
+    AiUsage tokens,
+    String projectId,
+  ) async {
     final event = UsageEvent(
       at: DateTime.now(),
+      projectId: projectId,
       providerId: provider.id,
       providerName: provider.name,
       keyIndex: provider.keyIndex,
@@ -964,6 +990,48 @@ class AppState extends ChangeNotifier {
   ) =>
       GitHubClient(account.token, client: httpClient).branches(owner, repo);
 
+  Future<List<GitHubRepo>> githubRepositories(IntegrationAccount account) =>
+      GitHubClient(account.token, client: httpClient).repositories();
+
+  Future<void> createGithubBranch(
+    IntegrationAccount account, {
+    required String owner,
+    required String repo,
+    required String branch,
+    required String from,
+  }) =>
+      GitHubClient(account.token, client: httpClient).createBranch(
+        owner: owner,
+        repo: repo,
+        branch: branch,
+        from: from,
+      );
+
+  /// Loads the branch contents once so Files and Push compare against the
+  /// repository instead of treating every local file as newly added.
+  Future<PushState> syncPushBaseline(
+    Project project,
+    IntegrationAccount account, {
+    required String owner,
+    required String repo,
+    required String branch,
+  }) async {
+    final current = await pushStateFor(project);
+    final sameTarget = current.owner == owner &&
+        current.repo == repo &&
+        current.branch == branch;
+    if (sameTarget && current.baseline.isNotEmpty) return current;
+    final snapshot = await GitHubClient(account.token, client: httpClient)
+        .snapshot(owner, repo, branch);
+    final next = current.copyWith(
+      owner: owner,
+      repo: repo,
+      branch: branch,
+      baseline: snapshot.files,
+    );
+    return savePushState(project, next);
+  }
+
   Future<PushState> pushStateFor(Project project) async {
     final cached = _pushStates[project.id];
     if (cached != null) return cached;
@@ -1082,8 +1150,25 @@ class AppState extends ChangeNotifier {
         jsonEncode(usageEvents.map((event) => event.toJson()).toList()),
       );
 
-  int? contextUsedFor(String providerId, String model) =>
-      usage.latestFor(providerId, model)?.promptTokens;
+  UsageStats usageForProject(String projectId) => UsageStats(
+        usageEvents.where((event) => event.projectId == projectId),
+      );
+
+  int? contextUsedFor(
+    String providerId,
+    String model, {
+    String? projectId,
+  }) {
+    final events = projectId == null
+        ? usage.events
+        : usageEvents.where((event) => event.projectId == projectId);
+    for (final event in events) {
+      if (event.providerId == providerId && event.model == model) {
+        return event.promptTokens;
+      }
+    }
+    return null;
+  }
 
   int? contextLimitFor(String model) => contextWindowFor(model);
 

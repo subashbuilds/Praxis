@@ -179,8 +179,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   Text(
-                    'Skills are extra instructions added to every agent run. '
-                    'They are local prompt fragments, not plugins.',
+                    'Skills are reusable instructions. Ask the agent to install '
+                    'one and it writes .praxis/skills/<name>/SKILL.md inside the '
+                    'project. Project skills load into every prompt, with any '
+                    'provider or model, and sync through the project folder.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x3),
@@ -323,11 +325,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SectionLabel('DATA'),
                   Panel(
+                    borderColor: Pal.rose.withOpacity(0.55),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Erase everything',
-                            style: Txt.title.copyWith(fontSize: 14)),
+                        Text(
+                          'Erase everything',
+                          style: Txt.title.copyWith(
+                            fontSize: 14,
+                            color: Pal.rose,
+                          ),
+                        ),
                         const SizedBox(height: 4),
                         Text(
                           'Deletes all projects, chats, keys and tokens from this '
@@ -359,7 +367,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               const SizedBox(width: 9),
                               Text('Praxis', style: Txt.title),
                               const Spacer(),
-                              Text('2.0.0', style: Txt.meta),
+                              Text('2.1.0', style: Txt.meta),
                             ],
                           ),
                           const SizedBox(height: 10),

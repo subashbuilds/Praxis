@@ -7,7 +7,7 @@ plugins {
 android {
     namespace = "com.subash.praxis"
     compileSdk = 36
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -22,8 +22,8 @@ android {
         applicationId = "com.subash.praxis"
         minSdk = 24
         targetSdk = 36
-        versionCode = 3
-        versionName = "2.0.0"
+        versionCode = 4
+        versionName = "2.1.0"
     }
 
     buildTypes {
