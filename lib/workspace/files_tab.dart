@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../core/file_import.dart';
+import '../core/file_types.dart';
 import '../core/push_state.dart';
 import '../core/vfs.dart';
 import '../models.dart';
@@ -149,7 +150,7 @@ class _FilesTabState extends State<FilesTab> {
     }
   }
 
-  Future<void> _importFiles() async {
+  Future<void> _importFiles({String destination = ''}) async {
     FilePickerResult? result;
     try {
       result = await FilePicker.platform.pickFiles(
@@ -170,14 +171,17 @@ class _FilesTabState extends State<FilesTab> {
     await _runImport([
       for (final path in paths)
         ImportEntry(
-          path: path.replaceAll('\\', '/').split('/').last,
+          path: _joinPath(
+            destination,
+            path.replaceAll('\\', '/').split('/').last,
+          ),
           sourcePath: path,
           isDir: false,
         ),
     ]);
   }
 
-  Future<void> _importFolder() async {
+  Future<void> _importFolder({String destination = ''}) async {
     String? rootPath;
     try {
       rootPath = await FilePicker.platform.getDirectoryPath(
@@ -198,56 +202,19 @@ class _FilesTabState extends State<FilesTab> {
         .split('/')
         .where((part) => part.isNotEmpty)
         .last;
-    final entries = <ImportEntry>[
-      ImportEntry(path: name, sourcePath: rootPath, isDir: true),
-    ];
-    try {
-      await for (final entity
-          in root.list(recursive: true, followLinks: false)) {
-        final relative = _relativeTo(root.path, entity.path);
-        if (relative.isEmpty || _skipImported(relative)) continue;
-        if (entity is Directory) {
-          entries.add(ImportEntry(
-            path: '$name/$relative',
-            sourcePath: entity.path,
-            isDir: true,
-          ));
-        } else if (entity is File) {
-          entries.add(ImportEntry(
-            path: '$name/$relative',
-            sourcePath: entity.path,
-            isDir: false,
-          ));
-        }
-      }
-    } catch (error) {
-      _showMessage('Could not read the folder: $error');
-      return;
-    }
-    if (entries.isEmpty) {
-      _showMessage('That folder has no files to import.');
-      return;
-    }
-    await _runImport(entries);
+    // The import service expands the folder from disk. Passing only the root
+    // means a folder whose name already exists is still merged correctly.
+    await _runImport([
+      ImportEntry(
+        path: _joinPath(destination, name),
+        sourcePath: rootPath,
+        isDir: true,
+      ),
+    ]);
   }
 
-  String _relativeTo(String parent, String child) {
-    var relative = child.substring(parent.length);
-    relative = relative.replaceAll('\\', '/');
-    while (relative.startsWith('/')) {
-      relative = relative.substring(1);
-    }
-    return relative;
-  }
-
-  bool _skipImported(String path) {
-    final parts = path.split('/');
-    if (parts.any((part) =>
-        part == '.git' || part == '.praxis' || part == '.project.json')) {
-      return true;
-    }
-    return path == '.DS_Store' || path.endsWith('/.DS_Store');
-  }
+  String _joinPath(String parent, String name) =>
+      parent.isEmpty ? name : '$parent/$name';
 
   Future<void> _runImport(List<ImportEntry> entries) async {
     if (entries.isEmpty) return;
@@ -275,6 +242,18 @@ class _FilesTabState extends State<FilesTab> {
     if (!mounted) return false;
     final incoming = conflict.incomingIsDir ? 'folder' : 'file';
     final existing = conflict.existingIsDir ? 'folder' : 'file';
+    final fs = AppScope.of(context).fsFor(widget.project);
+    final importedDetail = await _describePath(
+      conflict.sourcePath,
+      conflict.path,
+      conflict.incomingIsDir,
+    );
+    final existingDetail = await _describePath(
+      fs.absolute(conflict.path),
+      conflict.path,
+      conflict.existingIsDir,
+    );
+    if (!mounted) return false;
     final detail = switch ((conflict.incomingIsDir, conflict.existingIsDir)) {
       (false, false) =>
         'The imported bytes replace the current file. This cannot be undone.',
@@ -295,10 +274,50 @@ class _FilesTabState extends State<FilesTab> {
       icon: Icons.swap_horiz_rounded,
       details: [
         ConfirmDetail('Path', conflict.path),
-        ConfirmDetail('Imported', incoming),
-        ConfirmDetail('Existing', existing),
+        ConfirmDetail('Imported', importedDetail),
+        ConfirmDetail('Existing', existingDetail),
       ],
     );
+  }
+
+  Future<String> _describePath(
+    String path,
+    String displayPath,
+    bool isDir,
+  ) async {
+    if (isDir) return 'folder';
+    final file = File(path);
+    if (!await file.exists()) return 'file · unavailable';
+    final size = await file.length();
+    if (classifyFile(displayPath).isText) {
+      try {
+        final lines = await _countLines(file, size);
+        return '${humanFileSize(size)} · $lines ${lines == 1 ? 'line' : 'lines'}';
+      } catch (_) {
+        // The size is still useful if the file disappeared mid-dialog.
+      }
+    }
+    return humanFileSize(size);
+  }
+
+  Future<int> _countLines(File file, int size) async {
+    if (size == 0) return 1;
+    var newlines = 0;
+    var last = 0;
+    final reader = await file.open();
+    try {
+      while (true) {
+        final chunk = await reader.read(64 * 1024);
+        if (chunk.isEmpty) break;
+        last = chunk.last;
+        for (final byte in chunk) {
+          if (byte == 10) newlines++;
+        }
+      }
+    } finally {
+      await reader.close();
+    }
+    return last == 10 ? newlines : newlines + 1;
   }
 
   void _showMessage(String text) {
@@ -306,8 +325,17 @@ class _FilesTabState extends State<FilesTab> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
-  Future<String?> _askName(String title, String hint) {
-    final controller = TextEditingController();
+  Future<String?> _askName(
+    String title,
+    String hint, {
+    String initial = '',
+    String confirmLabel = 'Create',
+  }) {
+    final controller = TextEditingController(text: initial);
+    controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: initial.length,
+    );
     return showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -329,11 +357,129 @@ class _FilesTabState extends State<FilesTab> {
           TextButton(
             onPressed: () =>
                 Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Create'),
+            child: Text(confirmLabel),
           ),
         ],
       ),
     ).whenComplete(controller.dispose);
+  }
+
+  Future<void> _showActions(FileEntry entry) async {
+    final action = await showModalBottomSheet<_EntryAction>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SheetHandle(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x3),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    entry.isDir ? 'Folder actions' : 'File actions',
+                    style: Txt.headline.copyWith(fontSize: 21),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(entry.path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Txt.meta),
+                ],
+              ),
+            ),
+            const Hairline(),
+            if (entry.isDir) ...[
+              ListTile(
+                leading: Icon(Icons.upload_file_outlined, color: Pal.mint),
+                title: Text('Import files here', style: Txt.body),
+                subtitle: Text('Copy files from this device into the folder.',
+                    style: Txt.meta),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_EntryAction.importFiles),
+              ),
+              ListTile(
+                leading:
+                    Icon(Icons.drive_folder_upload_outlined, color: Pal.mint),
+                title: Text('Import a folder here', style: Txt.body),
+                subtitle: Text(
+                    'Merge a folder from this device below this one.',
+                    style: Txt.meta),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_EntryAction.importFolder),
+              ),
+            ],
+            ListTile(
+              leading: Icon(Icons.drive_file_rename_outline_rounded,
+                  color: Pal.textMuted),
+              title: Text('Rename', style: Txt.body),
+              subtitle: Text('Keep the contents and choose a new path.',
+                  style: Txt.meta),
+              onTap: () => Navigator.of(sheetContext).pop(_EntryAction.rename),
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline_rounded, color: Pal.rose),
+              title: Text('Delete', style: Txt.body.copyWith(color: Pal.rose)),
+              subtitle: Text(
+                entry.isDir
+                    ? 'Remove the folder and everything inside it.'
+                    : 'Remove the file from this device.',
+                style: Txt.meta,
+              ),
+              onTap: () => Navigator.of(sheetContext).pop(_EntryAction.delete),
+            ),
+            const SizedBox(height: Sp.x2),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _EntryAction.importFiles:
+        await _importFiles(destination: entry.path);
+        break;
+      case _EntryAction.importFolder:
+        await _importFolder(destination: entry.path);
+        break;
+      case _EntryAction.rename:
+        await _rename(entry);
+        break;
+      case _EntryAction.delete:
+        await _delete(entry);
+        break;
+    }
+  }
+
+  Future<void> _rename(FileEntry entry) async {
+    final current = entry.path;
+    final proposed = await _askName(
+      'Rename ${entry.name}',
+      current,
+      initial: current,
+      confirmLabel: 'Rename',
+    );
+    if (proposed == null || proposed.isEmpty || !mounted) return;
+    var target = proposed.replaceAll('\\', '/');
+    if (!target.contains('/')) {
+      final slash = current.lastIndexOf('/');
+      target = slash < 0 ? target : '${current.substring(0, slash + 1)}$target';
+    }
+    target = target.replaceFirst(RegExp(r'^/+'), '');
+    if (target == current) return;
+    final state = AppScope.of(context);
+    if (await state.fsFor(widget.project).exists(target)) {
+      if (mounted) _showMessage('A file or folder already exists at $target.');
+      return;
+    }
+    try {
+      await state.renamePath(widget.project, current, target);
+      if (mounted) _refresh();
+    } catch (error) {
+      if (mounted) _showMessage('Could not rename: $error');
+    }
   }
 
   Future<void> _open(FileEntry entry) async {
@@ -468,7 +614,7 @@ class _FilesTabState extends State<FilesTab> {
                       : 0;
                   return InkWell(
                     onTap: () => _open(entry),
-                    onLongPress: () => _delete(entry),
+                    onLongPress: () => _showActions(entry),
                     child: Padding(
                       padding: EdgeInsets.fromLTRB(
                         Sp.x3 + (row.depth * 15),
@@ -554,8 +700,8 @@ class _FilesTabState extends State<FilesTab> {
               final pending = snapshot.data?.pending ?? 0;
               return Text(
                 pending > 0
-                    ? '$pending unpushed commit${pending == 1 ? '' : 's'} · tap to open · long-press to delete'
-                    : 'tap folders to expand · tap files to edit · long-press to delete',
+                    ? '$pending unpushed commit${pending == 1 ? '' : 's'} · tap to open · long-press for actions'
+                    : 'tap to edit · long-press for rename or delete · long-press a folder to import',
                 style: Txt.meta.copyWith(fontSize: 9.5),
               );
             },
@@ -608,6 +754,8 @@ class _FilesTabState extends State<FilesTab> {
 }
 
 enum _AddAction { create, importItem }
+
+enum _EntryAction { importFiles, importFolder, rename, delete }
 
 class _TreeRow {
   const _TreeRow(this.entry, this.depth);

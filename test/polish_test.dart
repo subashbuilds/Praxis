@@ -205,6 +205,73 @@ void main() {
     expect(await fs.read('assets'), 'keep the existing file');
   });
 
+  test('a folder with an existing name merges from its real contents',
+      () async {
+    final project = await Directory.systemTemp.createTemp('praxis_existing_');
+    final source = await Directory.systemTemp.createTemp('praxis_source_');
+    addTearDown(() => project.delete(recursive: true));
+    addTearDown(() => source.delete(recursive: true));
+    final fs = ProjectFs(project);
+
+    await fs.write('folder/keep.txt', 'keep me');
+    await fs.write('folder/collision.txt', 'old');
+
+    final sourceFolder = Directory('${source.path}/folder');
+    await sourceFolder.create(recursive: true);
+    await File('${sourceFolder.path}/collision.txt').writeAsString('new');
+    await File('${sourceFolder.path}/added.txt').writeAsString('added');
+    final nested = Directory('${sourceFolder.path}/nested');
+    await nested.create();
+    await File('${nested.path}/deep.txt').writeAsString('deep');
+
+    final conflicts = <String>[];
+    final summary = await importEntries(
+      fs,
+      [
+        ImportEntry(
+          path: 'folder',
+          sourcePath: sourceFolder.path,
+          isDir: true,
+        ),
+      ],
+      onConflict: (conflict) async {
+        conflicts.add(conflict.path);
+        return true;
+      },
+    );
+
+    expect(conflicts, ['folder/collision.txt']);
+    expect(await fs.read('folder/keep.txt'), 'keep me');
+    expect(await fs.read('folder/collision.txt'), 'new');
+    expect(await fs.read('folder/added.txt'), 'added');
+    expect(await fs.read('folder/nested/deep.txt'), 'deep');
+    expect(summary.created, 3);
+    expect(summary.replaced, 1);
+    expect(summary.skipped, 0);
+  });
+
+  test('projects with the latest conversation sort first', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_order_');
+    addTearDown(() => temp.delete(recursive: true));
+    final state =
+        AppState(root: temp, store: MemoryStore(), seedWelcome: false);
+    addTearDown(state.dispose);
+    await state.init();
+
+    final older = await state.createProject('older', ProjectKind.blank);
+    final newer = await state.createProject('newer', ProjectKind.blank);
+    expect(state.projectsByActivity.first.id, newer.id);
+
+    state.threadOf(older.id).add(ChatEntry(
+          id: 'latest',
+          role: ChatRole.assistant,
+          text: 'A newer conversation message.',
+          at: DateTime.now().add(const Duration(minutes: 1)),
+        ));
+
+    expect(state.projectsByActivity.first.id, older.id);
+  });
+
   test('a final answer with no mutation gets one corrective round', () async {
     final temp = await Directory.systemTemp.createTemp('praxis_nudge_');
     addTearDown(() => temp.delete(recursive: true));

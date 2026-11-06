@@ -262,7 +262,7 @@ class Agent {
     this.onToolStart,
     this.onReply,
     this.onDiscardLive,
-    this.maxRounds = 24,
+    this.maxRounds = 40,
   });
 
   final AiClient client;
@@ -330,6 +330,7 @@ class Agent {
     var current = provider;
     var mutated = false;
     var completionNudges = 0;
+    var limitNudges = 0;
 
     for (var round = 0; round < maxRounds; round++) {
       if (isCancelled?.call() ?? false) return;
@@ -343,6 +344,7 @@ class Agent {
             system: system,
             turns: turns,
             tools: _tools,
+            maxTokens: kDefaultMaxOutputTokens,
             onText: onTextDelta,
             onThinking: onThinkingDelta,
           );
@@ -360,9 +362,30 @@ class Agent {
 
       if (reply.calls.isEmpty) {
         final text = reply.text.trim();
-        if (!mutated &&
-            completionNudges < 1 &&
-            _looksLikeChangeRequest(prompt)) {
+        final wantsChange = _looksLikeChangeRequest(prompt);
+
+        // A reasoning model can spend the entire output budget before it emits
+        // its tool call. That is not a completed answer, so never print the
+        // old "Done — no changes were needed" placeholder for it.
+        if (reply.hitOutputLimit && limitNudges < 2) {
+          limitNudges++;
+          onDiscardLive?.call();
+          if (text.isNotEmpty) {
+            turns.add(AiTurn.assistant(reply.text, const []));
+          }
+          turns.add(const AiTurn.user(
+            'Your previous response was cut off by the model output limit '
+            'before you acted. Continue from the work already done. Do not '
+            'repeat the plan or keep reasoning: use edit_file for the existing '
+            'file or write_file for a new file now. Keep the tool call compact.',
+          ));
+          continue;
+        }
+
+        if (!reply.hitOutputLimit &&
+            !mutated &&
+            completionNudges < 2 &&
+            wantsChange) {
           completionNudges++;
           onDiscardLive?.call();
           turns.add(AiTurn.assistant(reply.text, const []));
@@ -375,10 +398,26 @@ class Agent {
           ));
           continue;
         }
-        onEvent(AgentEvent.text(
-          text.isEmpty ? 'Done — no changes were needed.' : text,
-          thinking: reply.thinking,
-        ));
+
+        if (!mutated && wantsChange) {
+          onEvent(AgentEvent.error(
+            text.isEmpty
+                ? 'The model stopped without changing a file and returned no '
+                    'text. This is usually an output-budget or tool-call '
+                    'failure; send “continue” to retry.'
+                : 'The model stopped without changing a file. It said: “$text”\n'
+                    'Send “continue” to retry the edit.',
+          ));
+          return;
+        }
+
+        if (text.isEmpty) {
+          onEvent(const AgentEvent.error(
+            'The model returned an empty reply. Send “continue” to retry.',
+          ));
+          return;
+        }
+        onEvent(AgentEvent.text(text, thinking: reply.thinking));
         return;
       }
       turns.add(AiTurn.assistant(reply.text, reply.calls));
@@ -459,6 +498,8 @@ chat next to the code, a terminal and a live preview.
 How to work:
 - Finish the request with the fewest model rounds. Do not narrate a plan before
   acting, and do not run a command just to confirm something already visible.
+- Keep reasoning short. Once you know the edit, call edit_file or write_file;
+  a long internal monologue can consume the output budget before you act.
 - The project tree below is current. Skip list_files for simple edits. Read only
   the file you must change, then write it. Group independent tool calls in one
   reply.

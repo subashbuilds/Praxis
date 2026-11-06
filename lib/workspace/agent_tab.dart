@@ -214,25 +214,27 @@ class _AgentTabState extends State<AgentTab> {
                         _composer.text = value;
                         _send();
                       })
-                    : ListView.builder(
-                        controller: _scroll,
-                        padding: const EdgeInsets.fromLTRB(
-                            Sp.x4, Sp.x4, Sp.x4, Sp.x2),
-                        itemCount: thread.length + (showLive ? 1 : 0),
-                        itemBuilder: (context, index) {
-                          if (index >= thread.length) {
-                            return _LiveReply(
-                              text: state.liveText,
-                              thinking: state.liveThinking,
-                              tools: state.liveTools,
-                              busy: state.busy,
+                    : SelectionArea(
+                        child: ListView.builder(
+                          controller: _scroll,
+                          padding: const EdgeInsets.fromLTRB(
+                              Sp.x4, Sp.x4, Sp.x4, Sp.x2),
+                          itemCount: thread.length + (showLive ? 1 : 0),
+                          itemBuilder: (context, index) {
+                            if (index >= thread.length) {
+                              return _LiveReply(
+                                text: state.liveText,
+                                thinking: state.liveThinking,
+                                tools: state.liveTools,
+                                busy: state.busy,
+                              );
+                            }
+                            return _EntryView(
+                              entry: thread[index],
+                              project: widget.project,
                             );
-                          }
-                          return _EntryView(
-                            entry: thread[index],
-                            project: widget.project,
-                          );
-                        },
+                          },
+                        ),
                       ),
               ),
               if (_showJumpToBottom && thread.isNotEmpty)

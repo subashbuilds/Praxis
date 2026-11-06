@@ -464,9 +464,29 @@ class _CodeEditorState extends State<CodeEditor> {
             textDirection: TextDirection.ltr,
             strutStyle: _strut,
           )..layout(maxWidth: math.max(20, width));
-          return math.max(_row, painter.height);
+          final rows = math.max(1, (painter.height / _row).ceil());
+          return rows * _row;
         }(),
     ];
+  }
+
+  /// One text run, using exactly the same strut as the editor. A Column of
+  /// smaller Text widgets gave each number a different baseline and wrapped
+  /// lines drifted away from their numbers; a single run keeps the metrics
+  /// identical. Blank lines reserve the extra visual rows of a wrapped line.
+  String _gutterText(List<double> heights) {
+    final buffer = StringBuffer();
+    for (var i = 0; i < heights.length; i++) {
+      if (i > 0) buffer.write('\n');
+      buffer.write(i + 1);
+      if (widget.wrap) {
+        final rows = math.max(1, (heights[i] / _row).round());
+        for (var row = 1; row < rows; row++) {
+          buffer.write('\n');
+        }
+      }
+    }
+    return buffer.toString();
   }
 
   @override
@@ -495,23 +515,12 @@ class _CodeEditorState extends State<CodeEditor> {
           width: _gutter,
           color: Pal.ghPanel,
           padding: const EdgeInsets.only(top: _top, right: 9),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (var i = 0; i < heights.length; i++)
-                SizedBox(
-                  height: heights[i],
-                  child: Text(
-                    '${i + 1}',
-                    textAlign: TextAlign.right,
-                    style: Txt.meta.copyWith(
-                      fontSize: 10,
-                      height: _lineHeight,
-                      color: Pal.ghMuted,
-                    ),
-                  ),
-                ),
-            ],
+          child: Text(
+            _gutterText(heights),
+            textAlign: TextAlign.right,
+            softWrap: false,
+            style: _style.copyWith(color: Pal.ghMuted),
+            strutStyle: _strut,
           ),
         );
 

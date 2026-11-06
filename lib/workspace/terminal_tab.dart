@@ -308,36 +308,38 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
           ),
           Expanded(
-            child: ListView.builder(
-              controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x3, Sp.x4, Sp.x3),
-              itemCount: _lines.length + (_running ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (index >= _lines.length) {
+            child: SelectionArea(
+              child: ListView.builder(
+                controller: _scroll,
+                padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x3, Sp.x4, Sp.x3),
+                itemCount: _lines.length + (_running ? 1 : 0),
+                itemBuilder: (context, index) {
+                  if (index >= _lines.length) {
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        '…',
+                        style: Txt.code.copyWith(color: Pal.textDim),
+                      ),
+                    );
+                  }
+                  final line = _lines[index];
                   return Padding(
-                    padding: const EdgeInsets.only(top: 2),
+                    padding: const EdgeInsets.only(bottom: 3),
                     child: Text(
-                      '…',
-                      style: Txt.code.copyWith(color: Pal.textDim),
+                      line.text.isEmpty ? ' ' : line.text,
+                      style: Txt.code.copyWith(
+                        fontSize: 11.5,
+                        height: 1.55,
+                        color: _tone(line.tone),
+                        fontWeight: line.tone == ShellTone.command
+                            ? FontWeight.w500
+                            : FontWeight.w400,
+                      ),
                     ),
                   );
-                }
-                final line = _lines[index];
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
-                  child: Text(
-                    line.text.isEmpty ? ' ' : line.text,
-                    style: Txt.code.copyWith(
-                      fontSize: 11.5,
-                      height: 1.55,
-                      color: _tone(line.tone),
-                      fontWeight: line.tone == ShellTone.command
-                          ? FontWeight.w500
-                          : FontWeight.w400,
-                    ),
-                  ),
-                );
-              },
+                },
+              ),
             ),
           ),
           Container(

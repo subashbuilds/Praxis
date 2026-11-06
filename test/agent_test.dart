@@ -191,6 +191,102 @@ void main() {
     );
   });
 
+  test('a length-limited reasoning reply retries with a larger budget',
+      () async {
+    await fs.write('README.md', '# Project');
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      expect(body['max_tokens'], 8192);
+      if (calls == 1) {
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': '',
+                  'reasoning_content': 'Long reasoning that ran out.',
+                },
+                'finish_reason': 'length',
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (calls == 2) {
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': '',
+                  'tool_calls': [
+                    {
+                      'id': 'edit_1',
+                      'type': 'function',
+                      'function': {
+                        'name': 'edit_file',
+                        'arguments': jsonEncode({
+                          'path': 'README.md',
+                          'old_text': '# Project',
+                          'new_text': '# Project\n\nEdited after retry.',
+                        }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'The README is updated.',
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    var discarded = 0;
+    final events = <AgentEvent>[];
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+      onDiscardLive: () => discarded++,
+    ).run(history: const [], prompt: 'fix the README');
+
+    expect(calls, 3);
+    expect(discarded, 1);
+    expect(await fs.read('README.md'), contains('Edited after retry.'));
+    expect(events.last.text, contains('README is updated'));
+    expect(
+      events.where((event) =>
+          event.kind == AgentEventKind.text &&
+          event.text.contains('no changes were needed')),
+      isEmpty,
+    );
+  });
+
   test('agent keeps going past six tool rounds', () async {
     await fs.write(
       'README.md',

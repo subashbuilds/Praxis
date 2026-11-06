@@ -14,6 +14,7 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
+    final projects = state.projectsByActivity;
 
     return Scaffold(
       body: SafeArea(
@@ -64,9 +65,9 @@ class HomeScreen extends StatelessWidget {
                   ),
                   SectionLabel(
                     'PROJECTS',
-                    trailing: Text('${state.projects.length}', style: Txt.meta),
+                    trailing: Text('${projects.length}', style: Txt.meta),
                   ),
-                  if (state.projects.isEmpty)
+                  if (projects.isEmpty)
                     const Panel(
                       child: EmptyState(
                         icon: Icons.folder_open_rounded,
@@ -76,11 +77,12 @@ class HomeScreen extends StatelessWidget {
                       ),
                     )
                   else
-                    for (final project in state.projects)
+                    for (final project in projects)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _ProjectCard(
                           project: project,
+                          lastActivity: state.lastActivityFor(project),
                           onTap: () => Navigator.of(context).push(
                             MaterialPageRoute(
                               builder: (_) => WorkspaceScreen(project: project),
@@ -193,11 +195,13 @@ class _ModelLine extends StatelessWidget {
 class _ProjectCard extends StatelessWidget {
   const _ProjectCard({
     required this.project,
+    required this.lastActivity,
     required this.onTap,
     required this.onDelete,
   });
 
   final Project project;
+  final DateTime lastActivity;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
@@ -231,7 +235,7 @@ class _ProjectCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    '${kind.label} · ${relativeTime(project.createdAt)}',
+                    '${kind.label} · ${relativeTime(lastActivity)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Txt.meta,

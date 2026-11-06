@@ -5,6 +5,11 @@ import 'package:http/http.dart' as http;
 
 import '../models.dart';
 
+/// Coding agents need room for reasoning plus a complete file edit. The old
+/// 2048-token budget could be consumed entirely by a reasoning model before it
+/// emitted its first tool call.
+const kDefaultMaxOutputTokens = 8192;
+
 class AiToolCall {
   const AiToolCall(
       {required this.id, required this.name, required this.arguments});
@@ -62,6 +67,7 @@ class AiReply {
     required this.calls,
     this.thinking = '',
     this.usage,
+    this.finishReason = '',
   });
   final String text;
   final List<AiToolCall> calls;
@@ -70,6 +76,13 @@ class AiReply {
   /// OpenRouter reasoning models, Anthropic thinking blocks).
   final String thinking;
   final AiUsage? usage;
+
+  /// OpenAI's `finish_reason` or Anthropic's `stop_reason`. A reply cut off by
+  /// the output budget must never be mistaken for a completed answer.
+  final String finishReason;
+
+  bool get hitOutputLimit =>
+      finishReason == 'length' || finishReason == 'max_tokens';
 }
 
 typedef AiDelta = void Function(String delta);
@@ -84,7 +97,7 @@ class AiClient {
     required String system,
     required List<AiTurn> turns,
     required List<AiToolSpec> tools,
-    int maxTokens = 2048,
+    int maxTokens = kDefaultMaxOutputTokens,
   }) async {
     final uri = _uriFor(provider);
     final http.Response response;
@@ -128,7 +141,7 @@ class AiClient {
     required String system,
     required List<AiTurn> turns,
     required List<AiToolSpec> tools,
-    int maxTokens = 2048,
+    int maxTokens = kDefaultMaxOutputTokens,
     AiDelta? onText,
     AiDelta? onThinking,
   }) async {
@@ -218,6 +231,7 @@ class AiClient {
     final thinking = StringBuffer();
     final calls = <int, _CallBuilder>{};
     AiUsage? usage;
+    var finishReason = '';
 
     Future<void> consume(String line) async {
       final trimmed = line.trim();
@@ -243,6 +257,10 @@ class AiClient {
       if (choices is! List || choices.isEmpty) return;
       final choice = choices.first;
       if (choice is! Map) return;
+      final rawFinish = choice['finish_reason'];
+      if (rawFinish is String && rawFinish.isNotEmpty) {
+        finishReason = rawFinish;
+      }
       final delta = choice['delta'] ?? choice['message'];
       if (delta is! Map) return;
       final content = delta['content'];
@@ -300,6 +318,7 @@ class AiClient {
       calls: parsedCalls,
       thinking: thinking.toString().trim(),
       usage: usage,
+      finishReason: finishReason,
     );
   }
 
@@ -314,6 +333,7 @@ class AiClient {
     final blocks = <int, _CallBuilder>{};
     var promptTokens = 0;
     var completionTokens = 0;
+    var finishReason = '';
 
     Future<void> consume(String line) async {
       final trimmed = line.trim();
@@ -365,6 +385,10 @@ class AiClient {
             blocks.putIfAbsent(index, _CallBuilder.new).arguments.write(value);
           }
         case 'message_delta':
+          final delta = json['delta'];
+          if (delta is Map && delta['stop_reason'] is String) {
+            finishReason = delta['stop_reason'] as String;
+          }
           final usage = json['usage'];
           if (usage is Map) {
             completionTokens =
@@ -407,6 +431,7 @@ class AiClient {
               promptTokens: promptTokens,
               completionTokens: completionTokens,
             ),
+      finishReason: finishReason,
     );
   }
 
@@ -699,6 +724,7 @@ class AiClient {
       calls: calls,
       thinking: thinking,
       usage: _usageFrom(body['usage']),
+      finishReason: choices.first['finish_reason'] as String? ?? '',
     );
   }
 
@@ -736,6 +762,7 @@ class AiClient {
       usage: (prompt == 0 && completion == 0)
           ? null
           : AiUsage(promptTokens: prompt, completionTokens: completion),
+      finishReason: body['stop_reason'] as String? ?? '',
     );
   }
 

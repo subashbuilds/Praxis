@@ -199,6 +199,26 @@ class AppState extends ChangeNotifier {
         orElse: () => projects.first,
       );
 
+  /// New projects start at the top, and a project moves to the top as soon as
+  /// its conversation has newer activity than its creation time.
+  List<Project> get projectsByActivity {
+    final sorted = [...projects];
+    sorted.sort((a, b) {
+      final difference = lastActivityFor(b).compareTo(lastActivityFor(a));
+      if (difference != 0) return difference;
+      return b.createdAt.compareTo(a.createdAt);
+    });
+    return sorted;
+  }
+
+  DateTime lastActivityFor(Project project) {
+    var latest = project.createdAt;
+    for (final entry in threadOf(project.id)) {
+      if (entry.at.isAfter(latest)) latest = entry.at;
+    }
+    return latest;
+  }
+
   ProjectFs fsFor(Project project) => _fs.putIfAbsent(
         project.id,
         () => ProjectFs(Directory('${root.path}/projects/${project.id}')),
@@ -391,6 +411,11 @@ class AppState extends ChangeNotifier {
 
   Future<void> deletePath(Project project, String path) async {
     await fsFor(project).delete(path);
+    notifyListeners();
+  }
+
+  Future<void> renamePath(Project project, String from, String to) async {
+    await fsFor(project).rename(from, to);
     notifyListeners();
   }
 
