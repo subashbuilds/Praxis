@@ -4,7 +4,7 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-val releaseKeystore = System.getenv("KEYSTORE_PATH")?.takeIf { it.trim().isNotEmpty }
+val releaseKeystore = System.getenv("KEYSTORE_PATH")?.takeIf { it.trim().isNotEmpty() }
 val releaseStorePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
 val releaseKeyAlias = System.getenv("KEY_ALIAS") ?: ""
 val releaseKeyPassword = System.getenv("KEY_PASSWORD")
