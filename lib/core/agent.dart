@@ -123,8 +123,8 @@ const _baseAgentTools = <AiToolSpec>[
   AiToolSpec(
     name: 'write_file',
     description:
-        'Create or overwrite a UTF-8 file with complete contents. Always send the whole file. '
-        'For a simple edit, read only that file and write it back; do not explore first.',
+        'Create a new UTF-8 file, or overwrite one when the whole content must change. '
+        'For an existing large file, prefer edit_file so you send only the changed text.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -135,6 +135,35 @@ const _baseAgentTools = <AiToolSpec>[
         'content': {'type': 'string', 'description': 'Full file contents.'},
       },
       'required': ['path', 'content'],
+    },
+  ),
+  AiToolSpec(
+    name: 'edit_file',
+    description:
+        'Change part of an existing UTF-8 file without resending the whole file. old_text '
+        'must uniquely identify the text unless replace_all is true. Use this for surgical edits, '
+        'especially in long README, source and config files.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'path': {
+          'type': 'string',
+          'description': 'File path relative to the project root.',
+        },
+        'old_text': {
+          'type': 'string',
+          'description': 'Exact text to find, including indentation.',
+        },
+        'new_text': {
+          'type': 'string',
+          'description': 'Replacement text.',
+        },
+        'replace_all': {
+          'type': 'boolean',
+          'description': 'Replace every match instead of requiring one match.',
+        },
+      },
+      'required': ['path', 'old_text', 'new_text'],
     },
   ),
   AiToolSpec(
@@ -232,6 +261,7 @@ class Agent {
     this.onThinkingDelta,
     this.onToolStart,
     this.onReply,
+    this.onDiscardLive,
     this.maxRounds = 24,
   });
 
@@ -254,6 +284,11 @@ class Agent {
   final void Function(String delta)? onThinkingDelta;
   final void Function(AiToolCall call)? onToolStart;
   final void Function(AiReply reply, ProviderConfig provider)? onReply;
+
+  /// Clears streamed text when the agent has to retry a completion that made
+  /// no file change. Without this, a premature "Done" would stay in the live
+  /// reply above the corrective round.
+  final void Function()? onDiscardLive;
   final int maxRounds;
 
   final Map<String, int> _readCache = {};
@@ -293,6 +328,8 @@ class Agent {
     final system = await _systemPrompt();
     final turns = <AiTurn>[...history, AiTurn.user(prompt)];
     var current = provider;
+    var mutated = false;
+    var completionNudges = 0;
 
     for (var round = 0; round < maxRounds; round++) {
       if (isCancelled?.call() ?? false) return;
@@ -323,6 +360,21 @@ class Agent {
 
       if (reply.calls.isEmpty) {
         final text = reply.text.trim();
+        if (!mutated &&
+            completionNudges < 1 &&
+            _looksLikeChangeRequest(prompt)) {
+          completionNudges++;
+          onDiscardLive?.call();
+          turns.add(AiTurn.assistant(reply.text, const []));
+          turns.add(const AiTurn.user(
+            'You have not changed a file yet. Do not stop with a completion '
+            'message. Use edit_file for an existing file or write_file for a '
+            'new file now. Read only the specific range you still need. If the '
+            'request genuinely requires no file change, state the evidence, '
+            'but otherwise make the requested change.',
+          ));
+          continue;
+        }
         onEvent(AgentEvent.text(
           text.isEmpty ? 'Done — no changes were needed.' : text,
           thinking: reply.thinking,
@@ -354,6 +406,16 @@ class Agent {
         }
         onToolStart?.call(call);
         final result = await _execute(call);
+        if (!mutated &&
+            const {
+              'write_file',
+              'edit_file',
+              'download_file',
+              'install_skill',
+            }.contains(call.name) &&
+            !result.text.startsWith('Error')) {
+          mutated = true;
+        }
         onEvent(AgentEvent.tool(
           tool: call.name,
           detail: _detail(call),
@@ -368,6 +430,13 @@ class Agent {
     onEvent(AgentEvent.error(
       'Paused after $maxRounds tool rounds. Send “continue” to keep going.',
     ));
+  }
+
+  bool _looksLikeChangeRequest(String prompt) {
+    final text = prompt.toLowerCase();
+    return RegExp(
+      r'\b(add|change|edit|fix|update|implement|refactor|remove|delete|rename|move|create|write|replace|make|build|improve|polish|migrate|bump|generate|set|configure)\b',
+    ).hasMatch(text);
   }
 
   Future<String> _systemPrompt() async {
@@ -396,15 +465,30 @@ How to work:
 - read_file is paged. When it says "Next offset", use that offset to continue.
   Never repeat a range you already received; if the needed code is in context,
   act on it.
-- write_file replaces the whole file, so send complete contents. Stop as soon
-  as the requested result is ready.
-- Do not claim to have changed a file unless write_file succeeded.
+- write_file replaces the whole file, so send complete contents. For an
+  existing file, prefer edit_file with a unique old_text and the replacement
+  new_text; this keeps large files inside the model's output budget.
+- Finish the requested edit. Do not answer “Done” until edit_file or
+  write_file has succeeded. If the request is already satisfied, state the
+  evidence instead of claiming a change.
+- Do not claim to have changed a file unless a file-writing tool succeeded.
 
 Project files:
 $files
 
 Environment:
-- ${fullShell ? 'run_command is the real device shell (/system/bin/sh) inside the project. Use it for git, grep, archives, builds and any tool installed on the phone. Check `command -v name` first; Node, npm, Python and git are not bundled by Praxis.' : 'run_command is the file-ops shell; this test environment has no device binaries.'}
+- ${fullShell ? 'run_command is the real device shell (/system/bin/sh) inside the project. The working directory is the project root. Use it for git, grep, archives, builds and any tool installed on the phone. Check `command -v name` first; Node, npm, Python and git are not bundled by Praxis.' : 'run_command is the file-ops shell; this test environment has no device binaries.'}
+- Shell rules: run `cd` as its own command (the app tracks it for the next
+  command); `cd x && command` stays inside that one command. Use POSIX tools
+  such as `pwd`, `ls -la`, `cat`, `grep -R`, `find`, `wc`, `head`, `tail`, `sed`,
+  `awk`, `tar`, `chmod` and `command -v`. A command succeeds only when the
+  returned `exit` is 0; read the reported cwd and exit before continuing.
+- `.praxis` is Praxis state. It always exists, is hidden from the file list, and
+  is the correct place for skills (`.praxis/skills/<name>/SKILL.md`). Do not
+  put project source there.
+- Android app storage may mount files without execute permission. If a
+  downloaded script gives “Permission denied” when run directly, invoke it as
+  `sh path/to/script` instead. Do not assume `./tool` is executable.
 - download_file preserves binary bytes and adds the active GitHub token for GitHub URLs.
 - install_skill can read instructions you provide or fetch source_url from the web.
 - ${onCommitAndPush != null ? 'commit_and_push commits and pushes when the user explicitly asks; it asks for destination confirmation first.' : 'Git push is not available in this run.'}
@@ -493,6 +577,8 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
             'Wrote $bytes bytes to $path',
             diff: diff.isEmpty ? null : diff,
           );
+        case 'edit_file':
+          return await _editFile(call);
         case 'install_skill':
           return await _installSkill(call);
         case 'download_file':
@@ -557,6 +643,44 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
   void _resetRepeat() {
     _lastCallSignature = null;
     _repeatedCalls = 0;
+  }
+
+  Future<_ToolOutcome> _editFile(AiToolCall call) async {
+    final path = (call.arguments['path'] as String? ?? '').trim();
+    final oldText = call.arguments['old_text'] as String? ?? '';
+    final newText = call.arguments['new_text'] as String? ?? '';
+    final replaceAll = call.arguments['replace_all'] as bool? ?? false;
+    if (path.isEmpty) return const _ToolOutcome('Error: path is required');
+    if (oldText.isEmpty) {
+      return const _ToolOutcome('Error: old_text cannot be empty');
+    }
+    if (oldText == newText) {
+      return const _ToolOutcome('Error: old_text and new_text are identical');
+    }
+    final before = await fs.read(path);
+    final matches = RegExp(RegExp.escape(oldText)).allMatches(before).length;
+    if (matches == 0) {
+      return _ToolOutcome(
+        'Error: old_text was not found in $path. Read the exact lines and try '
+        'again with a unique snippet.',
+      );
+    }
+    if (matches > 1 && !replaceAll) {
+      return _ToolOutcome(
+        'Error: old_text appears $matches times in $path. Add surrounding '
+        'context or set replace_all to true.',
+      );
+    }
+    final after = replaceAll
+        ? before.replaceAll(oldText, newText)
+        : before.replaceFirst(oldText, newText);
+    await fs.write(path, after);
+    final diff = computeDiff(before, after);
+    _resetRepeat();
+    return _ToolOutcome(
+      'Edited $path ✓ ($matches replacement${matches == 1 ? '' : 's'}).',
+      diff: diff.isEmpty ? null : diff,
+    );
   }
 
   Future<_ToolOutcome> _readFile(AiToolCall call) async {
@@ -687,6 +811,7 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
     final args = call.arguments;
     switch (call.name) {
       case 'write_file':
+      case 'edit_file':
       case 'read_file':
         return '${args['path'] ?? '?'}';
       case 'run_command':

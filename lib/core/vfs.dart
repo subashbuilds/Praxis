@@ -72,7 +72,13 @@ class ProjectFs {
     return rel.isEmpty ? root.path : '${root.path}/$rel';
   }
 
-  Future<void> ensureRoot() => root.create(recursive: true);
+  Future<void> ensureRoot() async {
+    await root.create(recursive: true);
+    // `.praxis` is app state, not project content, but the shell and skill
+    // tooling expect the folder to exist in every project, including blank
+    // projects that were not cloned from a repository.
+    await Directory('${root.path}/.praxis').create(recursive: true);
+  }
 
   Future<bool> exists(String path) async {
     final rel = normalize(path);

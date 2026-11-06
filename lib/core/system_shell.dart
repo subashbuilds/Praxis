@@ -50,6 +50,7 @@ class SystemShell {
     void Function(String chunk)? onStderr,
     Duration timeout = const Duration(seconds: 120),
   }) async {
+    await fs.ensureRoot();
     final command = raw.trim();
     if (command.isEmpty) {
       return SystemShellResult(output: '', exitCode: 0, cwd: cwdDisplay);

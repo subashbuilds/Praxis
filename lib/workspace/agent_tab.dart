@@ -25,7 +25,16 @@ class _AgentTabState extends State<AgentTab> {
   final _attachments = <String>[];
   int _lastThreadLength = 0;
   int _lastLiveSignal = 0;
+  bool _stickToBottom = true;
+  bool _showJumpToBottom = false;
+  bool _draftRestored = false;
   AppState? _state;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
 
   @override
   void didChangeDependencies() {
@@ -34,6 +43,13 @@ class _AgentTabState extends State<AgentTab> {
     _state = state;
     state.limitPrompt = _askLimit;
     state.confirmPrompt = _askConfirm;
+    if (!_draftRestored) {
+      _draftRestored = true;
+      final draft = state.promptDraftFor(widget.project.id);
+      _composer.text = draft;
+      _composer.selection = TextSelection.collapsed(offset: draft.length);
+      _composer.addListener(_persistDraft);
+    }
   }
 
   @override
@@ -42,10 +58,28 @@ class _AgentTabState extends State<AgentTab> {
     if (state != null) {
       state.limitPrompt = null;
       state.confirmPrompt = null;
+      state.setPromptDraft(widget.project.id, _composer.text);
     }
+    _composer.removeListener(_persistDraft);
     _composer.dispose();
+    _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _persistDraft() {
+    _state?.setPromptDraft(widget.project.id, _composer.text);
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final nearBottom =
+        _scroll.position.maxScrollExtent - _scroll.position.pixels <= 80;
+    if (nearBottom == _stickToBottom) return;
+    setState(() {
+      _stickToBottom = nearBottom;
+      _showJumpToBottom = !nearBottom;
+    });
   }
 
   Future<bool> _askLimit(String title, String body, String accept) async {
@@ -74,14 +108,17 @@ class _AgentTabState extends State<AgentTab> {
     );
   }
 
-  void _scrollToEnd() {
+  void _scrollToEnd({bool force = false}) {
+    if (!force && !_stickToBottom) return;
+    if (force && !_stickToBottom) {
+      setState(() {
+        _stickToBottom = true;
+        _showJumpToBottom = false;
+      });
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: Motion.base,
-        curve: Motion.ease,
-      );
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
     });
   }
 
@@ -145,8 +182,9 @@ class _AgentTabState extends State<AgentTab> {
     }
     final files = List<String>.from(_attachments);
     _composer.clear();
+    _state?.setPromptDraft(widget.project.id, '');
     setState(_attachments.clear);
-    _scrollToEnd();
+    _scrollToEnd(force: true);
     await AppScope.of(context)
         .send(widget.project.id, text, attachments: files);
   }
@@ -168,31 +206,45 @@ class _AgentTabState extends State<AgentTab> {
     return Column(
       children: [
         Expanded(
-          child: thread.isEmpty && !showLive
-              ? _EmptyAgent(onPrompt: (value) {
-                  _composer.text = value;
-                  _send();
-                })
-              : ListView.builder(
-                  controller: _scroll,
-                  padding:
-                      const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x2),
-                  itemCount: thread.length + (showLive ? 1 : 0),
-                  itemBuilder: (context, index) {
-                    if (index >= thread.length) {
-                      return _LiveReply(
-                        text: state.liveText,
-                        thinking: state.liveThinking,
-                        tools: state.liveTools,
-                        busy: state.busy,
-                      );
-                    }
-                    return _EntryView(
-                      entry: thread[index],
-                      project: widget.project,
-                    );
-                  },
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: thread.isEmpty && !showLive
+                    ? _EmptyAgent(onPrompt: (value) {
+                        _composer.text = value;
+                        _send();
+                      })
+                    : ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.fromLTRB(
+                            Sp.x4, Sp.x4, Sp.x4, Sp.x2),
+                        itemCount: thread.length + (showLive ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index >= thread.length) {
+                            return _LiveReply(
+                              text: state.liveText,
+                              thinking: state.liveThinking,
+                              tools: state.liveTools,
+                              busy: state.busy,
+                            );
+                          }
+                          return _EntryView(
+                            entry: thread[index],
+                            project: widget.project,
+                          );
+                        },
+                      ),
+              ),
+              if (_showJumpToBottom && thread.isNotEmpty)
+                Positioned(
+                  right: Sp.x4,
+                  bottom: Sp.x2,
+                  child: _JumpToBottom(
+                    onTap: () => _scrollToEnd(force: true),
+                  ),
                 ),
+            ],
+          ),
         ),
         _Composer(
           controller: _composer,
@@ -1199,6 +1251,49 @@ class _Composer extends StatelessWidget {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _JumpToBottom extends StatelessWidget {
+  const _JumpToBottom({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: 'Jump to latest message',
+      child: Tooltip(
+        message: 'Jump to latest',
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            width: 48,
+            height: 48,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Pal.surface,
+              shape: BoxShape.circle,
+              border: Border.all(color: Pal.ember.withOpacity(0.42)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(Pal.isDark ? 0.26 : 0.08),
+                  offset: const Offset(0, 4),
+                  blurRadius: 14,
+                ),
+              ],
+            ),
+            child: Icon(
+              Icons.keyboard_double_arrow_down_rounded,
+              size: 21,
+              color: Pal.ember,
+            ),
+          ),
         ),
       ),
     );

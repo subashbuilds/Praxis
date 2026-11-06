@@ -1,4 +1,4 @@
-/// flutter_markdown intentionally does not render raw HTML. Many READMEs open
+/// flutter_markdown_plus intentionally does not render raw HTML. Many READMEs open
 /// with centred HTML headings and badge images, so those lines would silently
 /// disappear. This converts the small, safe HTML subset commonly found in
 /// READMEs to Markdown while leaving fenced code blocks alone.

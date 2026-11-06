@@ -1,5 +1,9 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../core/file_import.dart';
 import '../core/push_state.dart';
 import '../core/vfs.dart';
 import '../models.dart';
@@ -22,6 +26,7 @@ class FilesTab extends StatefulWidget {
 class _FilesTabState extends State<FilesTab> {
   Future<_FilesData>? _future;
   final Set<String> _expanded = {};
+  bool _importing = false;
 
   void _refresh() {
     final state = AppScope.of(context);
@@ -41,6 +46,83 @@ class _FilesTabState extends State<FilesTab> {
   }
 
   Future<void> _newFile() async {
+    final action = await _showAddSheet(
+      title: 'Add a file',
+      body: 'Create a file in the project, or bring files in from this device.',
+      createLabel: 'Create a file',
+      importLabel: 'Import files',
+      importIcon: Icons.upload_file_outlined,
+    );
+    if (!mounted) return;
+    if (action == _AddAction.create) await _createNewFile();
+    if (action == _AddAction.importItem) await _importFiles();
+  }
+
+  Future<void> _newFolder() async {
+    final action = await _showAddSheet(
+      title: 'Add a folder',
+      body:
+          'Create an empty folder, or merge a folder from this device into the project.',
+      createLabel: 'Create a folder',
+      importLabel: 'Import folder',
+      importIcon: Icons.drive_folder_upload_outlined,
+    );
+    if (!mounted) return;
+    if (action == _AddAction.create) await _createNewFolder();
+    if (action == _AddAction.importItem) await _importFolder();
+  }
+
+  Future<_AddAction?> _showAddSheet({
+    required String title,
+    required String body,
+    required String createLabel,
+    required String importLabel,
+    required IconData importIcon,
+  }) =>
+      showModalBottomSheet<_AddAction>(
+        context: context,
+        useSafeArea: true,
+        backgroundColor: Pal.surface,
+        builder: (sheetContext) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SheetHandle(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x3),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: Txt.headline.copyWith(fontSize: 21)),
+                    const SizedBox(height: 4),
+                    Text(body, style: Txt.bodySoft),
+                  ],
+                ),
+              ),
+              const Hairline(),
+              ListTile(
+                leading: Icon(Icons.add_rounded, color: Pal.ember),
+                title: Text(createLabel, style: Txt.body),
+                subtitle: Text('Starts empty and opens in the editor.',
+                    style: Txt.meta),
+                onTap: () => Navigator.of(sheetContext).pop(_AddAction.create),
+              ),
+              ListTile(
+                leading: Icon(importIcon, color: Pal.mint),
+                title: Text(importLabel, style: Txt.body),
+                subtitle: Text(
+                    'Keep the original files untouched on this device.',
+                    style: Txt.meta),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_AddAction.importItem),
+              ),
+              const SizedBox(height: Sp.x2),
+            ],
+          ),
+        ),
+      );
+
+  Future<void> _createNewFile() async {
     final state = AppScope.of(context);
     final navigator = Navigator.of(context);
     final name = await _askName('New file', 'lib/example.dart');
@@ -56,7 +138,7 @@ class _FilesTabState extends State<FilesTab> {
     if (mounted) _refresh();
   }
 
-  Future<void> _newFolder() async {
+  Future<void> _createNewFolder() async {
     final state = AppScope.of(context);
     final name = await _askName('New folder', 'src');
     if (name == null || !mounted) return;
@@ -65,6 +147,163 @@ class _FilesTabState extends State<FilesTab> {
       setState(() => _expanded.add(name));
       _refresh();
     }
+  }
+
+  Future<void> _importFiles() async {
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: false,
+      );
+    } catch (error) {
+      _showMessage('Could not open the file picker: $error');
+      return;
+    }
+    final paths = result?.files
+            .map((file) => file.path)
+            .whereType<String>()
+            .where((path) => path.isNotEmpty)
+            .toList() ??
+        const <String>[];
+    if (paths.isEmpty || !mounted) return;
+    await _runImport([
+      for (final path in paths)
+        ImportEntry(
+          path: path.replaceAll('\\', '/').split('/').last,
+          sourcePath: path,
+          isDir: false,
+        ),
+    ]);
+  }
+
+  Future<void> _importFolder() async {
+    String? rootPath;
+    try {
+      rootPath = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Import a folder',
+      );
+    } catch (error) {
+      _showMessage('Could not open the folder picker: $error');
+      return;
+    }
+    if (rootPath == null || rootPath.isEmpty || !mounted) return;
+    final root = Directory(rootPath);
+    if (!await root.exists()) {
+      _showMessage('That folder can no longer be read.');
+      return;
+    }
+    final name = rootPath
+        .replaceAll('\\', '/')
+        .split('/')
+        .where((part) => part.isNotEmpty)
+        .last;
+    final entries = <ImportEntry>[
+      ImportEntry(path: name, sourcePath: rootPath, isDir: true),
+    ];
+    try {
+      await for (final entity
+          in root.list(recursive: true, followLinks: false)) {
+        final relative = _relativeTo(root.path, entity.path);
+        if (relative.isEmpty || _skipImported(relative)) continue;
+        if (entity is Directory) {
+          entries.add(ImportEntry(
+            path: '$name/$relative',
+            sourcePath: entity.path,
+            isDir: true,
+          ));
+        } else if (entity is File) {
+          entries.add(ImportEntry(
+            path: '$name/$relative',
+            sourcePath: entity.path,
+            isDir: false,
+          ));
+        }
+      }
+    } catch (error) {
+      _showMessage('Could not read the folder: $error');
+      return;
+    }
+    if (entries.isEmpty) {
+      _showMessage('That folder has no files to import.');
+      return;
+    }
+    await _runImport(entries);
+  }
+
+  String _relativeTo(String parent, String child) {
+    var relative = child.substring(parent.length);
+    relative = relative.replaceAll('\\', '/');
+    while (relative.startsWith('/')) {
+      relative = relative.substring(1);
+    }
+    return relative;
+  }
+
+  bool _skipImported(String path) {
+    final parts = path.split('/');
+    if (parts.any((part) =>
+        part == '.git' || part == '.praxis' || part == '.project.json')) {
+      return true;
+    }
+    return path == '.DS_Store' || path.endsWith('/.DS_Store');
+  }
+
+  Future<void> _runImport(List<ImportEntry> entries) async {
+    if (entries.isEmpty) return;
+    setState(() => _importing = true);
+    try {
+      final summary = await AppScope.of(context).importIntoProject(
+        widget.project,
+        entries,
+        onConflict: _askImportConflict,
+      );
+      if (!mounted) return;
+      _refresh();
+      final failed = summary.failed.isEmpty
+          ? ''
+          : ' · ${summary.failed.first}${summary.failed.length > 1 ? ' (+${summary.failed.length - 1} more)' : ''}';
+      _showMessage('${summary.message}$failed');
+    } catch (error) {
+      _showMessage('Import failed: $error');
+    } finally {
+      if (mounted) setState(() => _importing = false);
+    }
+  }
+
+  Future<bool> _askImportConflict(ImportConflict conflict) async {
+    if (!mounted) return false;
+    final incoming = conflict.incomingIsDir ? 'folder' : 'file';
+    final existing = conflict.existingIsDir ? 'folder' : 'file';
+    final detail = switch ((conflict.incomingIsDir, conflict.existingIsDir)) {
+      (false, false) =>
+        'The imported bytes replace the current file. This cannot be undone.',
+      (true, false) =>
+        'The imported folder replaces the file. The file is deleted and the folder is created.',
+      (false, true) =>
+        'The imported file replaces the folder. The folder and everything inside it are deleted.',
+      (true, true) => 'Merge the folder contents.',
+    };
+    return showPraxisConfirm(
+      context,
+      title: 'Replace existing $existing?',
+      body:
+          '$incoming at ${conflict.path} would replace an existing $existing. $detail',
+      confirmLabel: 'Replace',
+      cancelLabel: 'Keep existing',
+      destructive: true,
+      icon: Icons.swap_horiz_rounded,
+      details: [
+        ConfirmDetail('Path', conflict.path),
+        ConfirmDetail('Imported', incoming),
+        ConfirmDetail('Existing', existing),
+      ],
+    );
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
   Future<String?> _askName(String title, String hint) {
@@ -141,6 +380,7 @@ class _FilesTabState extends State<FilesTab> {
           project: project,
           onChanged: _refresh,
         ),
+        if (_importing) LinearProgressIndicator(minHeight: 2, color: Pal.mint),
         Container(
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
           decoration: BoxDecoration(
@@ -366,6 +606,8 @@ class _FilesTabState extends State<FilesTab> {
     };
   }
 }
+
+enum _AddAction { create, importItem }
 
 class _TreeRow {
   const _TreeRow(this.entry, this.depth);

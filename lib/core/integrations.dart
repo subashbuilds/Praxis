@@ -323,6 +323,21 @@ class GitHubClient {
     throw IntegrationException(_error(response, 'Could not create branch'));
   }
 
+  Future<String?> defaultBranch(String owner, String repo) async {
+    final response = await _client
+        .get(
+          Uri.parse('https://api.github.com/repos/$owner/$repo'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Could not read the repository'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    return body['default_branch'] as String?;
+  }
+
   Future<String?> headSha(String owner, String repo, String branch) async {
     final response = await _client
         .get(
@@ -373,17 +388,52 @@ class GitHubClient {
     if (files.isEmpty) {
       throw IntegrationException('Select at least one file to commit.');
     }
-    final parent = parentSha ?? await headSha(owner, repo, branch);
-    if (parent == null) await ensureRepo(owner, repo);
-    final baseTree =
-        parent == null ? null : await _treeForCommit(owner, repo, parent);
 
-    final paths = files.keys.toList();
+    var parent = parentSha ?? await headSha(owner, repo, branch);
+    var remaining = files;
+    if (parent == null) {
+      await ensureRepo(owner, repo);
+      // A missing branch is not the same as an empty repository. Git Data API
+      // returns 409 for a repository with no commit, but a 404 for a branch
+      // that does not exist. Only seed when the repository's default branch
+      // also has no commit.
+      final defaultName = await defaultBranch(owner, repo) ?? branch;
+      if (defaultName != branch) {
+        final defaultHead = await headSha(owner, repo, defaultName);
+        if (defaultHead != null) {
+          throw IntegrationException(
+            'Branch $branch does not exist in $owner/$repo. '
+            'Create it first or push to $defaultName.',
+          );
+        }
+      }
+      // Git Data API returns 409 for a repository with no commit. Seed the
+      // repository through the Contents API with the smallest selected file,
+      // then build the real commit on top of that seed. This avoids a
+      // placeholder README that would otherwise be left behind.
+      final seedPath = files.keys
+          .reduce((a, b) => files[a]!.length <= files[b]!.length ? a : b);
+      final seed = await _initializeRepository(
+        owner: owner,
+        repo: repo,
+        message: message,
+        path: seedPath,
+        bytes: files[seedPath]!,
+      );
+      if (files.length == 1) {
+        return GitHubCommit(sha: seed.sha, treeSha: seed.treeSha);
+      }
+      parent = seed.sha;
+      remaining = Map<String, List<int>>.from(files)..remove(seedPath);
+    }
+    final baseTree = await _treeForCommit(owner, repo, parent);
+
+    final paths = remaining.keys.toList();
     final uploaded = await _mapConcurrent<String, String>(
       paths,
       6,
       (path) async {
-        final bytes = files[path]!;
+        final bytes = remaining[path]!;
         if (bytes.length > 100 * 1024 * 1024) {
           throw IntegrationException(
               '$path is larger than GitHub’s 100 MB blob limit.');
@@ -446,7 +496,7 @@ class GitHubClient {
           body: jsonEncode({
             'message': message,
             'tree': treeSha,
-            'parents': parent == null ? <String>[] : [parent],
+            'parents': [parent],
           }),
         )
         .timeout(const Duration(seconds: 45));
@@ -459,6 +509,40 @@ class GitHubClient {
       throw IntegrationException('GitHub returned no commit SHA.');
     }
     return GitHubCommit(sha: sha, treeSha: treeSha, parentSha: parent);
+  }
+
+  Future<GitHubCommit> _initializeRepository({
+    required String owner,
+    required String repo,
+    required String message,
+    required String path,
+    required List<int> bytes,
+  }) async {
+    final encodedPath = path.split('/').map(Uri.encodeComponent).join('/');
+    final response = await _client
+        .put(
+          Uri.parse(
+              'https://api.github.com/repos/$owner/$repo/contents/$encodedPath'),
+          headers: _jsonHeaders,
+          body: jsonEncode({
+            'message': message,
+            'content': base64Encode(bytes),
+          }),
+        )
+        .timeout(const Duration(seconds: 60));
+    if (response.statusCode != 201) {
+      throw IntegrationException(
+          _error(response, 'Could not initialize the empty repository'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final commit = body['commit'] as Map<String, dynamic>? ?? const {};
+    final sha = commit['sha'] as String?;
+    final treeSha = (commit['tree'] as Map?)?['sha'] as String?;
+    if (sha == null || treeSha == null) {
+      throw IntegrationException(
+          'GitHub initialized the repository without returning a commit.');
+    }
+    return GitHubCommit(sha: sha, treeSha: treeSha);
   }
 
   Future<void> pushRef({

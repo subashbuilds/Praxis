@@ -17,75 +17,86 @@ class HomeScreen extends StatelessWidget {
 
     return Scaffold(
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(Sp.page, Sp.x2, Sp.page, Sp.x8),
+        child: Column(
           children: [
-            Row(
-              children: [
-                const Wordmark(),
-                const Spacer(),
-                IconAction(
-                  icon: Icons.tune_rounded,
-                  tooltip: 'Settings',
-                  onTap: () => _openSettings(context),
-                ),
-              ],
-            ),
-            const SizedBox(height: 30),
-            Text('Your pocket\ndev box.', style: Txt.display),
-            const SizedBox(height: 12),
-            Text(
-              'Edit files, run a shell, preview the app, and let an agent change '
-              'it — all on this phone, in one folder you can read.',
-              style: Txt.bodySoft,
-            ),
-            const SizedBox(height: 18),
-            _ModelLine(
-                provider: state.activeProvider,
-                onTap: () => _openSettings(context)),
-            const SizedBox(height: 18),
-            EmberButton(
-              label: 'New project',
-              icon: Icons.add_rounded,
-              onTap: () => _newProject(context),
-            ),
-            const SizedBox(height: 8),
-            GhostButton(
-              label: 'Clone a repository',
-              icon: Icons.call_split_rounded,
-              onTap: () => _newProject(context, clone: true),
-            ),
-            SectionLabel(
-              'PROJECTS',
-              trailing: Text('${state.projects.length}', style: Txt.meta),
-            ),
-            if (state.projects.isEmpty)
-              const Panel(
-                child: EmptyState(
-                  icon: Icons.folder_open_rounded,
-                  title: 'No projects yet',
-                  body:
-                      'Create one and it appears here as a real folder on disk.',
-                ),
-              )
-            else
-              for (final project in state.projects)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: _ProjectCard(
-                    project: project,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => WorkspaceScreen(project: project),
-                      ),
-                    ),
-                    onDelete: () => _confirmDelete(context, state, project),
+            Padding(
+              padding:
+                  const EdgeInsets.fromLTRB(Sp.page, Sp.x2, Sp.page, Sp.x1),
+              child: Row(
+                children: [
+                  const Wordmark(),
+                  const Spacer(),
+                  IconAction(
+                    icon: Icons.tune_rounded,
+                    tooltip: 'Settings',
+                    onTap: () => _openSettings(context),
                   ),
-                ),
-            const SizedBox(height: Sp.x5),
-            Text(
-              'Files, keys and chats stay on this device.',
-              style: Txt.meta,
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding:
+                    const EdgeInsets.fromLTRB(Sp.page, Sp.x5, Sp.page, Sp.x8),
+                children: [
+                  Text('Your pocket\ndev box.', style: Txt.display),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Edit files, run a shell, preview the app, and let an agent change '
+                    'it — all on this phone, in one folder you can read.',
+                    style: Txt.bodySoft,
+                  ),
+                  const SizedBox(height: 18),
+                  _ModelLine(
+                      provider: state.activeProvider,
+                      onTap: () => _openSettings(context)),
+                  const SizedBox(height: 18),
+                  EmberButton(
+                    label: 'New project',
+                    icon: Icons.add_rounded,
+                    onTap: () => _newProject(context),
+                  ),
+                  const SizedBox(height: 8),
+                  GhostButton(
+                    label: 'Clone a repository',
+                    icon: Icons.call_split_rounded,
+                    onTap: () => _newProject(context, clone: true),
+                  ),
+                  SectionLabel(
+                    'PROJECTS',
+                    trailing: Text('${state.projects.length}', style: Txt.meta),
+                  ),
+                  if (state.projects.isEmpty)
+                    const Panel(
+                      child: EmptyState(
+                        icon: Icons.folder_open_rounded,
+                        title: 'No projects yet',
+                        body:
+                            'Create one and it appears here as a real folder on disk.',
+                      ),
+                    )
+                  else
+                    for (final project in state.projects)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: _ProjectCard(
+                          project: project,
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => WorkspaceScreen(project: project),
+                            ),
+                          ),
+                          onDelete: () =>
+                              _confirmDelete(context, state, project),
+                        ),
+                      ),
+                  const SizedBox(height: Sp.x5),
+                  Text(
+                    'Files, keys and chats stay on this device.',
+                    style: Txt.meta,
+                  ),
+                ],
+              ),
             ),
           ],
         ),

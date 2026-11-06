@@ -27,6 +27,7 @@ class Shell {
   String get cwdDisplay => '/$cwd';
 
   Future<ShellResult> run(String raw) async {
+    await fs.ensureRoot();
     final input = raw.trim();
     if (input.isEmpty) return ShellResult(const [], cwd: cwd);
     final tokens = _tokenize(input);

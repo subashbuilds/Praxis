@@ -539,17 +539,20 @@ class _CodeEditorState extends State<CodeEditor> {
 
         return Container(
           color: Pal.ghBg,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              gutter,
-              Container(width: 1, height: total, color: Pal.ghLine),
-              Expanded(
-                child: Scrollbar(
-                  controller: _vertical,
-                  child: SingleChildScrollView(
-                    controller: _vertical,
-                    padding: EdgeInsets.zero,
+          // The gutter is inside the same vertical scroll surface as the code.
+          // Keeping it in a separate column made line numbers look frozen while
+          // the text scrolled underneath them.
+          child: Scrollbar(
+            controller: _vertical,
+            child: SingleChildScrollView(
+              controller: _vertical,
+              padding: EdgeInsets.zero,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  gutter,
+                  Container(width: 1, height: total, color: Pal.ghLine),
+                  Expanded(
                     child: widget.wrap
                         ? SizedBox(
                             width: codeViewport + _left + _right,
@@ -569,9 +572,9 @@ class _CodeEditorState extends State<CodeEditor> {
                             ),
                           ),
                   ),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
         );
       },

@@ -42,89 +42,95 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     final state = AppScope.of(context);
     final project = state.projectById(widget.project.id);
 
-    return Scaffold(
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.fromLTRB(Sp.x2, Sp.x2, Sp.x2, Sp.x2),
-              decoration: BoxDecoration(
-                color: Pal.canvas,
-                border: Border(bottom: BorderSide(color: Pal.line)),
-              ),
-              child: Row(
-                children: [
-                  IconAction(
-                    icon: Icons.arrow_back_rounded,
-                    tooltip: _tab == 0 ? 'Back' : 'Conversation',
-                    onTap: _back,
-                  ),
-                  const SizedBox(width: 2),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _tab = 0),
-                      behavior: HitTestBehavior.opaque,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            project.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Txt.title,
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '${project.kind.label} · ${project.branch}'
-                            '${project.repo.isEmpty ? '' : ' · ${project.repo}'}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Txt.meta.copyWith(fontSize: 10),
-                          ),
-                        ],
+    return PopScope(
+      canPop: _tab == 0,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) setState(() => _tab = 0);
+      },
+      child: Scaffold(
+        body: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.fromLTRB(Sp.x2, Sp.x2, Sp.x2, Sp.x2),
+                decoration: BoxDecoration(
+                  color: Pal.canvas,
+                  border: Border(bottom: BorderSide(color: Pal.line)),
+                ),
+                child: Row(
+                  children: [
+                    IconAction(
+                      icon: Icons.arrow_back_rounded,
+                      tooltip: _tab == 0 ? 'Back' : 'Conversation',
+                      onTap: _back,
+                    ),
+                    const SizedBox(width: 2),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setState(() => _tab = 0),
+                        behavior: HitTestBehavior.opaque,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              project.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.title,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${project.kind.label} · ${project.branch}'
+                              '${project.repo.isEmpty ? '' : ' · ${project.repo}'}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.meta.copyWith(fontSize: 10),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  _TabIcon(
-                    icon: Icons.folder_open_rounded,
-                    label: 'Files',
-                    active: _tab == 1,
-                    onTap: () => _selectTab(1),
-                  ),
-                  _TabIcon(
-                    icon: Icons.terminal_rounded,
-                    label: 'Shell',
-                    active: _tab == 2,
-                    onTap: () => _selectTab(2),
-                  ),
-                  _TabIcon(
-                    icon: Icons.play_circle_outline_rounded,
-                    label: 'Preview',
-                    active: _tab == 3,
-                    onTap: () => _selectTab(3),
-                  ),
-                ],
-              ),
-            ),
-            if (_tab == 0)
-              _AgentStatusBar(
-                state: state,
-                project: project,
-                onModels: () => showModelSheet(context),
-                onUsage: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const UsageScreen()),
+                    _TabIcon(
+                      icon: Icons.folder_open_rounded,
+                      label: 'Files',
+                      active: _tab == 1,
+                      onTap: () => _selectTab(1),
+                    ),
+                    _TabIcon(
+                      icon: Icons.terminal_rounded,
+                      label: 'Shell',
+                      active: _tab == 2,
+                      onTap: () => _selectTab(2),
+                    ),
+                    _TabIcon(
+                      icon: Icons.play_circle_outline_rounded,
+                      label: 'Preview',
+                      active: _tab == 3,
+                      onTap: () => _selectTab(3),
+                    ),
+                  ],
                 ),
               ),
-            Expanded(
-              child: switch (_tab) {
-                0 => AgentTab(project: project),
-                1 => FilesTab(project: project),
-                2 => TerminalTab(project: project),
-                _ => PreviewTab(project: project),
-              },
-            ),
-          ],
+              if (_tab == 0)
+                _AgentStatusBar(
+                  state: state,
+                  project: project,
+                  onModels: () => showModelSheet(context),
+                  onUsage: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const UsageScreen()),
+                  ),
+                ),
+              Expanded(
+                child: switch (_tab) {
+                  0 => AgentTab(project: project),
+                  1 => FilesTab(project: project),
+                  2 => TerminalTab(project: project),
+                  _ => PreviewTab(project: project),
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );

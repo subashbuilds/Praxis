@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../core/file_types.dart';
@@ -89,7 +89,7 @@ class _EditorScreenState extends State<EditorScreen> {
         _image = image;
         _svg = svg;
         _binary = binary;
-        _preview = svg || (_isMarkdown && !binary);
+        _preview = image || svg || (_isMarkdown && !binary);
         if (!binary && text != null) _controller.text = text;
         _loading = false;
       });

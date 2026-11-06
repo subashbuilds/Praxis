@@ -13,7 +13,7 @@ dependencies:
   archive: ^3.6.1
   crypto: ^3.0.8
   file_picker: ^8.1.2
-  flutter_markdown: ^0.7.4+1
+  flutter_markdown_plus: ^1.0.0+1
   flutter_svg: ^2.0.10
   http: ^1.6.0
   path_provider: ^2.1.5

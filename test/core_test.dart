@@ -105,13 +105,14 @@ void main() {
       expect(result.lines.single.text, '/lib');
     });
 
-    test('the device shell prompt follows the working directory', () async {
+    test('the device shell creates .praxis and can enter it', () async {
       if (Platform.isAndroid) return;
-      await fs.createDir('.praxis');
       final shell = SystemShell(fs);
       expect(shell.promptDisplay, '~/');
-      await shell.run('cd .praxis');
+      final result = await shell.run('cd .praxis');
+      expect(result.exitCode, 0);
       expect(shell.promptDisplay, '.praxis/');
+      expect(await fs.isDirectory('.praxis'), isTrue);
     });
 
     test('echo with redirection creates a real file', () async {

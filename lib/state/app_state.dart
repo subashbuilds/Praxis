@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -10,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/agent.dart';
 import '../core/ai.dart';
 import '../core/diff.dart';
+import '../core/file_import.dart';
 import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/model_info.dart';
@@ -82,6 +84,7 @@ class AppState extends ChangeNotifier {
   static const _kAutoNextProvider = 'praxis.autoNextProvider';
   static const _kDarkMode = 'praxis.darkMode';
   static const _kUsage = 'praxis.usage';
+  static const _kDrafts = 'praxis.drafts';
   static const _kChatPrefix = 'praxis.chat.';
 
   final Directory root;
@@ -121,6 +124,7 @@ class AppState extends ChangeNotifier {
   UsageEvent? _lastUsage;
 
   final Map<String, List<ChatEntry>> _threads = {};
+  final Map<String, String> _drafts = {};
   final Map<String, ProjectFs> _fs = {};
   final Map<String, Shell> _shells = {};
   final Map<String, SystemShell> _systemShells = {};
@@ -161,6 +165,7 @@ class AppState extends ChangeNotifier {
       if (entity is! Directory) continue;
       final meta = File('${entity.path}/.project.json');
       if (!await meta.exists()) continue;
+      await ProjectFs(entity).ensureRoot();
       try {
         final json = jsonDecode(await meta.readAsString());
         projects.add(Project.fromJson((json as Map).cast<String, dynamic>()));
@@ -174,6 +179,7 @@ class AppState extends ChangeNotifier {
     _loadSkills();
     _loadIntegrations();
     _loadUsage();
+    _loadDrafts();
     wordWrap = store.read(_kWordWrap) == 'true';
     autoNextKey = store.read(_kAutoNextKey) == 'true';
     autoNextProvider = store.read(_kAutoNextProvider) == 'true';
@@ -227,6 +233,7 @@ class AppState extends ChangeNotifier {
       branch: branch,
     );
     final fs = ProjectFs(dir);
+    await fs.ensureRoot();
     for (final file in kind.scaffold) {
       await fs.write(file.key, file.value);
     }
@@ -273,6 +280,7 @@ class AppState extends ChangeNotifier {
     final dir = Directory('${root.path}/projects/$id');
     await dir.create(recursive: true);
     final fs = ProjectFs(dir);
+    await fs.ensureRoot();
     try {
       for (final entry in cloned.files.entries) {
         await fs.writeBytes(entry.key, entry.value);
@@ -325,11 +333,13 @@ class AppState extends ChangeNotifier {
     if (await dir.exists()) await dir.delete(recursive: true);
     projects.removeWhere((item) => item.id == project.id);
     _threads.remove(project.id);
+    _drafts.remove(project.id);
     _fs.remove(project.id);
     _shells.remove(project.id);
     _systemShells.remove(project.id);
     _pushStates.remove(project.id);
     await store.remove('$_kChatPrefix${project.id}');
+    await _persistDrafts();
     notifyListeners();
   }
 
@@ -350,6 +360,20 @@ class AppState extends ChangeNotifier {
 
   Future<List<FileEntry>> filesOf(Project project) =>
       fsFor(project).list(includeHidden: true);
+
+  Future<ImportSummary> importIntoProject(
+    Project project,
+    List<ImportEntry> entries, {
+    required ImportConflictResolver onConflict,
+  }) async {
+    final summary = await importEntries(
+      fsFor(project),
+      entries,
+      onConflict: onConflict,
+    );
+    if (summary.changed > 0 || summary.failed.isNotEmpty) notifyListeners();
+    return summary;
+  }
 
   Future<String> readFile(Project project, String path) =>
       fsFor(project).read(path);
@@ -468,6 +492,40 @@ class AppState extends ChangeNotifier {
     }
     return _threads[projectId] = thread;
   }
+
+  void _loadDrafts() {
+    _drafts.clear();
+    final raw = store.read(_kDrafts);
+    if (raw == null) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        for (final entry in decoded.entries) {
+          if (entry.key is String && entry.value is String) {
+            _drafts[entry.key as String] = entry.value as String;
+          }
+        }
+      }
+    } catch (_) {
+      _drafts.clear();
+    }
+  }
+
+  String promptDraftFor(String projectId) => _drafts[projectId] ?? '';
+
+  /// Keeps the composer alive across tabs and app restarts. Drafts are stored
+  /// per project and deliberately do not rebuild the whole app on each key.
+  void setPromptDraft(String projectId, String text) {
+    if (text.isEmpty) {
+      if (_drafts.remove(projectId) == null) return;
+    } else {
+      if (_drafts[projectId] == text) return;
+      _drafts[projectId] = text;
+    }
+    unawaited(_persistDrafts());
+  }
+
+  Future<void> _persistDrafts() => store.write(_kDrafts, jsonEncode(_drafts));
 
   Future<void> _persistChat(String projectId) async {
     final thread = _threads[projectId];
@@ -613,6 +671,10 @@ class AppState extends ChangeNotifier {
         if (tokens == null) return;
         _recordUsage(usedProvider, tokens, projectId);
       },
+      onDiscardLive: () {
+        _clearLive();
+        notifyListeners();
+      },
       onEvent: (event) {
         if (event.kind == AgentEventKind.text) {
           _clearLive();
@@ -720,6 +782,7 @@ class AppState extends ChangeNotifier {
     final args = call.arguments;
     return switch (call.name) {
       'write_file' ||
+      'edit_file' ||
       'read_file' ||
       'download_file' =>
         '${args['path'] ?? '?'}',
@@ -1699,6 +1762,7 @@ class AppState extends ChangeNotifier {
     await projectsDir.create(recursive: true);
     projects.clear();
     _threads.clear();
+    _drafts.clear();
     _fs.clear();
     _shells.clear();
     _systemShells.clear();
@@ -1715,6 +1779,7 @@ class AppState extends ChangeNotifier {
       _kAutoNextKey,
       _kAutoNextProvider,
       _kUsage,
+      _kDrafts,
     ]) {
       await store.remove(key);
     }
