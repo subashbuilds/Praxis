@@ -9,6 +9,7 @@ import '../theme/tokens.dart';
 import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 import 'about_screen.dart';
+import 'logs_screen.dart';
 import 'provider_form.dart';
 import 'usage_screen.dart';
 
@@ -388,6 +389,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   size: 17, color: Pal.textDim),
                             ],
                           ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SectionLabel('LOGS'),
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const LogsScreen()),
+                    ),
+                    behavior: HitTestBehavior.opaque,
+                    child: Panel(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: Sp.x3, vertical: Sp.x3),
+                      child: Row(
+                        children: [
+                          GlyphBadge(
+                            icon: Icons.receipt_long_outlined,
+                            color: Pal.amber,
+                            size: 34,
+                            iconSize: 17,
+                          ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Agent rounds',
+                                    style: Txt.title.copyWith(fontSize: 15)),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Model requests, tool names, repeated calls '
+                                  'and task outcomes',
+                                  style: Txt.meta.copyWith(fontSize: 9.5),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Text('View',
+                              style: Txt.meta.copyWith(color: Pal.ember)),
+                          const SizedBox(width: 2),
+                          Icon(Icons.chevron_right_rounded,
+                              size: 17, color: Pal.textDim),
                         ],
                       ),
                     ),

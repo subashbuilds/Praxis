@@ -322,7 +322,11 @@ class _FilesTabState extends State<FilesTab> {
 
   void _showMessage(String text) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+    final messenger = ScaffoldMessenger.of(context);
+    // A queued message from an earlier import must not make a completed merge
+    // look like it failed. Show this operation's result immediately.
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(content: Text(text)));
   }
 
   Future<String?> _askName(

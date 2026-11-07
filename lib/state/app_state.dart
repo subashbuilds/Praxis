@@ -18,6 +18,7 @@ import '../core/model_info.dart';
 import '../core/project_skills.dart';
 import '../core/push_state.dart';
 import '../core/repo_clone.dart';
+import '../core/round_log.dart';
 import '../core/shell.dart';
 import '../core/store.dart';
 import '../core/system_shell.dart';
@@ -72,6 +73,7 @@ class AppState extends ChangeNotifier {
     required this.root,
     required this.store,
     http.Client? httpClient,
+    this.roundLog,
     this.seedWelcome = true,
   }) : httpClient = httpClient ?? http.Client();
 
@@ -90,6 +92,7 @@ class AppState extends ChangeNotifier {
   final Directory root;
   final KVStore store;
   final http.Client httpClient;
+  final RoundLogStore? roundLog;
   final bool seedWelcome;
 
   late final AiClient ai = AiClient(client: httpClient);
@@ -149,8 +152,22 @@ class AppState extends ChangeNotifier {
   static Future<AppState> bootstrap() async {
     final directory = await getApplicationDocumentsDirectory();
     final root = Directory('${directory.path}/praxis');
+    RoundLogStore? roundLog;
+    try {
+      final support = await getApplicationSupportDirectory();
+      final fileLog = FileRoundLog(Directory('${support.path}/praxis/logs'));
+      await fileLog.prepare();
+      roundLog = fileLog;
+    } catch (_) {
+      // Logging is diagnostic; it must never prevent the app from starting.
+      roundLog = null;
+    }
     final prefs = await SharedPreferences.getInstance();
-    final state = AppState(root: root, store: PrefsStore(prefs));
+    final state = AppState(
+      root: root,
+      store: PrefsStore(prefs),
+      roundLog: roundLog,
+    );
     await state.init();
     return state;
   }
@@ -663,6 +680,8 @@ class AppState extends ChangeNotifier {
     final agent = Agent(
       client: ai,
       provider: provider,
+      taskId: '$projectId-${started.microsecondsSinceEpoch}',
+      roundLog: roundLog,
       fs: fsFor(project),
       shell: shellFor(project),
       deviceShell: systemShellFor(project),
@@ -777,6 +796,17 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       await _persistChat(projectId);
     }
+  }
+
+  Future<List<AgentTask>> loadAgentTasks() async {
+    final log = roundLog;
+    if (log == null) return const [];
+    return log.loadTasks();
+  }
+
+  Future<void> clearAgentLog() async {
+    await roundLog?.clear();
+    notifyListeners();
   }
 
   Future<void> _recordUsage(
@@ -1793,6 +1823,7 @@ class AppState extends ChangeNotifier {
     _systemShells.clear();
     _pushStates.clear();
     _clearLive();
+    await roundLog?.clear();
     usageEvents.clear();
     _lastUsage = null;
     for (final key in [

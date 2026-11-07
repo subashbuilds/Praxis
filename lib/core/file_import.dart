@@ -43,12 +43,18 @@ class ImportSummary {
   const ImportSummary({
     this.created = 0,
     this.replaced = 0,
+    this.merged = 0,
     this.skipped = 0,
     this.failed = const [],
   });
 
   final int created;
   final int replaced;
+
+  /// Existing folders that were merged into rather than replaced. This makes
+  /// a successful same-name folder import visible even when every child file
+  /// is already present or was handled separately.
+  final int merged;
   final int skipped;
   final List<String> failed;
 
@@ -57,6 +63,7 @@ class ImportSummary {
 
   String get message {
     final parts = <String>[
+      if (merged > 0) '$merged folder${merged == 1 ? '' : 's'} merged',
       if (created > 0) '$created imported',
       if (replaced > 0) '$replaced replaced',
       if (skipped > 0) '$skipped kept',
@@ -88,6 +95,7 @@ Future<ImportSummary> importEntries(
 
   var created = 0;
   var replaced = 0;
+  var merged = 0;
   var skipped = 0;
   final failed = [...expansion.failed];
   final blockedDirectories = <String>{};
@@ -135,6 +143,9 @@ Future<ImportSummary> importEntries(
       final existingIsDir = existingType == FileSystemEntityType.directory;
       if (entry.isDir && existingIsDir) {
         // Merge into the existing tree. Files inside are handled individually.
+        // Count the merge itself so a successful same-name import never
+        // reports "Nothing was imported" when the folder already existed.
+        merged++;
         continue;
       }
       final replace = await onConflict(ImportConflict(
@@ -178,6 +189,7 @@ Future<ImportSummary> importEntries(
   return ImportSummary(
     created: created,
     replaced: replaced,
+    merged: merged,
     skipped: skipped,
     failed: failed,
   );
