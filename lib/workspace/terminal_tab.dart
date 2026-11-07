@@ -32,6 +32,12 @@ class _TerminalTabState extends State<TerminalTab> {
       'cd is tracked; clear empties this view.',
       ShellTone.muted,
     ),
+    const ShellLine(
+      'Python, Node, npm and git are not bundled with Praxis. A full package '
+      'manager needs a native runtime or Termux bridge, which this build does '
+      'not include.',
+      ShellTone.muted,
+    ),
   ];
   bool _running = false;
   bool _loadedSkills = false;

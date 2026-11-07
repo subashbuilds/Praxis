@@ -58,6 +58,19 @@ class SystemShell {
     final cd = _asCd(command);
     if (cd != null) return _changeDirectory(cd);
 
+    // This is still Android's shell, but make project-local binaries and
+    // common Android locations discoverable. It does not add a package
+    // manager; Python, Node and npm must already be installed on the device.
+    await fs.createDir('.praxis/tmp');
+    final parentPath = Platform.environment['PATH'] ?? '';
+    final path = [
+      '${fs.rootPath}/.local/bin',
+      '${fs.rootPath}/bin',
+      if (parentPath.isNotEmpty) parentPath,
+      if (parentPath.isEmpty)
+        '/system/bin:/system/xbin:/vendor/bin:/product/bin',
+    ].join(':');
+
     final output = StringBuffer();
     Process process;
     try {
@@ -68,6 +81,11 @@ class SystemShell {
         environment: {
           'HOME': fs.rootPath,
           'PWD': fs.absolute(cwd),
+          'SHELL': shellPath,
+          'TERM': 'xterm-256color',
+          'LANG': 'C.UTF-8',
+          'TMPDIR': '${fs.rootPath}/.praxis/tmp',
+          'PATH': path,
         },
         includeParentEnvironment: true,
       );

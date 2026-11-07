@@ -205,6 +205,10 @@ void main() {
 
     final failure = await shell.run('false');
     expect(failure.exitCode, isNot(0));
+
+    final environment = await shell.run('printf "%s\\n" "\$HOME" "\$TMPDIR"');
+    expect(environment.output, contains(temp.path));
+    expect(environment.output, contains('${temp.path}/.praxis/tmp'));
   });
 
   group('usage', () {

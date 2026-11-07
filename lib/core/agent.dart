@@ -5,6 +5,7 @@ import 'ai.dart';
 import 'diff.dart';
 import 'file_types.dart';
 import 'project_skills.dart';
+import 'round_log.dart';
 import 'shell.dart';
 import 'system_shell.dart';
 import 'vfs.dart';
@@ -262,6 +263,8 @@ class Agent {
     this.onToolStart,
     this.onReply,
     this.onDiscardLive,
+    this.roundLog,
+    this.taskId,
     this.maxRounds = 40,
   });
 
@@ -289,6 +292,10 @@ class Agent {
   /// no file change. Without this, a premature "Done" would stay in the live
   /// reply above the corrective round.
   final void Function()? onDiscardLive;
+
+  /// Phase 0 instrumentation. Null disables logging; no behavior depends on it.
+  final RoundLogStore? roundLog;
+  final String? taskId;
   final int maxRounds;
 
   final Map<String, int> _readCache = {};
@@ -331,144 +338,249 @@ class Agent {
     var mutated = false;
     var completionNudges = 0;
     var limitNudges = 0;
+    final log = roundLog;
+    final task = taskId ?? 'task-${DateTime.now().microsecondsSinceEpoch}';
+    final seenCalls = <String>{};
+    var requestIndex = 0;
+    var previousToolFailed = false;
+    var outcome = AgentOutcome.error;
 
-    for (var round = 0; round < maxRounds; round++) {
-      if (isCancelled?.call() ?? false) return;
-
-      AiReply reply;
-      var switches = 0;
-      while (true) {
-        try {
-          reply = await client.stream(
-            provider: current,
-            system: system,
-            turns: turns,
-            tools: _tools,
-            maxTokens: kDefaultMaxOutputTokens,
-            onText: onTextDelta,
-            onThinking: onThinkingDelta,
-          );
-          onReply?.call(reply, current);
-          break;
-        } on AiProviderException catch (error) {
-          final handler = onProviderLimit;
-          if (!error.isLimit || handler == null || switches >= 3) rethrow;
-          final next = await handler(current, error);
-          if (next == null) rethrow;
-          current = next;
-          switches++;
+    try {
+      for (var round = 0; round < maxRounds; round++) {
+        if (isCancelled?.call() ?? false) {
+          outcome = AgentOutcome.userCancelled;
+          return;
         }
-      }
 
-      if (reply.calls.isEmpty) {
-        final text = reply.text.trim();
-        final wantsChange = _looksLikeChangeRequest(prompt);
-
-        // A reasoning model can spend the entire output budget before it emits
-        // its tool call. That is not a completed answer, so never print the
-        // old "Done — no changes were needed" placeholder for it.
-        if (reply.hitOutputLimit && limitNudges < 2) {
-          limitNudges++;
-          onDiscardLive?.call();
-          if (text.isNotEmpty) {
-            turns.add(AiTurn.assistant(reply.text, const []));
+        AiReply reply;
+        var switches = 0;
+        while (true) {
+          final requestedAt = DateTime.now();
+          final thisRound = requestIndex++;
+          final requestProvider = current;
+          try {
+            reply = await client.stream(
+              provider: current,
+              system: system,
+              turns: turns,
+              tools: _tools,
+              maxTokens: kDefaultMaxOutputTokens,
+              onText: onTextDelta,
+              onThinking: onThinkingDelta,
+            );
+          } on AiProviderException catch (error) {
+            // A failed attempt is still a model request. Record its provider
+            // and timestamp without arguments or prompt text.
+            await _recordRound(
+              log,
+              AgentRound(
+                taskId: task,
+                roundIndex: thisRound,
+                at: requestedAt,
+                provider: requestProvider.id,
+                model: requestProvider.model,
+                toolNames: const [],
+                type: RoundType.other,
+                repeatedCall: false,
+                finishReason: 'error',
+              ),
+            );
+            final handler = onProviderLimit;
+            if (!error.isLimit || handler == null || switches >= 3) {
+              outcome =
+                  error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
+              rethrow;
+            }
+            final next = await handler(current, error);
+            if (next == null) {
+              outcome =
+                  error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
+              rethrow;
+            }
+            current = next;
+            switches++;
+            continue;
           }
-          turns.add(const AiTurn.user(
-            'Your previous response was cut off by the model output limit '
-            'before you acted. Continue from the work already done. Do not '
-            'repeat the plan or keep reasoning: use edit_file for the existing '
-            'file or write_file for a new file now. Keep the tool call compact.',
-          ));
-          continue;
+          onReply?.call(reply, current);
+
+          final signatures = reply.calls
+              .map((call) => '${call.name}:${jsonEncode(call.arguments)}')
+              .toList();
+          final repeatedCall = signatures.any(seenCalls.contains);
+          seenCalls.addAll(signatures);
+          await _recordRound(
+            log,
+            AgentRound(
+              taskId: task,
+              roundIndex: thisRound,
+              at: requestedAt,
+              provider: current.id,
+              model: current.model,
+              inputTokens: reply.usage?.promptTokens,
+              outputTokens: reply.usage?.completionTokens,
+              toolNames: reply.calls.map((call) => call.name).toList(),
+              type: classifyRound(
+                reply.calls,
+                previousToolFailed: previousToolFailed,
+              ),
+              repeatedCall: repeatedCall,
+              finishReason: reply.finishReason,
+            ),
+          );
+          break;
         }
 
-        if (!reply.hitOutputLimit &&
-            !mutated &&
-            completionNudges < 2 &&
-            wantsChange) {
-          completionNudges++;
-          onDiscardLive?.call();
-          turns.add(AiTurn.assistant(reply.text, const []));
-          turns.add(const AiTurn.user(
-            'You have not changed a file yet. Do not stop with a completion '
-            'message. Use edit_file for an existing file or write_file for a '
-            'new file now. Read only the specific range you still need. If the '
-            'request genuinely requires no file change, state the evidence, '
-            'but otherwise make the requested change.',
-          ));
-          continue;
-        }
+        if (reply.calls.isEmpty) {
+          final text = reply.text.trim();
+          final wantsChange = _looksLikeChangeRequest(prompt);
 
-        if (!mutated && wantsChange) {
-          onEvent(AgentEvent.error(
-            text.isEmpty
-                ? 'The model stopped without changing a file and returned no '
-                    'text. This is usually an output-budget or tool-call '
-                    'failure; send “continue” to retry.'
-                : 'The model stopped without changing a file. It said: “$text”\n'
-                    'Send “continue” to retry the edit.',
-          ));
-          return;
-        }
+          // A reasoning model can spend the entire output budget before it emits
+          // its tool call. That is not a completed answer, so never print the
+          // old "Done — no changes were needed" placeholder for it.
+          if (reply.hitOutputLimit && limitNudges < 2) {
+            limitNudges++;
+            onDiscardLive?.call();
+            if (text.isNotEmpty) {
+              turns.add(AiTurn.assistant(reply.text, const []));
+            }
+            turns.add(const AiTurn.user(
+              'Your previous response was cut off by the model output limit '
+              'before you acted. Continue from the work already done. Do not '
+              'repeat the plan or keep reasoning: use edit_file for the existing '
+              'file or write_file for a new file now. Keep the tool call compact.',
+            ));
+            continue;
+          }
 
-        if (text.isEmpty) {
-          onEvent(const AgentEvent.error(
-            'The model returned an empty reply. Send “continue” to retry.',
-          ));
+          if (!reply.hitOutputLimit &&
+              !mutated &&
+              completionNudges < 2 &&
+              wantsChange) {
+            completionNudges++;
+            onDiscardLive?.call();
+            turns.add(AiTurn.assistant(reply.text, const []));
+            turns.add(const AiTurn.user(
+              'You have not changed a file yet. Do not stop with a completion '
+              'message. Use edit_file for an existing file or write_file for a '
+              'new file now. Read only the specific range you still need. If the '
+              'request genuinely requires no file change, state the evidence, '
+              'but otherwise make the requested change.',
+            ));
+            continue;
+          }
+
+          if (!mutated && wantsChange) {
+            outcome = AgentOutcome.error;
+            onEvent(AgentEvent.error(
+              text.isEmpty
+                  ? 'The model stopped without changing a file and returned no '
+                      'text. This is usually an output-budget or tool-call '
+                      'failure; send “continue” to retry.'
+                  : 'The model stopped without changing a file. It said: “$text”\n'
+                      'Send “continue” to retry the edit.',
+            ));
+            return;
+          }
+
+          if (text.isEmpty) {
+            outcome = AgentOutcome.error;
+            onEvent(const AgentEvent.error(
+              'The model returned an empty reply. Send “continue” to retry.',
+            ));
+            return;
+          }
+          outcome = AgentOutcome.completed;
+          onEvent(AgentEvent.text(text, thinking: reply.thinking));
           return;
         }
-        onEvent(AgentEvent.text(text, thinking: reply.thinking));
-        return;
-      }
-      turns.add(AiTurn.assistant(reply.text, reply.calls));
-      if (reply.text.trim().isNotEmpty || reply.thinking.trim().isNotEmpty) {
-        onEvent(AgentEvent.text(
-          reply.text.trim(),
-          thinking: reply.thinking.trim(),
-        ));
-      }
-      for (final call in reply.calls) {
-        if (isCancelled?.call() ?? false) return;
-        final signature = '${call.name}:${jsonEncode(call.arguments)}';
-        if (signature == _lastCallSignature) {
-          _repeatedCalls++;
-        } else {
-          _lastCallSignature = signature;
-          _repeatedCalls = 1;
-        }
-        if (_repeatedCalls >= 4) {
-          onEvent(AgentEvent.error(
-            'Stopped: the model repeated the same ${call.name} call four times. '
-            'Try a more specific request, or send “continue” to resume with a different approach.',
+        turns.add(AiTurn.assistant(reply.text, reply.calls));
+        if (reply.text.trim().isNotEmpty || reply.thinking.trim().isNotEmpty) {
+          onEvent(AgentEvent.text(
+            reply.text.trim(),
+            thinking: reply.thinking.trim(),
           ));
-          return;
         }
-        onToolStart?.call(call);
-        final result = await _execute(call);
-        if (!mutated &&
-            const {
-              'write_file',
-              'edit_file',
-              'download_file',
-              'install_skill',
-            }.contains(call.name) &&
-            !result.text.startsWith('Error')) {
-          mutated = true;
+        var roundFailed = false;
+        for (final call in reply.calls) {
+          if (isCancelled?.call() ?? false) {
+            outcome = AgentOutcome.userCancelled;
+            return;
+          }
+          final signature = '${call.name}:${jsonEncode(call.arguments)}';
+          if (signature == _lastCallSignature) {
+            _repeatedCalls++;
+          } else {
+            _lastCallSignature = signature;
+            _repeatedCalls = 1;
+          }
+          if (_repeatedCalls >= 4) {
+            outcome = AgentOutcome.loopDetected;
+            onEvent(AgentEvent.error(
+              'Stopped: the model repeated the same ${call.name} call four times. '
+              'Try a more specific request, or send “continue” to resume with a different approach.',
+            ));
+            return;
+          }
+          onToolStart?.call(call);
+          final result = await _execute(call);
+          if (result.failed) roundFailed = true;
+          if (!mutated &&
+              const {
+                'write_file',
+                'edit_file',
+                'download_file',
+                'install_skill',
+              }.contains(call.name) &&
+              !result.text.startsWith('Error')) {
+            mutated = true;
+          }
+          onEvent(AgentEvent.tool(
+            tool: call.name,
+            detail: _detail(call),
+            text: result.text,
+            patch: result.diff?.toJson() ?? '',
+            added: result.diff?.added ?? 0,
+            removed: result.diff?.removed ?? 0,
+          ));
+          turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
-        onEvent(AgentEvent.tool(
-          tool: call.name,
-          detail: _detail(call),
-          text: result.text,
-          patch: result.diff?.toJson() ?? '',
-          added: result.diff?.added ?? 0,
-          removed: result.diff?.removed ?? 0,
-        ));
-        turns.add(AiTurn.tool(call.id, call.name, result.text));
+        previousToolFailed = roundFailed;
       }
+      outcome = AgentOutcome.loopDetected;
+      onEvent(AgentEvent.error(
+        'Paused after $maxRounds tool rounds. Send “continue” to keep going.',
+      ));
+    } on AiProviderException catch (error) {
+      outcome = error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
+      rethrow;
+    } catch (_) {
+      outcome = AgentOutcome.error;
+      rethrow;
+    } finally {
+      await _finishTask(log, task, outcome);
     }
-    onEvent(AgentEvent.error(
-      'Paused after $maxRounds tool rounds. Send “continue” to keep going.',
-    ));
+  }
+
+  Future<void> _recordRound(RoundLogStore? log, AgentRound round) async {
+    if (log == null) return;
+    try {
+      await log.appendRound(round);
+    } catch (_) {
+      // Instrumentation must never break a model run.
+    }
+  }
+
+  Future<void> _finishTask(
+    RoundLogStore? log,
+    String taskId,
+    AgentOutcome outcome,
+  ) async {
+    if (log == null) return;
+    try {
+      await log.finishTask(taskId, outcome);
+    } catch (_) {
+      // Instrumentation must never break a model run.
+    }
   }
 
   bool _looksLikeChangeRequest(String prompt) {
@@ -879,4 +991,10 @@ class _ToolOutcome {
   const _ToolOutcome(this.text, {this.diff});
   final String text;
   final FileDiff? diff;
+
+  /// Used only to classify the next round as a retry. The text is never parsed
+  /// for logging; it is already the agent's sanitized tool result.
+  bool get failed =>
+      text.startsWith('Error') ||
+      RegExp(r'(^|\n)exit: [1-9]\d*').hasMatch(text);
 }

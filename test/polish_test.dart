@@ -250,6 +250,49 @@ void main() {
     expect(summary.skipped, 0);
   });
 
+  test('a same-name folder import through AppState reports merged files',
+      () async {
+    final project =
+        await Directory.systemTemp.createTemp('praxis_existing_ui_');
+    final source = await Directory.systemTemp.createTemp('praxis_source_ui_');
+    addTearDown(() => project.delete(recursive: true));
+    addTearDown(() => source.delete(recursive: true));
+    final state =
+        AppState(root: project, store: MemoryStore(), seedWelcome: false);
+    addTearDown(state.dispose);
+    await state.init();
+    final target =
+        await state.createProject('import-target', ProjectKind.blank);
+    final fs = state.fsFor(target);
+
+    await fs.write('folder/updated.txt', 'old');
+    final sourceFolder = Directory('${source.path}/folder');
+    await sourceFolder.create(recursive: true);
+    await File('${sourceFolder.path}/updated.txt').writeAsString('new');
+    await File('${sourceFolder.path}/added.txt').writeAsString('added');
+
+    final summary = await state.importIntoProject(
+      target,
+      [
+        ImportEntry(
+          path: 'folder',
+          sourcePath: '${sourceFolder.path}/',
+          isDir: true,
+        ),
+      ],
+      onConflict: (_) async => true,
+    );
+
+    expect(summary.merged, 1);
+    expect(summary.created, 1);
+    expect(summary.replaced, 1);
+    expect(summary.changed, 2);
+    expect(summary.message, isNot('Nothing was imported.'));
+    expect(summary.message, contains('merged'));
+    expect(await fs.read('folder/updated.txt'), 'new');
+    expect(await fs.read('folder/added.txt'), 'added');
+  });
+
   test('projects with the latest conversation sort first', () async {
     final temp = await Directory.systemTemp.createTemp('praxis_order_');
     addTearDown(() => temp.delete(recursive: true));
