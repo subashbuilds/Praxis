@@ -10,6 +10,8 @@ import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/code_editor.dart';
 import '../widgets/confirm_dialog.dart';
+import '../widgets/file_glyph.dart';
+import '../widgets/readme_image.dart';
 import '../widgets/ui.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -182,6 +184,11 @@ class _EditorScreenState extends State<EditorScreen> {
                       children: [
                         Row(
                           children: [
+                            FileGlyph(
+                              name: widget.path.split('/').last,
+                              size: 15,
+                            ),
+                            const SizedBox(width: 6),
                             Flexible(
                               child: Text(
                                 widget.path.split('/').last,
@@ -420,6 +427,8 @@ class _MarkdownPreview extends StatelessWidget {
           child: MarkdownBody(
             data: data.isEmpty ? '_This file is empty._' : data,
             selectable: true,
+            imageBuilder: (uri, title, alt) =>
+                ReadmeImage(uri: uri, title: title, alt: alt),
             onTapLink: (text, href, title) {
               if (href == null || href.isEmpty) return;
               Clipboard.setData(ClipboardData(text: href));
@@ -467,6 +476,8 @@ class _MarkdownPreview extends StatelessWidget {
               tableBody: Txt.bodySoft,
               tableBorder: TableBorder.all(color: Pal.line),
               tableCellsPadding: const EdgeInsets.all(8),
+              tableColumnWidth: const FlexColumnWidth(),
+              blockSpacing: 10,
             ),
           ),
         ),

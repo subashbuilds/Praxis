@@ -247,7 +247,14 @@ class LinuxEnvironment extends ChangeNotifier {
       if (force && await Directory(rootfsPath).exists()) {
         await Directory(rootfsPath).delete(recursive: true);
       }
-      if (!await File('$rootfsPath/.praxis-ready').exists()) {
+      // Older builds could leave a `.praxis-ready` marker behind after failing
+      // to reproduce Alpine's symlinks. Treat a rootfs without a real shell as
+      // invalid and rebuild it instead of launching a permanently broken env.
+      if (!await File('$rootfsPath/.praxis-ready').exists() ||
+          !await _rootfsIsBootable()) {
+        if (await Directory(rootfsPath).exists()) {
+          await Directory(rootfsPath).delete(recursive: true);
+        }
         phase = 'Extracting Alpine minirootfs';
         notifyListeners();
         final data = await _assets.load(rootfsAsset);
@@ -296,6 +303,7 @@ class LinuxEnvironment extends ChangeNotifier {
     final root = Directory(rootfsPath);
     await root.create(recursive: true);
     var files = 0;
+    final links = <({String path, String target})>[];
     for (final entry in archive) {
       var name = entry.name.replaceAll('\\', '/');
       while (name.startsWith('./')) {
@@ -310,26 +318,23 @@ class LinuxEnvironment extends ChangeNotifier {
         continue;
       }
       final relative = parts.join(Platform.pathSeparator);
-      final target = File('${root.path}${Platform.pathSeparator}$relative');
+      final target = '${root.path}${Platform.pathSeparator}$relative';
       if (entry.isSymbolicLink) {
-        final link = Link(target.path);
-        await link.parent.create(recursive: true);
-        if (await link.exists()) await link.delete();
-        final linkTarget = utf8.decode(entry.content as List<int>);
-        try {
-          await link.create(linkTarget);
-        } on FileSystemException {
-          // Some Android filesystems cannot create absolute symlinks. The
-          // affected files are still readable through the rootfs itself.
+        // Tar stores a symlink target in the header, not in the entry body.
+        // Reading entry.content here produced an empty target and could make
+        // a directory link resolve to its own parent.
+        final linkTarget = entry.nameOfLinkedFile.trim();
+        if (linkTarget.isNotEmpty) {
+          links.add((path: target, target: linkTarget));
         }
         continue;
       }
       if (entry.name.endsWith('/')) {
-        await Directory(target.path).create(recursive: true);
+        await Directory(target).create(recursive: true);
         continue;
       }
-      await target.parent.create(recursive: true);
-      await target.writeAsBytes(entry.content as List<int>, flush: false);
+      await File(target).parent.create(recursive: true);
+      await File(target).writeAsBytes(entry.content as List<int>, flush: false);
       files++;
     }
     if (files == 0) {
@@ -337,7 +342,94 @@ class LinuxEnvironment extends ChangeNotifier {
         'The bundled Alpine archive did not contain any files.',
       );
     }
+    // Android app-private storage usually permits symlinks, but some devices
+    // and storage backends reject absolute targets. Materialising the link as
+    // a hardlink (or a copy) is equivalent for files and avoids a rootfs that
+    // says it is ready while /bin/sh is missing.
+    for (final link in links) {
+      await _materializeRootfsLink(link.path, link.target);
+    }
     await _chmodRootfs();
+  }
+
+  Future<bool> _rootfsIsBootable() async {
+    try {
+      final shell = File('$rootfsPath/bin/sh');
+      final busybox = File('$rootfsPath/bin/busybox');
+      return await shell.exists() && await busybox.exists();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _materializeRootfsLink(String path, String target) async {
+    final resolved = _resolveRootfsTarget(path, target);
+    if (resolved == null) return;
+    await Directory(File(path).parent.path).create(recursive: true);
+    if (resolved == File(path).absolute.path) return;
+    if (await Directory(path).exists() ||
+        await Link(path).exists() ||
+        await File(path).exists()) {
+      return;
+    }
+    final type = await FileSystemEntity.type(resolved, followLinks: true);
+    if (type == FileSystemEntityType.notFound) return;
+    if (type == FileSystemEntityType.directory) {
+      await _copyRootfsDirectory(Directory(resolved), Directory(path));
+      return;
+    }
+    // Prefer a hardlink: it preserves Alpine's `busybox` applet layout without
+    // multiplying the rootfs size. Fall back to a byte copy on filesystems
+    // that do not allow hardlinks.
+    if (Platform.isAndroid) {
+      final result = await Process.run('/system/bin/ln', [resolved, path]);
+      if (result.exitCode == 0) return;
+    }
+    try {
+      await File(resolved).copy(path);
+    } catch (_) {
+      // A missing vendor-specific link should not abort the rest of the rootfs.
+    }
+  }
+
+  String? _resolveRootfsTarget(String linkPath, String target) {
+    final root = rootfsPath.replaceAll(RegExp(r'/+$'), '');
+    final raw = target.startsWith('/')
+        ? '$root$target'
+        : '${File(linkPath).parent.path}/$target';
+    final parts = <String>[];
+    for (final part in raw.replaceAll('\\', '/').split('/')) {
+      if (part.isEmpty || part == '.') continue;
+      if (part == '..') {
+        if (parts.isNotEmpty) parts.removeLast();
+      } else {
+        parts.add(part);
+      }
+    }
+    final resolved = '/${parts.join('/')}';
+    return resolved.startsWith('$root/') ? resolved : null;
+  }
+
+  Future<void> _copyRootfsDirectory(
+      Directory source, Directory destination) async {
+    final root = Directory(rootfsPath).absolute.path;
+    final sourcePath = source.absolute.path;
+    final destinationPath = destination.absolute.path;
+    if (!sourcePath.startsWith('$root/') ||
+        !destinationPath.startsWith('$root/')) {
+      return;
+    }
+    await destination.create(recursive: true);
+    await for (final entity in source.list(followLinks: false)) {
+      final name = entity.path.split(Platform.pathSeparator).last;
+      final target = '${destination.path}${Platform.pathSeparator}$name';
+      if (entity is Directory) {
+        if (entity.absolute.path == destinationPath) continue;
+        await _copyRootfsDirectory(entity, Directory(target));
+      } else if (entity is File) {
+        await entity.copy(target);
+      }
+    }
   }
 
   Future<void> _finishRootfs() async {
@@ -409,6 +501,8 @@ class LinuxEnvironment extends ChangeNotifier {
       return const LinuxResult(output: '', exitCode: 0, cancelled: false);
     }
     final guestCwd = _guestCwd(cwd);
+    final hostTmp = Directory('${base.path}/tmp');
+    await hostTmp.create(recursive: true);
     final args = <String>[
       if (Platform.isAndroid) ...['-0', '--link2symlink'],
       '-r',
@@ -419,7 +513,8 @@ class LinuxEnvironment extends ChangeNotifier {
       if (Directory('/proc').existsSync()) ...['-b', '/proc:/proc'],
       '-w',
       guestCwd,
-      '/bin/sh',
+      '/bin/busybox',
+      'sh',
       '-c',
       trimmed,
     ];
@@ -438,6 +533,7 @@ class LinuxEnvironment extends ChangeNotifier {
           'TERM': 'xterm-256color',
           'LANG': 'C.UTF-8',
           'TMPDIR': '/tmp',
+          'PROOT_TMP_DIR': hostTmp.path,
         },
         includeParentEnvironment: true,
       );

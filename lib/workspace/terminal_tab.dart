@@ -8,6 +8,7 @@ import '../core/project_skills.dart';
 import '../core/shell.dart';
 import '../core/system_shell.dart';
 import '../models.dart';
+import '../screens/linux_environment_screen.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/ui.dart';
@@ -261,6 +262,30 @@ class _TerminalTabState extends State<TerminalTab> {
     });
   }
 
+  void _openLinux() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LinuxEnvironmentScreen(project: widget.project),
+      ),
+    );
+  }
+
+  String _displayCwd(SystemShell shell, LinuxEnvironment? linux) {
+    if (linux == null) return shell.cwdDisplay;
+    return shell.cwd.isEmpty
+        ? '/workspace'
+        : '/workspace/${shell.cwd.replaceAll(RegExp(r'/+$'), '')}';
+  }
+
+  String _resources(LinuxEnvironment? linux) {
+    if (linux == null || !linux.ready) return '';
+    final load = linux.snapshot.load1;
+    final ram = linux.snapshot.ramUsedBytes;
+    final cpu = load == null ? '—' : load.toStringAsFixed(2);
+    final memory = ram == null ? '—' : humanBytes(ram);
+    return 'CPU $cpu · RAM $memory';
+  }
+
   Color _tone(ShellTone tone) => switch (tone) {
         ShellTone.command => Pal.text,
         ShellTone.output => Pal.textMuted,
@@ -412,23 +437,40 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
             child: Row(
               children: [
-                StatusPill(
-                  linux == null
-                      ? 'device sh'
-                      : ready
-                          ? 'alpine'
-                          : 'preparing',
-                  color: ready ? Pal.mint : Pal.amber,
+                GestureDetector(
+                  onTap: linux == null ? null : _openLinux,
+                  behavior: HitTestBehavior.opaque,
+                  child: StatusPill(
+                    linux == null
+                        ? 'device sh'
+                        : ready
+                            ? 'alpine'
+                            : 'preparing',
+                    color: ready ? Pal.mint : Pal.amber,
+                  ),
                 ),
                 const SizedBox(width: Sp.x2),
                 Expanded(
                   child: Text(
-                    shell.cwdDisplay,
+                    _displayCwd(shell, linux),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Txt.meta.copyWith(fontSize: 10.5),
                   ),
                 ),
+                if (linux != null && ready)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 5),
+                    child: Text(
+                      _resources(linux),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Txt.meta.copyWith(
+                        fontSize: 8.5,
+                        color: Pal.textDim,
+                      ),
+                    ),
+                  ),
                 GestureDetector(
                   onTap: _showSkills,
                   behavior: HitTestBehavior.opaque,

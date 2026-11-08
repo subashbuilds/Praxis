@@ -23,7 +23,36 @@ String markdownFromReadme(String source) {
     }
     output.writeln(fenced ? line : _convertLine(line));
   }
-  return output.toString();
+  return _joinBadgeLines(output.toString());
+}
+
+/// GitHub renders a run of badge images as inline content. flutter_markdown_plus
+/// can otherwise keep each line as its own block, which turns a row of badges
+/// into a tall stack. Join only image-only lines; fenced code is untouched.
+String _joinBadgeLines(String source) {
+  final badge = RegExp(
+    r'^\[?!\[[^\]]*\]\([^)]+\)(?:\]\([^)]+\))?\s*$',
+  );
+  final lines = source.split('\n');
+  final output = <String>[];
+  final buffer = <String>[];
+  void flush() {
+    if (buffer.isEmpty) return;
+    output.add(buffer.join(' '));
+    buffer.clear();
+  }
+
+  for (final line in lines) {
+    final trimmed = line.trim();
+    if (badge.hasMatch(trimmed)) {
+      buffer.add(trimmed);
+    } else {
+      flush();
+      output.add(line);
+    }
+  }
+  flush();
+  return output.join('\n');
 }
 
 String _convertLine(String line) {

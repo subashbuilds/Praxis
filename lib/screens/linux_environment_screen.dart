@@ -466,7 +466,7 @@ class _ResourceCard extends StatelessWidget {
                         style: Txt.title.copyWith(fontSize: 15)),
                     Text(
                       snapshot.processes.isEmpty
-                          ? 'No active guest processes'
+                          ? 'Idle · run a command to wake the guest'
                           : '${snapshot.processes.length} active guest processes',
                       style: Txt.meta.copyWith(fontSize: 9.5),
                     ),
@@ -486,10 +486,12 @@ class _ResourceCard extends StatelessWidget {
                 child: _Metric(
                   icon: Icons.memory_rounded,
                   label: 'RAM',
-                  value: ram == null ? 'Not measured' : humanBytes(ram),
-                  detail: total == null
-                      ? 'Guest memory'
-                      : 'of ${humanBytes(total)} guest memory',
+                  value: ram == null ? '—' : humanBytes(ram),
+                  detail: ram == null
+                      ? 'Idle guest memory'
+                      : total == null
+                          ? 'Guest memory'
+                          : 'of ${humanBytes(total)} guest memory',
                   color: Pal.ember,
                 ),
               ),
@@ -498,9 +500,10 @@ class _ResourceCard extends StatelessWidget {
                 child: _Metric(
                   icon: Icons.speed_rounded,
                   label: 'CPU load',
-                  value:
-                      load == null ? 'Not measured' : load.toStringAsFixed(2),
-                  detail: '1-minute guest load',
+                  value: load == null ? '—' : load.toStringAsFixed(2),
+                  detail: load == null
+                      ? 'No guest load yet'
+                      : '1-minute guest load',
                   color: Pal.mint,
                 ),
               ),
@@ -518,7 +521,7 @@ class _ResourceCard extends StatelessWidget {
                   Icon(Icons.check_circle_outline_rounded,
                       size: 16, color: Pal.textDim),
                   const SizedBox(width: 7),
-                  Text('No active processes', style: Txt.meta),
+                  Text('Ready for a command', style: Txt.meta),
                 ],
               ),
             )

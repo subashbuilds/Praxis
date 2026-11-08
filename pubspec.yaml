@@ -29,6 +29,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icons/
+    - assets/icons/files/
     - assets/images/
     - assets/alpine/
   fonts:

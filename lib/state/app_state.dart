@@ -1184,14 +1184,19 @@ class AppState extends ChangeNotifier {
     if (!lower.endsWith('.md') && !lower.endsWith('.txt')) return null;
     final content = await file.readAsString();
     if (content.length > 200000) return null;
+    final parsed = ProjectSkillsStore.parse(content);
     final title = name.substring(0, name.lastIndexOf('.')).replaceAll(
           RegExp(r'[-_]+'),
           ' ',
         );
     final skill = Skill(
       id: 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
-      name: title.trim().isEmpty ? 'Imported skill' : title.trim(),
-      instructions: content.trim(),
+      name: parsed.name.trim().isNotEmpty
+          ? parsed.name.trim()
+          : title.trim().isEmpty
+              ? 'Imported skill'
+              : title.trim(),
+      instructions: parsed.body.trim(),
     );
     await saveSkill(skill);
     return skill;
@@ -1231,9 +1236,16 @@ class AppState extends ChangeNotifier {
     if (trimmed.isEmpty) {
       throw IntegrationException('Paste a token first.');
     }
-    final username = kind == IntegrationKind.github
-        ? await GitHubClient(trimmed, client: httpClient).login()
-        : await VercelClient(trimmed, client: httpClient).login();
+    final username = switch (kind) {
+      IntegrationKind.github =>
+        await GitHubClient(trimmed, client: httpClient).login(),
+      IntegrationKind.vercel =>
+        await VercelClient(trimmed, client: httpClient).login(),
+      IntegrationKind.cloudflare => await _verifyCloudflareToken(trimmed),
+      IntegrationKind.supabase => await _verifySupabaseToken(trimmed),
+      IntegrationKind.expo => 'Expo',
+      IntegrationKind.tavily => 'Tavily',
+    };
     final account = IntegrationAccount(
       id: '${kind.name}-${DateTime.now().microsecondsSinceEpoch}',
       kind: kind,
@@ -1251,6 +1263,42 @@ class AppState extends ChangeNotifier {
 
   Future<void> activateAccount(IntegrationAccount account) =>
       saveIntegrations(integrations.activate(account));
+
+  Future<String> _verifyCloudflareToken(String token) async {
+    final response = await httpClient.get(
+      Uri.https('api.cloudflare.com', '/client/v4/user/tokens/verify'),
+      headers: {'Authorization': 'Bearer $token'},
+    ).timeout(const Duration(seconds: 25));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          'Cloudflare rejected that token (HTTP ${response.statusCode}).');
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    if (body['success'] != true) {
+      throw IntegrationException('Cloudflare rejected that token.');
+    }
+    return 'Cloudflare';
+  }
+
+  Future<String> _verifySupabaseToken(String token) async {
+    final response = await httpClient.get(
+      Uri.https('api.supabase.com', '/v1/projects'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      },
+    ).timeout(const Duration(seconds: 25));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw IntegrationException('Supabase rejected that access token.');
+    }
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          'Supabase returned HTTP ${response.statusCode}.');
+    }
+    final body = jsonDecode(response.body);
+    final count = body is List ? body.length : 0;
+    return count == 0 ? 'Supabase' : '$count projects';
+  }
 
   Future<String> testGithubToken(String token) =>
       GitHubClient(token, client: httpClient).login();

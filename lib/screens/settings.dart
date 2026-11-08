@@ -1,4 +1,3 @@
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -11,6 +10,8 @@ import '../widgets/ui.dart';
 import 'about_screen.dart';
 import 'logs_screen.dart';
 import 'linux_environment_screen.dart';
+import 'integrations_screen.dart';
+import 'skills_screen.dart';
 import 'provider_form.dart';
 import 'usage_screen.dart';
 
@@ -24,8 +25,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _accountBusy = false;
-
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
@@ -219,102 +218,99 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                   ),
-                  SectionLabel(
-                    'SKILLS',
-                    trailing: Text(
-                      '${state.skills.where((skill) => skill.enabled).length} on',
-                      style: Txt.meta,
-                    ),
-                  ),
-                  Text(
-                    'Skills are reusable instructions. Ask the agent to install '
-                    'one and it writes .praxis/skills/<name>/SKILL.md inside the '
-                    'project. Project skills load into every prompt, with any '
-                    'provider or model, and sync through the project folder.',
-                    style: Txt.bodySoft,
-                  ),
-                  const SizedBox(height: Sp.x3),
-                  for (final skill in state.skills)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Panel(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: Sp.x3, vertical: Sp.x2),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(skill.name,
-                                      style: Txt.title.copyWith(fontSize: 14)),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    skill.instructions,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Txt.meta.copyWith(height: 1.4),
+                  const SectionLabel('WORKBENCH'),
+                  Panel(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      children: [
+                        GestureDetector(
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => const SkillsScreen()),
+                          ),
+                          behavior: HitTestBehavior.opaque,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: Sp.x3, vertical: Sp.x3),
+                            child: Row(
+                              children: [
+                                GlyphBadge(
+                                  icon: Icons.auto_awesome_outlined,
+                                  color: Pal.ember,
+                                  size: 34,
+                                  iconSize: 16,
+                                ),
+                                const SizedBox(width: 11),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text('Skills',
+                                          style:
+                                              Txt.title.copyWith(fontSize: 14)),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        state.skills.isEmpty
+                                            ? 'Reusable instructions for the agent'
+                                            : '${state.skills.length} installed · '
+                                                '${state.skills.where((skill) => skill.enabled).length} on',
+                                        style: Txt.meta.copyWith(fontSize: 9.5),
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
+                                ),
+                                Icon(Icons.chevron_right_rounded,
+                                    size: 18, color: Pal.textDim),
+                              ],
                             ),
-                            Switch(
-                              value: skill.enabled,
-                              onChanged: (value) => state
-                                  .saveSkill(skill.copyWith(enabled: value)),
-                            ),
-                            IconAction(
-                              icon: Icons.edit_outlined,
-                              tooltip: 'Edit skill',
-                              size: 17,
-                              onTap: () => _editSkill(skill),
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
+                        const Hairline(inset: Sp.x3),
+                        GestureDetector(
+                          onTap: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => const IntegrationsScreen()),
+                          ),
+                          behavior: HitTestBehavior.opaque,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: Sp.x3, vertical: Sp.x3),
+                            child: Row(
+                              children: [
+                                GlyphBadge(
+                                  icon: Icons.hub_outlined,
+                                  color: Pal.ember,
+                                  size: 34,
+                                  iconSize: 16,
+                                ),
+                                const SizedBox(width: 11),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text('Integrations',
+                                          style:
+                                              Txt.title.copyWith(fontSize: 14)),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        state.integrations.accounts.isEmpty
+                                            ? 'GitHub, Vercel, Cloudflare and more'
+                                            : '${state.integrations.accounts.length} connected on this device',
+                                        style: Txt.meta.copyWith(fontSize: 9.5),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Icon(Icons.chevron_right_rounded,
+                                    size: 18, color: Pal.textDim),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      GhostButton(
-                        label: 'Add skill',
-                        icon: Icons.add_rounded,
-                        onTap: () => _editSkill(state.newSkill()),
-                      ),
-                      GhostButton(
-                        label: 'Import .md / .txt',
-                        icon: Icons.upload_file_rounded,
-                        onTap: _importSkill,
-                      ),
-                    ],
-                  ),
-                  const SectionLabel('INTEGRATIONS'),
-                  Text(
-                    'Add as many accounts as you use. The active account is '
-                    'offered first in Push and Deploy; you can switch it there '
-                    'too. Tokens stay on this device.',
-                    style: Txt.bodySoft,
-                  ),
-                  const SizedBox(height: Sp.x3),
-                  _IntegrationCard(
-                    kind: IntegrationKind.github,
-                    accounts: state.integrations.ofKind(IntegrationKind.github),
-                    activeId: state.activeGithub?.id ?? '',
-                    busy: _accountBusy,
-                    onAdd: () => _addAccount(IntegrationKind.github),
-                    onActivate: state.activateAccount,
-                    onRemove: _removeAccount,
-                  ),
-                  const SizedBox(height: 8),
-                  _IntegrationCard(
-                    kind: IntegrationKind.vercel,
-                    accounts: state.integrations.ofKind(IntegrationKind.vercel),
-                    activeId: state.activeVercel?.id ?? '',
-                    busy: _accountBusy,
-                    onAdd: () => _addAccount(IntegrationKind.vercel),
-                    onActivate: state.activateAccount,
-                    onRemove: _removeAccount,
                   ),
                   const SectionLabel('CONTINUATION'),
                   Text(
@@ -510,188 +506,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       backgroundColor: Pal.surface,
       builder: (_) => ProviderFormSheet(provider: provider),
     );
-  }
-
-  Future<void> _addAccount(IntegrationKind kind) async {
-    if (_accountBusy) return;
-    final token = TextEditingController();
-    final label = TextEditingController();
-    final submitted = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text('Add ${kind.label} account'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              kind == IntegrationKind.github
-                  ? 'Create a fine-grained personal access token with Contents: '
-                      'read and write access. It is validated against GitHub.'
-                  : 'Create a Vercel access token from Account Settings → Tokens.',
-              style: Txt.bodySoft.copyWith(fontSize: 12),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: token,
-              autofocus: true,
-              obscureText: true,
-              autocorrect: false,
-              enableSuggestions: false,
-              style: Txt.code.copyWith(fontSize: 12),
-              cursorColor: Pal.ember,
-              decoration: appField('Paste token'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: label,
-              style: Txt.body.copyWith(fontSize: 13),
-              cursorColor: Pal.ember,
-              decoration: appField('Optional label, e.g. work', label: 'Label'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Add account'),
-          ),
-        ],
-      ),
-    );
-    if (!(submitted ?? false) || !mounted) {
-      token.dispose();
-      label.dispose();
-      return;
-    }
-    setState(() => _accountBusy = true);
-    final state = AppScope.of(context);
-    try {
-      final account = await state.addAccount(
-        kind: kind,
-        token: token.text,
-        label: label.text,
-      );
-      if (!mounted) return;
-      _showResult('${kind.label} connected as @${account.username}');
-    } catch (error) {
-      if (!mounted) return;
-      _showResult('$error');
-    } finally {
-      token.dispose();
-      label.dispose();
-      if (mounted) setState(() => _accountBusy = false);
-    }
-  }
-
-  Future<void> _removeAccount(IntegrationAccount account) async {
-    final confirmed = await showPraxisConfirm(
-      context,
-      title: 'Remove ${account.displayName}?',
-      body: 'The token is deleted from this device. Projects and deployments '
-          'already made are not affected.',
-      confirmLabel: 'Remove account',
-      destructive: true,
-      icon: Icons.logout_rounded,
-      details: [
-        ConfirmDetail('Integration', account.kind.label),
-        ConfirmDetail('Account', account.displayName),
-      ],
-    );
-    if (confirmed && mounted) {
-      await AppScope.of(context).removeAccount(account);
-    }
-  }
-
-  Future<void> _importSkill() async {
-    final state = AppScope.of(context);
-    FilePickerResult? result;
-    try {
-      result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['md', 'txt'],
-        allowMultiple: true,
-      );
-    } catch (error) {
-      if (!mounted) return;
-      _showResult('Could not open the picker: $error');
-      return;
-    }
-    if (result == null) return;
-    var imported = 0;
-    for (final file in result.files) {
-      final path = file.path;
-      if (path == null) continue;
-      final skill = await state.importSkillFile(path);
-      if (skill != null) imported++;
-    }
-    if (!mounted) return;
-    _showResult(
-      imported == 0
-          ? 'No .md or .txt file was imported.'
-          : 'Imported $imported skill${imported == 1 ? '' : 's'}.',
-    );
-  }
-
-  Future<void> _editSkill(Skill skill) async {
-    final state = AppScope.of(context);
-    final name = TextEditingController(text: skill.name);
-    final instructions = TextEditingController(text: skill.instructions);
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text(skill.name.isEmpty ? 'New skill' : 'Edit skill'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: name,
-              autofocus: true,
-              style: Txt.body,
-              cursorColor: Pal.ember,
-              decoration: appField('Name, e.g. “Terse diffs”'),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: instructions,
-              style: Txt.body,
-              cursorColor: Pal.ember,
-              minLines: 3,
-              maxLines: 6,
-              decoration: appField('Instructions added to the agent prompt'),
-            ),
-          ],
-        ),
-        actions: [
-          if (skill.name.isNotEmpty)
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              style: TextButton.styleFrom(foregroundColor: Pal.rose),
-              child: const Text('Delete'),
-            ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    if (saved == true) {
-      await state.saveSkill(skill.copyWith(
-        name: name.text.trim().isEmpty ? 'Skill' : name.text.trim(),
-        instructions: instructions.text.trim(),
-      ));
-    } else if (saved == false) {
-      await state.deleteSkill(skill);
-    }
-    name.dispose();
-    instructions.dispose();
   }
 
   Future<void> _reset(AppState state) async {
@@ -1064,146 +878,6 @@ class _ProviderRow extends StatelessWidget {
             Icon(Icons.chevron_right_rounded, size: 17, color: Pal.textDim),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _IntegrationCard extends StatelessWidget {
-  const _IntegrationCard({
-    required this.kind,
-    required this.accounts,
-    required this.activeId,
-    required this.busy,
-    required this.onAdd,
-    required this.onActivate,
-    required this.onRemove,
-  });
-
-  final IntegrationKind kind;
-  final List<IntegrationAccount> accounts;
-  final String activeId;
-  final bool busy;
-  final VoidCallback onAdd;
-  final Future<void> Function(IntegrationAccount) onActivate;
-  final Future<void> Function(IntegrationAccount) onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final github = kind == IntegrationKind.github;
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              GlyphBadge(
-                icon:
-                    github ? Icons.code_rounded : Icons.change_history_rounded,
-                color: accounts.isEmpty ? Pal.textDim : Pal.mint,
-                size: 30,
-                iconSize: 15,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(kind.label, style: Txt.title.copyWith(fontSize: 14)),
-                    const SizedBox(height: 2),
-                    Text(
-                      github
-                          ? 'Commit and push real branches'
-                          : 'Static deployments',
-                      style: Txt.meta.copyWith(fontSize: 9.5),
-                    ),
-                  ],
-                ),
-              ),
-              StatusPill(
-                accounts.isEmpty
-                    ? 'not connected'
-                    : '${accounts.length} account${accounts.length == 1 ? '' : 's'}',
-                color: accounts.isEmpty ? Pal.textDim : Pal.mint,
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(
-            github
-                ? 'A GitHub token with Contents read/write. Pushes are real git '
-                    'commits built with the Git Data API.'
-                : 'A Vercel token used to upload this project as a static '
-                    'deployment.',
-            style: Txt.bodySoft.copyWith(fontSize: 12),
-          ),
-          if (accounts.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            for (final account in accounts)
-              GestureDetector(
-                onTap: () => onActivate(account),
-                behavior: HitTestBehavior.opaque,
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(8, 7, 4, 7),
-                    decoration: BoxDecoration(
-                      color: account.id == activeId
-                          ? Pal.raised
-                          : Colors.transparent,
-                      borderRadius: Rd.sm,
-                      border: Border.all(
-                        color: account.id == activeId
-                            ? Pal.lineStrong
-                            : Colors.transparent,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          account.id == activeId
-                              ? Icons.radio_button_checked_rounded
-                              : Icons.radio_button_off_rounded,
-                          size: 15,
-                          color:
-                              account.id == activeId ? Pal.ember : Pal.textDim,
-                        ),
-                        const SizedBox(width: 7),
-                        Expanded(
-                          child: Text(
-                            account.displayName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Txt.label.copyWith(
-                              color: Pal.text,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        if (account.username.isNotEmpty)
-                          Text(
-                            '@${account.username}',
-                            style: Txt.meta.copyWith(fontSize: 9),
-                          ),
-                        IconAction(
-                          icon: Icons.close_rounded,
-                          tooltip: 'Remove account',
-                          size: 15,
-                          onTap: () => onRemove(account),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-          ],
-          const SizedBox(height: 8),
-          GhostButton(
-            label: accounts.isEmpty ? 'Add account' : 'Add another account',
-            icon: Icons.add_rounded,
-            onTap: busy ? null : onAdd,
-          ),
-        ],
       ),
     );
   }

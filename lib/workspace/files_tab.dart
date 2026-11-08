@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/file_import.dart';
 import '../core/file_types.dart';
+import '../core/import_picker.dart';
 import '../core/push_state.dart';
 import '../core/vfs.dart';
 import '../models.dart';
@@ -13,6 +14,7 @@ import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/project_actions.dart';
 import '../widgets/confirm_dialog.dart';
+import '../widgets/file_glyph.dart';
 import '../widgets/ui.dart';
 
 class FilesTab extends StatefulWidget {
@@ -48,37 +50,48 @@ class _FilesTabState extends State<FilesTab> {
 
   Future<void> _newFile() async {
     final action = await _showAddSheet(
-      title: 'Add a file',
-      body: 'Create a file in the project, or bring files in from this device.',
+      title: 'Add to the project',
+      body:
+          'Create something new, or bring files and folders in from this device.',
       createLabel: 'Create a file',
-      importLabel: 'Import files',
-      importIcon: Icons.upload_file_outlined,
     );
     if (!mounted) return;
-    if (action == _AddAction.create) await _createNewFile();
-    if (action == _AddAction.importItem) await _importFiles();
+    switch (action) {
+      case _AddAction.create:
+        await _createNewFile();
+      case _AddAction.importFiles:
+        await _importFiles();
+      case _AddAction.importFolder:
+        await _importFolder();
+      case null:
+        break;
+    }
   }
 
   Future<void> _newFolder() async {
     final action = await _showAddSheet(
-      title: 'Add a folder',
+      title: 'Add to the project',
       body:
-          'Create an empty folder, or merge a folder from this device into the project.',
+          'Create an empty folder, or merge files and folders from this device.',
       createLabel: 'Create a folder',
-      importLabel: 'Import folder',
-      importIcon: Icons.drive_folder_upload_outlined,
     );
     if (!mounted) return;
-    if (action == _AddAction.create) await _createNewFolder();
-    if (action == _AddAction.importItem) await _importFolder();
+    switch (action) {
+      case _AddAction.create:
+        await _createNewFolder();
+      case _AddAction.importFiles:
+        await _importFiles();
+      case _AddAction.importFolder:
+        await _importFolder();
+      case null:
+        break;
+    }
   }
 
   Future<_AddAction?> _showAddSheet({
     required String title,
     required String body,
     required String createLabel,
-    required String importLabel,
-    required IconData importIcon,
   }) =>
       showModalBottomSheet<_AddAction>(
         context: context,
@@ -109,13 +122,25 @@ class _FilesTabState extends State<FilesTab> {
                 onTap: () => Navigator.of(sheetContext).pop(_AddAction.create),
               ),
               ListTile(
-                leading: Icon(importIcon, color: Pal.mint),
-                title: Text(importLabel, style: Txt.body),
+                leading: Icon(Icons.upload_file_outlined, color: Pal.mint),
+                title: Text('Import files', style: Txt.body),
                 subtitle: Text(
-                    'Keep the original files untouched on this device.',
-                    style: Txt.meta),
+                  'Pick one or more files. The originals stay untouched.',
+                  style: Txt.meta,
+                ),
                 onTap: () =>
-                    Navigator.of(sheetContext).pop(_AddAction.importItem),
+                    Navigator.of(sheetContext).pop(_AddAction.importFiles),
+              ),
+              ListTile(
+                leading:
+                    Icon(Icons.drive_folder_upload_outlined, color: Pal.mint),
+                title: Text('Import a folder', style: Txt.body),
+                subtitle: Text(
+                  'Copies the folder and every file inside it.',
+                  style: Txt.meta,
+                ),
+                onTap: () =>
+                    Navigator.of(sheetContext).pop(_AddAction.importFolder),
               ),
               const SizedBox(height: Sp.x2),
             ],
@@ -187,9 +212,7 @@ class _FilesTabState extends State<FilesTab> {
   Future<void> _importFolder({String destination = ''}) async {
     String? rootPath;
     try {
-      rootPath = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: 'Import a folder',
-      );
+      rootPath = await ImportPicker.pickFolder();
     } catch (error) {
       _showMessage('Could not open the folder picker: $error');
       return;
@@ -210,12 +233,16 @@ class _FilesTabState extends State<FilesTab> {
     // Expand the destination afterwards: a merged folder with collapsed
     // children looked like an empty import even when every file was copied.
     final target = _joinPath(destination, name);
-    await _runImport(
-      [
-        ImportEntry(path: target, sourcePath: rootPath, isDir: true),
-      ],
-      expand: target.split('/'),
-    );
+    try {
+      await _runImport(
+        [
+          ImportEntry(path: target, sourcePath: rootPath, isDir: true),
+        ],
+        expand: target.split('/'),
+      );
+    } finally {
+      await ImportPicker.cleanup();
+    }
   }
 
   String _joinPath(String parent, String name) =>
@@ -657,14 +684,11 @@ class _FilesTabState extends State<FilesTab> {
                                   )
                                 : null,
                           ),
-                          Icon(
-                            entry.isDir
-                                ? _expanded.contains(entry.path)
-                                    ? Icons.folder_open_rounded
-                                    : Icons.folder_rounded
-                                : _fileIcon(entry.name),
+                          FileGlyph(
+                            name: entry.name,
+                            isDir: entry.isDir,
+                            expanded: _expanded.contains(entry.path),
                             size: 16,
-                            color: entry.isDir ? Pal.amber : Pal.textDim,
                           ),
                           const SizedBox(width: 8),
                           Expanded(
@@ -758,23 +782,9 @@ class _FilesTabState extends State<FilesTab> {
     walk('', 0);
     return rows;
   }
-
-  IconData _fileIcon(String name) {
-    final ext = name.split('.').last.toLowerCase();
-    return switch (ext) {
-      'dart' => Icons.flutter_dash,
-      'html' || 'htm' => Icons.language_rounded,
-      'css' => Icons.brush_outlined,
-      'js' || 'ts' || 'json' => Icons.data_object_rounded,
-      'md' => Icons.article_outlined,
-      'py' => Icons.code_rounded,
-      'yaml' || 'yml' => Icons.tune_rounded,
-      _ => Icons.insert_drive_file_outlined,
-    };
-  }
 }
 
-enum _AddAction { create, importItem }
+enum _AddAction { create, importFiles, importFolder }
 
 enum _EntryAction { importFiles, importFolder, rename, delete }
 

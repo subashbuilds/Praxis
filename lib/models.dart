@@ -401,18 +401,41 @@ class Skill {
       );
 }
 
-enum IntegrationKind { github, vercel }
+enum IntegrationKind { github, vercel, cloudflare, expo, tavily, supabase }
 
 extension IntegrationKindX on IntegrationKind {
   String get label => switch (this) {
         IntegrationKind.github => 'GitHub',
         IntegrationKind.vercel => 'Vercel',
+        IntegrationKind.cloudflare => 'Cloudflare Pages',
+        IntegrationKind.expo => 'Expo (EAS)',
+        IntegrationKind.tavily => 'Web Search (Tavily)',
+        IntegrationKind.supabase => 'Supabase',
+      };
+
+  String get description => switch (this) {
+        IntegrationKind.github => 'Repository sync, commits and pull requests',
+        IntegrationKind.vercel => 'Instant static deployments',
+        IntegrationKind.cloudflare => 'Global hosting and CDN',
+        IntegrationKind.expo => 'EAS cloud builds for APK and iOS',
+        IntegrationKind.tavily => 'Real-time web search for the agent',
+        IntegrationKind.supabase => 'Postgres, auth and storage',
       };
 
   String get tokenHint => switch (this) {
         IntegrationKind.github => 'GitHub personal access token',
         IntegrationKind.vercel => 'Vercel access token',
+        IntegrationKind.cloudflare => 'Cloudflare API token',
+        IntegrationKind.expo => 'Expo access token',
+        IntegrationKind.tavily => 'Tavily API key',
+        IntegrationKind.supabase => 'Supabase access token',
       };
+
+  bool get isVerifiedRemotely =>
+      this == IntegrationKind.github ||
+      this == IntegrationKind.vercel ||
+      this == IntegrationKind.cloudflare ||
+      this == IntegrationKind.supabase;
 }
 
 class IntegrationAccount {
@@ -478,11 +501,28 @@ class Integrations {
     this.accounts = const [],
     this.activeGithubId = '',
     this.activeVercelId = '',
+    this.activeCloudflareId = '',
+    this.activeExpoId = '',
+    this.activeTavilyId = '',
+    this.activeSupabaseId = '',
   });
 
   final List<IntegrationAccount> accounts;
   final String activeGithubId;
   final String activeVercelId;
+  final String activeCloudflareId;
+  final String activeExpoId;
+  final String activeTavilyId;
+  final String activeSupabaseId;
+
+  String activeIdFor(IntegrationKind kind) => switch (kind) {
+        IntegrationKind.github => activeGithubId,
+        IntegrationKind.vercel => activeVercelId,
+        IntegrationKind.cloudflare => activeCloudflareId,
+        IntegrationKind.expo => activeExpoId,
+        IntegrationKind.tavily => activeTavilyId,
+        IntegrationKind.supabase => activeSupabaseId,
+      };
 
   List<IntegrationAccount> ofKind(IntegrationKind kind) =>
       accounts.where((account) => account.kind == kind).toList();
@@ -497,8 +537,7 @@ class Integrations {
   IntegrationAccount? activeFor(IntegrationKind kind) {
     final list = ofKind(kind);
     if (list.isEmpty) return null;
-    final id = kind == IntegrationKind.github ? activeGithubId : activeVercelId;
-    return accountById(id) ?? list.first;
+    return accountById(activeIdFor(kind)) ?? list.first;
   }
 
   /// Kept for older call sites that only need to know whether an account exists.
@@ -509,12 +548,29 @@ class Integrations {
     List<IntegrationAccount>? accounts,
     String? activeGithubId,
     String? activeVercelId,
+    String? activeCloudflareId,
+    String? activeExpoId,
+    String? activeTavilyId,
+    String? activeSupabaseId,
   }) =>
       Integrations(
         accounts: accounts ?? this.accounts,
         activeGithubId: activeGithubId ?? this.activeGithubId,
         activeVercelId: activeVercelId ?? this.activeVercelId,
+        activeCloudflareId: activeCloudflareId ?? this.activeCloudflareId,
+        activeExpoId: activeExpoId ?? this.activeExpoId,
+        activeTavilyId: activeTavilyId ?? this.activeTavilyId,
+        activeSupabaseId: activeSupabaseId ?? this.activeSupabaseId,
       );
+
+  Integrations _withActive(IntegrationKind kind, String id) => switch (kind) {
+        IntegrationKind.github => copyWith(activeGithubId: id),
+        IntegrationKind.vercel => copyWith(activeVercelId: id),
+        IntegrationKind.cloudflare => copyWith(activeCloudflareId: id),
+        IntegrationKind.expo => copyWith(activeExpoId: id),
+        IntegrationKind.tavily => copyWith(activeTavilyId: id),
+        IntegrationKind.supabase => copyWith(activeSupabaseId: id),
+      };
 
   Integrations addOrReplace(IntegrationAccount account) {
     final next = [
@@ -522,37 +578,33 @@ class Integrations {
         if (existing.id != account.id) existing,
       account,
     ];
-    return copyWith(
-      accounts: next,
-      activeGithubId:
-          account.kind == IntegrationKind.github ? account.id : activeGithubId,
-      activeVercelId:
-          account.kind == IntegrationKind.vercel ? account.id : activeVercelId,
-    );
+    return copyWith(accounts: next)._withActive(account.kind, account.id);
   }
 
   Integrations remove(String id) {
     final next = accounts.where((account) => account.id != id).toList();
-    return Integrations(
+    return copyWith(
       accounts: next,
       activeGithubId: activeGithubId == id ? '' : activeGithubId,
       activeVercelId: activeVercelId == id ? '' : activeVercelId,
+      activeCloudflareId: activeCloudflareId == id ? '' : activeCloudflareId,
+      activeExpoId: activeExpoId == id ? '' : activeExpoId,
+      activeTavilyId: activeTavilyId == id ? '' : activeTavilyId,
+      activeSupabaseId: activeSupabaseId == id ? '' : activeSupabaseId,
     );
   }
 
-  Integrations activate(IntegrationAccount account) => copyWith(
-        activeGithubId: account.kind == IntegrationKind.github
-            ? account.id
-            : activeGithubId,
-        activeVercelId: account.kind == IntegrationKind.vercel
-            ? account.id
-            : activeVercelId,
-      );
+  Integrations activate(IntegrationAccount account) =>
+      _withActive(account.kind, account.id);
 
   Map<String, dynamic> toJson() => {
         'accounts': accounts.map((account) => account.toJson()).toList(),
         'activeGithubId': activeGithubId,
         'activeVercelId': activeVercelId,
+        'activeCloudflareId': activeCloudflareId,
+        'activeExpoId': activeExpoId,
+        'activeTavilyId': activeTavilyId,
+        'activeSupabaseId': activeSupabaseId,
       };
 
   static Integrations fromJson(Map<String, dynamic> json) {
@@ -566,6 +618,10 @@ class Integrations {
         ],
         activeGithubId: json['activeGithubId'] as String? ?? '',
         activeVercelId: json['activeVercelId'] as String? ?? '',
+        activeCloudflareId: json['activeCloudflareId'] as String? ?? '',
+        activeExpoId: json['activeExpoId'] as String? ?? '',
+        activeTavilyId: json['activeTavilyId'] as String? ?? '',
+        activeSupabaseId: json['activeSupabaseId'] as String? ?? '',
       );
     }
     // Migration from the single-token shape. The username is filled on first

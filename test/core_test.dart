@@ -89,6 +89,23 @@ void main() {
       expect(markdown, contains('**fast**'));
       expect(markdown, contains('# Real heading'));
     });
+
+    test('joins a run of badges into one inline row', () {
+      final markdown = markdownFromReadme(
+        '[![Build](https://img.test/build.svg)](https://ci.test)\n'
+        '[![Version](https://img.test/v.svg)](https://release.test)\n'
+        '\n'
+        '# Hello',
+      );
+      expect(
+        markdown,
+        contains(
+          '[![Build](https://img.test/build.svg)](https://ci.test) '
+          '[![Version](https://img.test/v.svg)](https://release.test)',
+        ),
+      );
+      expect(markdown, contains('# Hello'));
+    });
   });
 
   group('Shell', () {
