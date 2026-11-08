@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'linux_environment.dart';
 import 'vfs.dart';
 
 class SystemShellResult {
@@ -21,9 +22,10 @@ class SystemShellResult {
 /// Termux. Unlike the sandboxed [Shell] used by the agent, this is not limited
 /// to file verbs.
 class SystemShell {
-  SystemShell(this.fs);
+  SystemShell(this.fs, {this.linux});
 
   final ProjectFs fs;
+  final LinuxEnvironment? linux;
   String cwd = '';
   Process? _active;
 
@@ -42,6 +44,7 @@ class SystemShell {
   void cancel() {
     _active?.kill(ProcessSignal.sigint);
     _active = null;
+    linux?.cancel();
   }
 
   Future<SystemShellResult> run(
@@ -57,6 +60,31 @@ class SystemShell {
     }
     final cd = _asCd(command);
     if (cd != null) return _changeDirectory(cd);
+
+    if (linux != null && Platform.isAndroid) {
+      if (!linux!.ready) await linux!.prepare();
+      if (!linux!.ready) {
+        return SystemShellResult(
+          output:
+              linux!.error.isEmpty ? 'Alpine is not ready yet.' : linux!.error,
+          exitCode: 127,
+          cwd: cwdDisplay,
+        );
+      }
+      final result = await linux!.run(
+        command,
+        projectRoot: fs.rootPath,
+        cwd: cwd,
+        timeout: timeout,
+        onStdout: onStdout,
+        onStderr: onStderr,
+      );
+      return SystemShellResult(
+        output: result.output,
+        exitCode: result.exitCode,
+        cwd: cwdDisplay,
+      );
+    }
 
     // This is still Android's shell, but make project-local binaries and
     // common Android locations discoverable. It does not add a package

@@ -396,13 +396,12 @@ void main() {
       onEvent: events.add,
     ).run(history: const [], prompt: 'read it forever');
 
-    expect(calls, 4);
+    expect(calls, 3);
     expect(
-        events.where((event) => event.kind == AgentEventKind.tool).length, 3);
+        events.where((event) => event.kind == AgentEventKind.tool).length, 2);
     expect(
       events.any((event) =>
-          event.kind == AgentEventKind.error &&
-          event.text.contains('four times')),
+          event.kind == AgentEventKind.error && event.text.contains('3 times')),
       isTrue,
     );
   });

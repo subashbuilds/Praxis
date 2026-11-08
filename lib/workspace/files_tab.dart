@@ -168,17 +168,20 @@ class _FilesTabState extends State<FilesTab> {
             .toList() ??
         const <String>[];
     if (paths.isEmpty || !mounted) return;
-    await _runImport([
-      for (final path in paths)
-        ImportEntry(
-          path: _joinPath(
-            destination,
-            path.replaceAll('\\', '/').split('/').last,
+    await _runImport(
+      [
+        for (final path in paths)
+          ImportEntry(
+            path: _joinPath(
+              destination,
+              path.replaceAll('\\', '/').split('/').last,
+            ),
+            sourcePath: path,
+            isDir: false,
           ),
-          sourcePath: path,
-          isDir: false,
-        ),
-    ]);
+      ],
+      expand: destination.isEmpty ? const [] : [destination],
+    );
   }
 
   Future<void> _importFolder({String destination = ''}) async {
@@ -204,19 +207,24 @@ class _FilesTabState extends State<FilesTab> {
         .last;
     // The import service expands the folder from disk. Passing only the root
     // means a folder whose name already exists is still merged correctly.
-    await _runImport([
-      ImportEntry(
-        path: _joinPath(destination, name),
-        sourcePath: rootPath,
-        isDir: true,
-      ),
-    ]);
+    // Expand the destination afterwards: a merged folder with collapsed
+    // children looked like an empty import even when every file was copied.
+    final target = _joinPath(destination, name);
+    await _runImport(
+      [
+        ImportEntry(path: target, sourcePath: rootPath, isDir: true),
+      ],
+      expand: target.split('/'),
+    );
   }
 
   String _joinPath(String parent, String name) =>
       parent.isEmpty ? name : '$parent/$name';
 
-  Future<void> _runImport(List<ImportEntry> entries) async {
+  Future<void> _runImport(
+    List<ImportEntry> entries, {
+    List<String> expand = const [],
+  }) async {
     if (entries.isEmpty) return;
     setState(() => _importing = true);
     try {
@@ -226,6 +234,15 @@ class _FilesTabState extends State<FilesTab> {
         onConflict: _askImportConflict,
       );
       if (!mounted) return;
+      setState(() {
+        for (final path in expand) {
+          var current = '';
+          for (final part in path.split('/').where((part) => part.isNotEmpty)) {
+            current = current.isEmpty ? part : '$current/$part';
+            _expanded.add(current);
+          }
+        }
+      });
       _refresh();
       final failed = summary.failed.isEmpty
           ? ''

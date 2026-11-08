@@ -14,6 +14,7 @@ import '../core/diff.dart';
 import '../core/file_import.dart';
 import '../core/file_types.dart';
 import '../core/integrations.dart';
+import '../core/linux_environment.dart';
 import '../core/model_info.dart';
 import '../core/project_skills.dart';
 import '../core/push_state.dart';
@@ -74,6 +75,7 @@ class AppState extends ChangeNotifier {
     required this.store,
     http.Client? httpClient,
     this.roundLog,
+    this.linux,
     this.seedWelcome = true,
   }) : httpClient = httpClient ?? http.Client();
 
@@ -93,6 +95,7 @@ class AppState extends ChangeNotifier {
   final KVStore store;
   final http.Client httpClient;
   final RoundLogStore? roundLog;
+  final LinuxEnvironment? linux;
   final bool seedWelcome;
 
   late final AiClient ai = AiClient(client: httpClient);
@@ -128,6 +131,7 @@ class AppState extends ChangeNotifier {
 
   final Map<String, List<ChatEntry>> _threads = {};
   final Map<String, String> _drafts = {};
+  final Map<String, String> _activeFiles = {};
   final Map<String, ProjectFs> _fs = {};
   final Map<String, Shell> _shells = {};
   final Map<String, SystemShell> _systemShells = {};
@@ -153,11 +157,15 @@ class AppState extends ChangeNotifier {
     final directory = await getApplicationDocumentsDirectory();
     final root = Directory('${directory.path}/praxis');
     RoundLogStore? roundLog;
+    LinuxEnvironment? linux;
     try {
       final support = await getApplicationSupportDirectory();
       final fileLog = FileRoundLog(Directory('${support.path}/praxis/logs'));
       await fileLog.prepare();
       roundLog = fileLog;
+      linux = LinuxEnvironment(
+        base: Directory('${support.path}/praxis/linux'),
+      );
     } catch (_) {
       // Logging is diagnostic; it must never prevent the app from starting.
       roundLog = null;
@@ -167,6 +175,7 @@ class AppState extends ChangeNotifier {
       root: root,
       store: PrefsStore(prefs),
       roundLog: roundLog,
+      linux: linux,
     );
     await state.init();
     return state;
@@ -246,8 +255,17 @@ class AppState extends ChangeNotifier {
 
   SystemShell systemShellFor(Project project) => _systemShells.putIfAbsent(
         project.id,
-        () => SystemShell(fsFor(project)),
+        () => SystemShell(fsFor(project), linux: linux),
       );
+
+  /// The editor publishes the open path so context prefetch can include it.
+  void setActiveFile(String projectId, String? path) {
+    if (path == null || path.isEmpty) {
+      _activeFiles.remove(projectId);
+    } else {
+      _activeFiles[projectId] = path;
+    }
+  }
 
   Future<Project> createProject(
     String name,
@@ -685,6 +703,8 @@ class AppState extends ChangeNotifier {
       fs: fsFor(project),
       shell: shellFor(project),
       deviceShell: systemShellFor(project),
+      linuxShell: linux != null,
+      activeFile: _activeFiles[projectId],
       skills: skills,
       fetchText: _fetchSkillText,
       fetchBytes: _fetchUrlBytes,
@@ -718,6 +738,13 @@ class AppState extends ChangeNotifier {
       onDiscardLive: () {
         _clearLive();
         notifyListeners();
+      },
+      toolApproval: (title, body, acceptLabel) async {
+        final prompt = confirmPrompt;
+        // A missing UI callback means no approval can be shown. Refuse the
+        // compound action rather than silently bypassing the approval gate.
+        if (prompt == null) return false;
+        return prompt(title, body, acceptLabel);
       },
       onEvent: (event) {
         if (event.kind == AgentEventKind.text) {
@@ -804,6 +831,40 @@ class AppState extends ChangeNotifier {
     return log.loadTasks();
   }
 
+  /// A portable, privacy-preserving export. It contains the same names and
+  /// counts as Logs — never prompts, tool arguments or file contents.
+  Future<String> exportAgentLogJson() async {
+    final tasks = await loadAgentTasks();
+    final stats = AgentRoundStats(tasks);
+    final payload = {
+      'app': 'Praxis',
+      'kind': 'agent-rounds',
+      'version': 2,
+      'exportedAt': DateTime.now().toUtc().toIso8601String(),
+      'aggregate': {
+        'tasks': stats.totalTasks,
+        'modelRequests': stats.totalRounds,
+        'averageRoundsPerTask': stats.averageRounds,
+        'repeatedCalls': stats.repeatedCalls,
+        'inputTokens': stats.inputTokens,
+        'outputTokens': stats.outputTokens,
+        'roundsByType': {
+          for (final entry in stats.byType.entries) entry.key.wire: entry.value,
+        },
+        'outcomes': stats.outcomes,
+      },
+      'tasks': [
+        for (final task in tasks)
+          {
+            'taskId': task.taskId,
+            'outcome': task.outcome?.wire,
+            'rounds': [for (final round in task.rounds) round.toJson()],
+          },
+      ],
+    };
+    return const JsonEncoder.withIndent('  ').convert(payload);
+  }
+
   Future<void> clearAgentLog() async {
     await roundLog?.clear();
     notifyListeners();
@@ -842,6 +903,14 @@ class AppState extends ChangeNotifier {
       'download_file' =>
         '${args['path'] ?? '?'}',
       'run_command' => '${args['command'] ?? '?'}',
+      'run_commands' => args['commands'] is List
+          ? '${(args['commands'] as List).length} commands'
+          : 'commands',
+      'read_files' => args['paths'] is List
+          ? '${(args['paths'] as List).length} files'
+          : 'files',
+      'search_and_read' => '${args['query'] ?? '?'}',
+      'apply_patch' => 'patch',
       'install_skill' => '${args['name'] ?? args['source_url'] ?? 'skill'}',
       'commit_and_push' => '${args['message'] ?? 'commit'}',
       'pull_latest' => 'latest commit',
@@ -918,7 +987,14 @@ class AppState extends ChangeNotifier {
   }
 
   void stop() {
+    if (!busy) return;
     _cancelled = true;
+    final projectId = _activeProjectId;
+    if (projectId != null &&
+        projects.any((project) => project.id == projectId)) {
+      systemShellFor(projectById(projectId)).cancel();
+    }
+    linux?.cancel();
     notifyListeners();
   }
 

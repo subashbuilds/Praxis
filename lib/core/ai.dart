@@ -87,6 +87,10 @@ class AiReply {
 
 typedef AiDelta = void Function(String delta);
 
+class AiCancelledException implements Exception {
+  const AiCancelledException();
+}
+
 class AiClient {
   AiClient({http.Client? client}) : _client = client ?? http.Client();
 
@@ -144,7 +148,9 @@ class AiClient {
     int maxTokens = kDefaultMaxOutputTokens,
     AiDelta? onText,
     AiDelta? onThinking,
+    bool Function()? isCancelled,
   }) async {
+    if (isCancelled?.call() ?? false) throw const AiCancelledException();
     final uri = _uriFor(provider);
     final request = http.Request('POST', uri);
     request.headers.addAll(_headers(provider));
@@ -158,6 +164,10 @@ class AiClient {
     try {
       response =
           await _client.send(request).timeout(const Duration(seconds: 45));
+      if (isCancelled?.call() ?? false) {
+        await response.stream.drain<void>();
+        throw const AiCancelledException();
+      }
     } on TimeoutException {
       throw AiProviderException(
           '${provider.name} did not start answering within 45s.');
@@ -181,12 +191,14 @@ class AiClient {
                 onText,
                 onThinking,
                 seeded: body,
+                isCancelled: isCancelled,
               )
             : await _consumeOpenAi(
                 const Stream<String>.empty().cast<String>(),
                 onText,
                 onThinking,
                 seeded: body,
+                isCancelled: isCancelled,
               );
         return reply;
       }
@@ -200,6 +212,7 @@ class AiClient {
       final reply = provider.flavor == ApiFlavor.anthropic
           ? _parseAnthropic(json)
           : _parseOpenAi(json);
+      if (isCancelled?.call() ?? false) throw const AiCancelledException();
       if (reply.text.isNotEmpty) onText?.call(reply.text);
       if (reply.thinking.isNotEmpty) onThinking?.call(reply.thinking);
       return reply;
@@ -209,14 +222,54 @@ class AiClient {
         .transform(utf8.decoder)
         .transform(const LineSplitter())
         .timeout(const Duration(seconds: 60));
+    final controller = StreamController<String>();
+    final subscription = lines.listen(
+      controller.add,
+      onError: controller.addError,
+      onDone: controller.close,
+    );
+    final cancellation = _cancellationSignal(isCancelled);
     try {
-      return provider.flavor == ApiFlavor.anthropic
-          ? await _consumeAnthropic(lines, onText, onThinking)
-          : await _consumeOpenAi(lines, onText, onThinking);
+      final consumed = provider.flavor == ApiFlavor.anthropic
+          ? _consumeAnthropic(
+              controller.stream,
+              onText,
+              onThinking,
+              isCancelled: isCancelled,
+            )
+          : _consumeOpenAi(
+              controller.stream,
+              onText,
+              onThinking,
+              isCancelled: isCancelled,
+            );
+      return await Future.any<AiReply>([
+        consumed,
+        cancellation.then<AiReply>((_) => throw const AiCancelledException()),
+      ]);
     } on TimeoutException {
       throw AiProviderException(
           '${provider.name} stalled mid-response. Try again.');
+    } finally {
+      await subscription.cancel();
+      if (!controller.isClosed) await controller.close();
     }
+  }
+
+  /// Completes when the agent's stop flag is raised. The stream subscription
+  /// is cancelled by [stream] as soon as this wins the race, so a stop press
+  /// does not wait for a provider to finish a long reply.
+  Future<void> _cancellationSignal(bool Function()? isCancelled) {
+    if (isCancelled == null) return Completer<void>().future;
+    final completer = Completer<void>();
+    Timer? timer;
+    timer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (isCancelled()) {
+        timer?.cancel();
+        if (!completer.isCompleted) completer.complete();
+      }
+    });
+    return completer.future.whenComplete(() => timer?.cancel());
   }
 
   /// Parses an already-buffered SSE body (used when a proxy omits the content
@@ -226,6 +279,7 @@ class AiClient {
     AiDelta? onText,
     AiDelta? onThinking, {
     String? seeded,
+    bool Function()? isCancelled,
   }) async {
     final text = StringBuffer();
     final thinking = StringBuffer();
@@ -234,6 +288,7 @@ class AiClient {
     var finishReason = '';
 
     Future<void> consume(String line) async {
+      if (isCancelled?.call() ?? false) throw const AiCancelledException();
       final trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
       final data = trimmed.substring(5).trim();
@@ -327,6 +382,7 @@ class AiClient {
     AiDelta? onText,
     AiDelta? onThinking, {
     String? seeded,
+    bool Function()? isCancelled,
   }) async {
     final text = StringBuffer();
     final thinking = StringBuffer();
@@ -336,6 +392,7 @@ class AiClient {
     var finishReason = '';
 
     Future<void> consume(String line) async {
+      if (isCancelled?.call() ?? false) throw const AiCancelledException();
       final trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
       final data = trimmed.substring(5).trim();

@@ -1,4 +1,9 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/round_log.dart';
 import '../state/app_state.dart';
@@ -15,6 +20,7 @@ class LogsScreen extends StatefulWidget {
 class _LogsScreenState extends State<LogsScreen> {
   Future<List<AgentTask>>? _future;
   bool _loaded = false;
+  bool _exporting = false;
 
   @override
   void didChangeDependencies() {
@@ -28,6 +34,108 @@ class _LogsScreenState extends State<LogsScreen> {
     setState(() {
       _future = AppScope.of(context).loadAgentTasks();
     });
+  }
+
+  Future<void> _export() async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final json = await AppScope.of(context).exportAgentLogJson();
+      final bytes = Uint8List.fromList(utf8.encode(json));
+      String? path;
+      try {
+        path = await FilePicker.platform.saveFile(
+          dialogTitle: 'Export agent logs',
+          fileName:
+              'praxis-agent-rounds-${DateTime.now().toUtc().toIso8601String().replaceAll(':', '-').split('.').first}.json',
+          type: FileType.custom,
+          allowedExtensions: const ['json'],
+          bytes: bytes,
+        );
+      } on MissingPluginException {
+        path = null;
+      } on PlatformException catch (error) {
+        if (!mounted) return;
+        _showExportFallback(
+            json, 'The file picker is unavailable: ${error.message}');
+        return;
+      }
+      if (!mounted) return;
+      if (path == null) return;
+      // Some platforms return a content:// path and have already written the
+      // bytes. Only write ourselves when the path is a normal file path.
+      if (!path.startsWith('content://')) {
+        final file = File(path);
+        if (!await file.exists() || await file.length() == 0) {
+          await file.writeAsBytes(bytes, flush: true);
+        }
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Logs exported to $path')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showExportFallback(await _fallbackJson(), '$error');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  Future<String> _fallbackJson() async {
+    try {
+      return await AppScope.of(context).exportAgentLogJson();
+    } catch (_) {
+      return '[]';
+    }
+  }
+
+  void _showExportFallback(String json, String reason) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: const Text('Export logs'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(reason, style: Txt.bodySoft.copyWith(fontSize: 12)),
+              const SizedBox(height: 10),
+              Container(
+                constraints: const BoxConstraints(maxHeight: 280),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Pal.raised,
+                  borderRadius: Rd.sm,
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    json,
+                    style: Txt.code.copyWith(fontSize: 9),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: json));
+              if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+            },
+            child: const Text('Copy JSON'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -51,6 +159,21 @@ class _LogsScreenState extends State<LogsScreen> {
                   const SizedBox(width: 4),
                   Text('Logs', style: Txt.title),
                   const Spacer(),
+                  if (_exporting)
+                    const Padding(
+                      padding: EdgeInsets.all(10),
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  else
+                    IconAction(
+                      icon: Icons.file_download_outlined,
+                      tooltip: 'Export logs',
+                      onTap: _export,
+                    ),
                   IconAction(
                     icon: Icons.refresh_rounded,
                     tooltip: 'Refresh',

@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/file_types.dart';
+import '../core/linux_environment.dart';
 import '../core/project_skills.dart';
 import '../core/shell.dart';
+import '../core/system_shell.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
@@ -19,42 +23,77 @@ class TerminalTab extends StatefulWidget {
 
 class _TerminalTabState extends State<TerminalTab> {
   final _input = TextEditingController();
+  final _focus = FocusNode();
   final _scroll = ScrollController();
-  final _stdout = StringBuffer();
-  final _stderr = StringBuffer();
-  final _lines = <ShellLine>[
-    const ShellLine(
-      'Device shell — /system/bin/sh, working inside this project.',
-      ShellTone.muted,
-    ),
-    const ShellLine(
-      'git, curl or any binary installed on the phone is available. '
-      'cd is tracked; clear empties this view.',
-      ShellTone.muted,
-    ),
-    const ShellLine(
-      'Python, Node, npm and git are not bundled with Praxis. A full package '
-      'manager needs a native runtime or Termux bridge, which this build does '
-      'not include.',
-      ShellTone.muted,
-    ),
-  ];
+  final _pendingOut = StringBuffer();
+  final _pendingErr = StringBuffer();
+  final _lines = <ShellLine>[];
+  final _history = <String>[];
+  final _skills = <ProjectSkill>[];
   bool _running = false;
+  bool _started = false;
   bool _loadedSkills = false;
-  List<ProjectSkill> _skills = const [];
+  int _historyIndex = 0;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_loadedSkills) return;
-    _loadedSkills = true;
-    _refreshSkills();
+    final state = AppScope.of(context);
+    if (!_started) {
+      _started = true;
+      final linux = state.linux;
+      _lines.addAll(_welcome(linux));
+      if (linux != null) unawaited(linux.prepare());
+    }
+    if (!_loadedSkills) {
+      _loadedSkills = true;
+      unawaited(_refreshSkills());
+    }
+  }
+
+  List<ShellLine> _welcome(LinuxEnvironment? linux) {
+    if (linux == null) {
+      return const [
+        ShellLine(
+          'Praxis shell',
+          ShellTone.accent,
+        ),
+        ShellLine(
+          'A shell is available in the Android build.',
+          ShellTone.muted,
+        ),
+      ];
+    }
+    return const [
+      ShellLine('Praxis · Alpine Linux 3.21.7', ShellTone.accent),
+      ShellLine(
+        'A real Alpine rootfs under proot. You are root; the project is /workspace.',
+        ShellTone.output,
+      ),
+      ShellLine('', ShellTone.output),
+      ShellLine('Install packages with apk:', ShellTone.muted),
+      ShellLine('  apk add nodejs npm', ShellTone.command),
+      ShellLine('  apk add python3 py3-pip', ShellTone.command),
+      ShellLine('  apk add git', ShellTone.command),
+      ShellLine('  apk --help', ShellTone.command),
+      ShellLine(
+        'apt and apt-get do not exist here. Type clear to reset this view.',
+        ShellTone.muted,
+      ),
+      ShellLine('', ShellTone.output),
+    ];
   }
 
   Future<void> _refreshSkills() async {
     final skills =
         await AppScope.of(context).installedSkillsFor(widget.project);
-    if (mounted) setState(() => _skills = skills);
+    if (mounted) {
+      setState(() {
+        _skills
+          ..clear()
+          ..addAll(skills);
+      });
+    }
   }
 
   Future<void> _showSkills() async {
@@ -86,40 +125,18 @@ class _TerminalTabState extends State<TerminalTab> {
                 style: Txt.bodySoft.copyWith(height: 1.5),
               ),
               const SizedBox(height: Sp.x3),
-              Container(
-                padding: const EdgeInsets.all(Sp.x3),
-                decoration: BoxDecoration(
-                  color: Pal.raised,
-                  borderRadius: Rd.sm,
-                  border: Border.all(color: Pal.line),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.folder_outlined, size: 16, color: Pal.amber),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '.praxis/skills/  ·  ${_skills.length} installed',
-                        style: Txt.code.copyWith(fontSize: 11),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: Sp.x3),
               if (_skills.isEmpty)
                 Text(
-                  'No skills yet. Ask the agent to install one from a GitHub '
-                  'repository or paste a SKILL.md, and it appears here.',
+                  'No skills yet. Ask the agent to install one.',
                   style: Txt.meta.copyWith(height: 1.5),
                 )
               else
-                for (final skill in _skills) ...[
+                for (final skill in _skills)
                   Container(
                     margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.all(Sp.x3),
                     decoration: BoxDecoration(
-                      color: Pal.surface,
+                      color: Pal.raised,
                       borderRadius: Rd.sm,
                       border: Border.all(color: Pal.line),
                     ),
@@ -135,20 +152,12 @@ class _TerminalTabState extends State<TerminalTab> {
                               child: Text(skill.name,
                                   style: Txt.label.copyWith(fontSize: 12)),
                             ),
-                            Text(
-                              humanFileSize(skill.size),
-                              style: Txt.meta.copyWith(fontSize: 9),
-                            ),
+                            Text(humanFileSize(skill.size),
+                                style: Txt.meta.copyWith(fontSize: 9)),
                           ],
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          skill.folder,
-                          style: Txt.code
-                              .copyWith(fontSize: 9.5, color: Pal.textDim),
-                        ),
                         if (skill.description.isNotEmpty) ...[
-                          const SizedBox(height: 5),
+                          const SizedBox(height: 4),
                           Text(
                             skill.description,
                             maxLines: 3,
@@ -159,7 +168,6 @@ class _TerminalTabState extends State<TerminalTab> {
                       ],
                     ),
                   ),
-                ],
             ],
           ),
         ),
@@ -170,13 +178,17 @@ class _TerminalTabState extends State<TerminalTab> {
   @override
   void dispose() {
     _input.dispose();
+    _focus.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
   void _feed(String chunk, ShellTone tone, StringBuffer pending) {
     if (!mounted) return;
-    pending.write(chunk.replaceAll('\r', ''));
+    final clean = chunk
+        .replaceAll('\r', '')
+        .replaceAll(RegExp(r'\x1B\[[0-?]*[ -/]*[@-~]'), '');
+    pending.write(clean);
     final parts = pending.toString().split('\n');
     pending.clear();
     pending.write(parts.removeLast());
@@ -198,28 +210,41 @@ class _TerminalTabState extends State<TerminalTab> {
     final command = raw.trim();
     if (command.isEmpty || _running) return;
     _input.clear();
+    _focus.requestFocus();
     if (command == 'clear') {
-      setState(_lines.clear);
+      setState(() {
+        _lines
+          ..clear()
+          ..addAll(_welcome(AppScope.of(context).linux));
+      });
+      _scrollToEnd();
       return;
     }
-    final shell = AppScope.of(context).systemShellFor(widget.project);
-    _stdout.clear();
-    _stderr.clear();
+    if (_history.isEmpty || _history.last != command) {
+      _history.add(command);
+    }
+    _historyIndex = _history.length;
+    final state = AppScope.of(context);
+    final shell = state.systemShellFor(widget.project);
+    final linux = state.linux;
+    final prompt =
+        linux == null ? shell.promptDisplay : 'alpine:${shell.promptDisplay}';
+    _pendingOut.clear();
+    _pendingErr.clear();
     setState(() {
       _running = true;
-      _lines.add(
-          ShellLine('${shell.promptDisplay} \$ $command', ShellTone.command));
+      _lines.add(ShellLine('$prompt \$ $command', ShellTone.command));
     });
     _scrollToEnd();
 
     final result = await shell.run(
       command,
-      onStdout: (chunk) => _feed(chunk, ShellTone.output, _stdout),
-      onStderr: (chunk) => _feed(chunk, ShellTone.error, _stderr),
+      onStdout: (chunk) => _feed(chunk, ShellTone.output, _pendingOut),
+      onStderr: (chunk) => _feed(chunk, ShellTone.error, _pendingErr),
     );
     if (!mounted) return;
-    _flush(_stdout, ShellTone.output);
-    _flush(_stderr, ShellTone.error);
+    _flush(_pendingOut, ShellTone.output);
+    _flush(_pendingErr, ShellTone.error);
     setState(() {
       _running = false;
       if (result.exitCode != 0) {
@@ -244,10 +269,137 @@ class _TerminalTabState extends State<TerminalTab> {
         ShellTone.accent => Pal.mint,
       };
 
+  void _insert(String value) {
+    final selection = _input.selection;
+    final start = selection.isValid ? selection.start : _input.text.length;
+    final end = selection.isValid ? selection.end : _input.text.length;
+    final text = _input.text.replaceRange(start, end, value);
+    _input.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: start + value.length),
+    );
+    _focus.requestFocus();
+  }
+
+  void _moveCursor(int delta) {
+    final selection = _input.selection;
+    final base = selection.isValid ? selection.end : _input.text.length;
+    final offset = (base + delta).clamp(0, _input.text.length);
+    _input.selection = TextSelection.collapsed(offset: offset);
+    _focus.requestFocus();
+  }
+
+  void _historyMove(int delta) {
+    if (_history.isEmpty) return;
+    final next = (_historyIndex + delta).clamp(0, _history.length);
+    if (next == _history.length) {
+      _input.clear();
+    } else {
+      _input.text = _history[next];
+      _input.selection = TextSelection.collapsed(offset: _input.text.length);
+    }
+    _historyIndex = next;
+    _focus.requestFocus();
+  }
+
+  void _showCtrlMenu() {
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SheetHandle(),
+            ListTile(
+              leading: Icon(Icons.stop_circle_outlined, color: Pal.rose),
+              title: const Text('Ctrl + C · interrupt'),
+              onTap: () {
+                AppScope.of(context).systemShellFor(widget.project).cancel();
+                Navigator.of(sheetContext).pop();
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.cleaning_services_outlined, color: Pal.amber),
+              title: const Text('Ctrl + L · clear screen'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                setState(() {
+                  _lines
+                    ..clear()
+                    ..addAll(_welcome(AppScope.of(context).linux));
+                });
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.keyboard_hide_rounded, color: Pal.textMuted),
+              title: const Text('Ctrl + D · close keyboard'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _focus.unfocus();
+              },
+            ),
+            const SizedBox(height: Sp.x2),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _promptRow() {
+    final shell = AppScope.of(context).systemShellFor(widget.project);
+    final linux = AppScope.of(context).linux;
+    final prompt =
+        linux == null ? shell.promptDisplay : 'alpine:${shell.promptDisplay}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Text(
+              '\$ ',
+              style: Txt.code.copyWith(
+                fontSize: 12,
+                color: Pal.ember,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: TextField(
+              controller: _input,
+              focusNode: _focus,
+              style: Txt.code.copyWith(fontSize: 11.5),
+              cursorColor: Pal.ember,
+              keyboardType: TextInputType.text,
+              textInputAction: TextInputAction.send,
+              autocorrect: false,
+              enableSuggestions: false,
+              onSubmitted: _submit,
+              decoration: InputDecoration(
+                isDense: true,
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                hintText: '$prompt \$ ',
+                hintStyle:
+                    Txt.code.copyWith(fontSize: 11.5, color: Pal.textDim),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final shell = AppScope.of(context).systemShellFor(widget.project);
-
+    final state = AppScope.of(context);
+    final shell = state.systemShellFor(widget.project);
+    final linux = state.linux;
+    final ready = linux?.ready ?? false;
     return Container(
       color: Pal.terminal,
       child: Column(
@@ -260,7 +412,14 @@ class _TerminalTabState extends State<TerminalTab> {
             ),
             child: Row(
               children: [
-                StatusPill('device sh', color: Pal.mint),
+                StatusPill(
+                  linux == null
+                      ? 'device sh'
+                      : ready
+                          ? 'alpine'
+                          : 'preparing',
+                  color: ready ? Pal.mint : Pal.amber,
+                ),
                 const SizedBox(width: Sp.x2),
                 Expanded(
                   child: Text(
@@ -287,10 +446,8 @@ class _TerminalTabState extends State<TerminalTab> {
                         Icon(Icons.extension_outlined,
                             size: 12, color: Pal.amber),
                         const SizedBox(width: 4),
-                        Text(
-                          '${_skills.length}',
-                          style: Txt.meta.copyWith(fontSize: 9.5),
-                        ),
+                        Text('${_skills.length}',
+                            style: Txt.meta.copyWith(fontSize: 9.5)),
                       ],
                     ),
                   ),
@@ -308,30 +465,28 @@ class _TerminalTabState extends State<TerminalTab> {
                     icon: Icons.delete_outline_rounded,
                     tooltip: 'Clear shell',
                     size: 17,
-                    onTap: () => setState(_lines.clear),
+                    onTap: () => setState(() {
+                      _lines
+                        ..clear()
+                        ..addAll(_welcome(linux));
+                    }),
                   ),
               ],
             ),
           ),
           Expanded(
-            child: SelectionArea(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _focus.requestFocus,
               child: ListView.builder(
                 controller: _scroll,
-                padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x3, Sp.x4, Sp.x3),
-                itemCount: _lines.length + (_running ? 1 : 0),
+                padding: const EdgeInsets.only(bottom: Sp.x2),
+                itemCount: _lines.length + 1,
                 itemBuilder: (context, index) {
-                  if (index >= _lines.length) {
-                    return Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        '…',
-                        style: Txt.code.copyWith(color: Pal.textDim),
-                      ),
-                    );
-                  }
+                  if (index == _lines.length) return _promptRow();
                   final line = _lines[index];
                   return Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
+                    padding: const EdgeInsets.fromLTRB(Sp.x4, 1.5, Sp.x4, 1.5),
                     child: Text(
                       line.text.isEmpty ? ' ' : line.text,
                       style: Txt.code.copyWith(
@@ -348,53 +503,157 @@ class _TerminalTabState extends State<TerminalTab> {
               ),
             ),
           ),
-          Container(
-            decoration: BoxDecoration(
-              border: Border(top: BorderSide(color: Pal.line)),
+          _symbolBar(),
+          _specialBar(shell, linux),
+        ],
+      ),
+    );
+  }
+
+  Widget _symbolBar() {
+    const symbols = [
+      '|',
+      '~',
+      '`',
+      '/',
+      r'$',
+      '{',
+      '}',
+      '[',
+      ']',
+      '(',
+      ')',
+      '<',
+      '>',
+      ';',
+      ':',
+      "'",
+      '"',
+      '=',
+      '+',
+      '-',
+      '*',
+      '&',
+      '!',
+      '?',
+      '#',
+      '@',
+      '%',
+      '^',
+      '_',
+      '.',
+      ',',
+    ];
+    return Container(
+      height: 42,
+      decoration: BoxDecoration(
+        color: Pal.surface,
+        border: Border(top: BorderSide(color: Pal.line)),
+      ),
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: Sp.x2, vertical: 5),
+        scrollDirection: Axis.horizontal,
+        itemCount: symbols.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 3),
+        itemBuilder: (context, index) {
+          final symbol = symbols[index];
+          return GestureDetector(
+            onTap: () => _insert(symbol),
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              width: 34,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Pal.raised,
+                borderRadius: Rd.sm,
+                border: Border.all(color: Pal.line),
+              ),
+              child: Text(
+                symbol,
+                style: Txt.code.copyWith(
+                  fontSize: 15,
+                  color: Pal.textMuted,
+                ),
+              ),
             ),
-            padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x1, Sp.x2, Sp.x2),
-            child: Row(
-              children: [
-                Text(
-                  shell.promptDisplay,
-                  style: Txt.code.copyWith(
-                    fontSize: 12,
-                    color: Pal.ember,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(width: Sp.x2),
-                Expanded(
-                  child: TextField(
-                    controller: _input,
-                    style: Txt.code.copyWith(fontSize: 11.5),
-                    cursorColor: Pal.ember,
-                    textInputAction: TextInputAction.send,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    enabled: !_running,
-                    onSubmitted: _submit,
-                    decoration: InputDecoration(
-                      isDense: true,
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                      hintText: 'git status',
-                      hintStyle:
-                          Txt.code.copyWith(fontSize: 11.5, color: Pal.textDim),
-                    ),
-                  ),
-                ),
-                IconAction(
-                  icon: Icons.keyboard_return_rounded,
-                  tooltip: 'Run command',
-                  size: 18,
-                  color: Pal.ember,
-                  onTap: _running ? null : () => _submit(_input.text),
-                ),
-              ],
-            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _specialBar(SystemShell shell, LinuxEnvironment? linux) {
+    return Container(
+      height: 50,
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 4),
+      decoration: BoxDecoration(
+        color: Pal.surface,
+        border: Border(top: BorderSide(color: Pal.line)),
+      ),
+      child: Row(
+        children: [
+          _specialKey('ESC', Icons.keyboard_hide_rounded, () {
+            shell.cancel();
+            _focus.unfocus();
+          }),
+          _specialKey(
+              'Ctrl', Icons.keyboard_command_key_rounded, _showCtrlMenu),
+          const Spacer(),
+          _specialKey(
+              null, Icons.keyboard_arrow_left_rounded, () => _moveCursor(-1)),
+          _specialKey(
+              null, Icons.keyboard_arrow_up_rounded, () => _historyMove(-1)),
+          _specialKey(
+              null, Icons.keyboard_arrow_down_rounded, () => _historyMove(1)),
+          _specialKey(
+              null, Icons.keyboard_arrow_right_rounded, () => _moveCursor(1)),
+          _specialKey(
+            null,
+            Icons.keyboard_return_rounded,
+            () => _submit(_input.text),
+            emphasized: true,
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _specialKey(
+    String? label,
+    IconData icon,
+    VoidCallback onTap, {
+    bool emphasized = false,
+  }) {
+    return Semantics(
+      button: true,
+      label: label ?? 'Terminal key',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: Rd.sm,
+        child: SizedBox(
+          width: label == null ? 42 : 52,
+          height: 42,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: emphasized ? Pal.ember : Pal.textMuted,
+              ),
+              if (label != null) ...[
+                const SizedBox(width: 4),
+                Text(
+                  label,
+                  style: Txt.meta.copyWith(
+                    fontSize: 9,
+                    color: emphasized ? Pal.ember : Pal.textMuted,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -10,6 +10,7 @@ import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 import 'about_screen.dart';
 import 'logs_screen.dart';
+import 'linux_environment_screen.dart';
 import 'provider_form.dart';
 import 'usage_screen.dart';
 
@@ -60,6 +61,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _ThemeChoices(
                     dark: state.darkMode,
                     onChanged: state.setDarkMode,
+                  ),
+                  const SectionLabel('ENVIRONMENT'),
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => LinuxEnvironmentScreen(
+                          project: widget.project,
+                        ),
+                      ),
+                    ),
+                    behavior: HitTestBehavior.opaque,
+                    child: Panel(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: Sp.x3, vertical: Sp.x3),
+                      child: Row(
+                        children: [
+                          GlyphBadge(
+                            icon: Icons.terminal_rounded,
+                            color: Pal.ember,
+                            size: 36,
+                            iconSize: 18,
+                          ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Linux Environment',
+                                    style: Txt.title.copyWith(fontSize: 15)),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Alpine 3.21.7 · proot shell, apk and runtimes',
+                                  style: Txt.meta.copyWith(fontSize: 9.5),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Text('Open',
+                              style: Txt.meta.copyWith(color: Pal.ember)),
+                          const SizedBox(width: 2),
+                          Icon(Icons.chevron_right_rounded,
+                              size: 17, color: Pal.textDim),
+                        ],
+                      ),
+                    ),
                   ),
                   const SectionLabel('USAGE'),
                   GestureDetector(

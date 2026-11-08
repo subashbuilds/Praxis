@@ -36,6 +36,8 @@ class _EditorScreenState extends State<EditorScreen> {
   Uint8List? _bytes;
   String? _error;
   final _previewScroll = ScrollController();
+  AppState? _appState;
+  bool _markedActive = false;
 
   bool get _isMarkdown => languageForPath(widget.path) == CodeLanguage.markdown;
   bool get _canEdit => !_image && !_binary;
@@ -57,7 +59,19 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final state = AppScope.of(context);
+    _appState = state;
+    if (!_markedActive) {
+      _markedActive = true;
+      state.setActiveFile(widget.project.id, widget.path);
+    }
+  }
+
+  @override
   void dispose() {
+    _appState?.setActiveFile(widget.project.id, null);
     _controller.dispose();
     _previewScroll.dispose();
     super.dispose();
