@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'gitignore.dart';
 import 'sensitive_paths.dart';
 import 'system_shell.dart';
 import 'vfs.dart';
@@ -56,7 +57,8 @@ class ContextPrefetch {
     }
 
     final keywords = _keywords(trimmed);
-    final entries = await _entries();
+    final gitignore = await GitIgnoreSet.load(fs);
+    final entries = await _entries(gitignore);
     final sections = <String>[];
     var filesScanned = 0;
     var truncated = false;
@@ -98,7 +100,7 @@ class ContextPrefetch {
     if (git.isNotEmpty) addSection('GIT STATE', git);
 
     final open = activeFile?.trim() ?? '';
-    if (open.isNotEmpty && !isIgnoredPath(open)) {
+    if (open.isNotEmpty && !isIgnoredPath(open) && !gitignore.ignores(open)) {
       try {
         final content = await fs.read(open);
         final lines = content.split('\n');
@@ -191,12 +193,14 @@ class ContextPrefetch {
     );
   }
 
-  Future<List<FileEntry>> _entries() async {
+  Future<List<FileEntry>> _entries(GitIgnoreSet gitignore) async {
     try {
       final listed = await fs.list(includeHidden: true);
       return listed
           .where((entry) =>
-              !isIgnoredPath(entry.path) && !looksLikeSecret(entry.path))
+              !isIgnoredPath(entry.path) &&
+              !looksLikeSecret(entry.path) &&
+              !gitignore.ignores(entry.path, isDir: entry.isDir))
           .toList();
     } on FsError {
       return const [];

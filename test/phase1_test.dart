@@ -77,6 +77,30 @@ void main() {
     expect(greeting.trivial, isTrue);
   });
 
+  test('prefetch respects root and nested gitignore rules', () async {
+    await fs.write('.gitignore', '''
+ignored/
+*.log
+!keep.log
+/sub-only
+''');
+    await fs.write('ignored/generated.txt', 'generated');
+    await fs.write('debug.log', 'generated');
+    await fs.write('keep.log', 'visible');
+    await fs.write('sub-only', 'visible');
+    await fs.write('sub/.gitignore', '*.tmp\n');
+    await fs.write('sub/temp.tmp', 'generated');
+    await fs.write('sub/keep.txt', 'visible');
+
+    final result = await ContextPrefetch(fs: fs).build('fix the parser');
+    expect(result.included, isTrue);
+    expect(result.text, contains('keep.log'));
+    expect(result.text, contains('sub/keep.txt'));
+    expect(result.text, isNot(contains('ignored/')));
+    expect(result.text, isNot(contains('debug.log')));
+    expect(result.text, isNot(contains('sub/temp.tmp')));
+  });
+
   test('read_files returns multiple files in one tool result', () async {
     await fs.write('a.txt', 'alpha');
     await fs.write('b.txt', 'beta');
