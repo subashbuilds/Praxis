@@ -64,9 +64,11 @@ class SystemShell {
     if (linux != null && Platform.isAndroid) {
       if (!linux!.ready) await linux!.prepare();
       if (!linux!.ready) {
+        final message =
+            linux!.error.isEmpty ? 'Alpine is not ready yet.' : linux!.error;
+        onStderr?.call('$message\n');
         return SystemShellResult(
-          output:
-              linux!.error.isEmpty ? 'Alpine is not ready yet.' : linux!.error,
+          output: message,
           exitCode: 127,
           cwd: cwdDisplay,
         );

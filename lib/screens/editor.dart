@@ -312,6 +312,8 @@ class _EditorScreenState extends State<EditorScreen> {
       return _MarkdownPreview(
         data: markdownFromReadme(_controller.text),
         controller: _previewScroll,
+        project: widget.project,
+        path: widget.path,
       );
     }
     return CodeEditor(
@@ -410,10 +412,25 @@ class _MarkdownPreview extends StatelessWidget {
   const _MarkdownPreview({
     required this.data,
     required this.controller,
+    required this.project,
+    required this.path,
   });
 
   final String data;
   final ScrollController controller;
+  final Project project;
+  final String path;
+
+  Future<Uint8List?> _loadLocalImage(BuildContext context, Uri uri) async {
+    final relative = resolveReadmeImagePath(path, uri);
+    if (relative.isEmpty) return null;
+    final state = AppScope.of(context);
+    try {
+      return await state.readFileBytes(project, relative);
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -427,8 +444,14 @@ class _MarkdownPreview extends StatelessWidget {
           child: MarkdownBody(
             data: data.isEmpty ? '_This file is empty._' : data,
             selectable: true,
-            imageBuilder: (uri, title, alt) =>
-                ReadmeImage(uri: uri, title: title, alt: alt),
+            imageBuilder: (uri, title, alt) => ReadmeImage(
+              uri: uri,
+              title: title,
+              alt: alt,
+              loadLocal: uri.scheme.isEmpty && !uri.hasAuthority
+                  ? (uri) => _loadLocalImage(context, uri)
+                  : null,
+            ),
             onTapLink: (text, href, title) {
               if (href == null || href.isEmpty) return;
               Clipboard.setData(ClipboardData(text: href));

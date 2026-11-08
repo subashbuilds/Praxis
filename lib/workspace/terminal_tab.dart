@@ -425,6 +425,7 @@ class _TerminalTabState extends State<TerminalTab> {
     final shell = state.systemShellFor(widget.project);
     final linux = state.linux;
     final ready = linux?.ready ?? false;
+    final linuxFailed = linux?.state == LinuxState.error;
     return Container(
       color: Pal.terminal,
       child: Column(
@@ -445,8 +446,14 @@ class _TerminalTabState extends State<TerminalTab> {
                         ? 'device sh'
                         : ready
                             ? 'alpine'
-                            : 'preparing',
-                    color: ready ? Pal.mint : Pal.amber,
+                            : linuxFailed
+                                ? 'unavailable'
+                                : 'preparing',
+                    color: ready
+                        ? Pal.mint
+                        : linuxFailed
+                            ? Pal.rose
+                            : Pal.amber,
                   ),
                 ),
                 const SizedBox(width: Sp.x2),

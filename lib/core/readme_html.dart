@@ -55,6 +55,41 @@ String _joinBadgeLines(String source) {
   return output.join('\n');
 }
 
+/// Resolves an image reference from a README to a project-relative path.
+/// Remote images and paths that escape the project return an empty string.
+String resolveReadmeImagePath(String readmePath, Uri uri) {
+  if (uri.hasScheme || uri.hasAuthority) return '';
+  String imagePath;
+  try {
+    imagePath = Uri.decodeComponent(uri.path).replaceAll('\\', '/');
+  } on ArgumentError {
+    return '';
+  }
+  if (imagePath.isEmpty) return '';
+
+  final parts = <String>[];
+  if (imagePath.startsWith('/')) {
+    imagePath = imagePath.substring(1);
+  } else {
+    final slash = readmePath.lastIndexOf('/');
+    if (slash > 0) {
+      for (final segment in readmePath.substring(0, slash).split('/')) {
+        if (segment.isNotEmpty && segment != '.') parts.add(segment);
+      }
+    }
+  }
+  for (final segment in imagePath.split('/')) {
+    if (segment.isEmpty || segment == '.') continue;
+    if (segment == '..') {
+      if (parts.isEmpty) return '';
+      parts.removeLast();
+    } else {
+      parts.add(segment);
+    }
+  }
+  return parts.join('/');
+}
+
 String _convertLine(String line) {
   if (!line.contains('<')) return _entities(line);
   var value = line;

@@ -106,6 +106,35 @@ void main() {
       );
       expect(markdown, contains('# Hello'));
     });
+
+    test('resolves local README image paths', () {
+      expect(
+        resolveReadmeImagePath('README.md', Uri.parse('assets/logo.svg')),
+        'assets/logo.svg',
+      );
+      expect(
+        resolveReadmeImagePath(
+          'docs/README.md',
+          Uri.parse('../assets/logo.svg'),
+        ),
+        'assets/logo.svg',
+      );
+      expect(
+        resolveReadmeImagePath('docs/README.md', Uri.parse('/assets/logo.svg')),
+        'assets/logo.svg',
+      );
+      expect(
+        resolveReadmeImagePath(
+          'README.md',
+          Uri.parse('https://example.test/logo.svg'),
+        ),
+        isEmpty,
+      );
+      expect(
+        resolveReadmeImagePath('README.md', Uri.parse('../../logo.svg')),
+        isEmpty,
+      );
+    });
   });
 
   group('Shell', () {
