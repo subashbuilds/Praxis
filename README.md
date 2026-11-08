@@ -39,7 +39,7 @@ Grab the latest signed APK from [GitHub Releases](https://github.com/subashbuild
 
 ## Linux Environment
 
-Open **Settings → Linux Environment** to set up an on-device Alpine 3.21.7 environment. The minirootfs and proot binary are bundled with the app; the first setup extracts them into the app's support directory and does not need a rooted phone.
+Open **Settings → Linux Environment** to set up an on-device Alpine 3.21.7 environment. The minirootfs, the proot binary, and its companion loader are bundled with the app; the first setup extracts the rootfs into the app's support directory and does not need a rooted phone.
 
 - Install Node.js, Python, PHP, or Go from the runtime cards, or run `apk add <package>` yourself in the shell.
 - This is Alpine, so use `apk`, not `apt` or `apt-get`.
@@ -47,7 +47,7 @@ Open **Settings → Linux Environment** to set up an on-device Alpine 3.21.7 env
 - The Linux Environment screen shows disk usage, guest memory and CPU load, live processes, installed runtime versions, and safe cache/reset actions. An idle guest reads as idle rather than as an unmeasured value.
 - The first setup validates the shell before marking the rootfs ready. If an older incomplete rootfs is found, it is rebuilt; Alpine's symlinks are materialized as hardlinks or copies, and commands run through `/bin/busybox sh` so the environment does not depend on a missing `/bin/sh` link.
 - Package installs need network access. Resetting the environment removes the rootfs and installed runtimes; project files are never touched.
-- The shell has an inline prompt rather than a separate input bar. Tapping the terminal opens the keyboard, with a scrollable symbol row and ESC/Ctrl/arrow controls above it.
+- The shell has an inline prompt rather than a separate input bar. Tapping the terminal opens the keyboard, with a scrollable symbol row and ESC/Ctrl/arrow controls above it. Output is selectable, and the copy button copies the full transcript.
 
 ## Integrations
 
@@ -124,7 +124,7 @@ flutter analyze
 flutter test
 ```
 
-CI runs the same checks and builds a release APK on every push to `main` or `master` and every pull request.
+CI runs the same checks and builds a release APK on every push to `main` or `master` and every pull request. CI signs its APK with the same release keystore when the secrets are configured, and fails a push or manual run when they are missing. Pull requests without access to the secrets fall back to the debug key.
 
 ## Signed releases
 

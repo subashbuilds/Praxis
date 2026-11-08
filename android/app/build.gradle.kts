@@ -43,16 +43,22 @@ android {
         }
     }
 
+    // Debug and release builds share the environment keystore when it is
+    // available, so local debug installs and signed builds use one identity.
+    // Without the environment, both fall back to the standard debug key so the
+    // project still builds.
+    val commonSigningConfig = if (releaseKeystore != null) {
+        signingConfigs.getByName("release")
+    } else {
+        signingConfigs.getByName("debug")
+    }
+
     buildTypes {
+        debug {
+            signingConfig = commonSigningConfig
+        }
         release {
-            // A local or CI run without the signing environment falls back to
-            // the debug key so the project still builds. The manual release
-            // workflow injects the real keystore from repository secrets.
-            signingConfig = if (releaseKeystore != null) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = commonSigningConfig
         }
     }
 }

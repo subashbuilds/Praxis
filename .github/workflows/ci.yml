@@ -89,9 +89,41 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      # Release signing is wired to the debug keystore in
-      # android/app/build.gradle.kts, so no secrets are needed here.
+      - name: Prepare release signing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            if [ "$EVENT_NAME" != "pull_request" ]; then
+              echo "::error::KEYSTORE_BASE64 is not configured in repository secrets."
+              exit 1
+            fi
+            echo "::warning::Release signing secrets are not available to this pull request; using the debug key."
+            echo "APK_SIGNING=debug fallback" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          for name in KEYSTORE_PASSWORD KEY_ALIAS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is required when KEYSTORE_BASE64 is configured."
+              exit 1
+            fi
+          done
+          KEYSTORE_PATH="$RUNNER_TEMP/praxis-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 0600 "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "APK_SIGNING=release keystore" >> "$GITHUB_ENV"
+
       - name: Build release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: flutter build apk --release
 
       - name: Report APK
@@ -99,6 +131,15 @@ jobs:
           set -euo pipefail
           APK=build/app/outputs/flutter-apk/app-release.apk
           ls -lh "$APK"
+          for lib in libproot.so libproot-loader.so; do
+            if ! unzip -l "$APK" | grep -qF "lib/arm64-v8a/$lib"; then
+              echo "::error::$lib is missing from the APK."
+              exit 1
+            fi
+          done
+          APKSIGNER="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          "$APKSIGNER" verify --print-certs "$APK" | tee "$RUNNER_TEMP/apk-certs.txt"
+          CERT_SHA="$(grep -m1 'SHA-256 digest' "$RUNNER_TEMP/apk-certs.txt" | sed 's/.*: //' || true)"
           {
             echo "### Praxis release APK"
             echo ""
@@ -106,6 +147,8 @@ jobs:
             echo "|---|---|"
             echo "| Size | $(du -h "$APK" | cut -f1) |"
             echo "| SHA-256 | \`$(sha256sum "$APK" | cut -d' ' -f1)\` |"
+            echo "| Signing | ${APK_SIGNING:-unknown} |"
+            echo "| Certificate SHA-256 | \`$CERT_SHA\` |"
             echo "| Flutter | ${FLUTTER_VERSION} |"
           } >> "$GITHUB_STEP_SUMMARY"
 

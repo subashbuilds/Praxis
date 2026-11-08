@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/file_types.dart';
 import '../core/linux_environment.dart';
@@ -262,6 +263,16 @@ class _TerminalTabState extends State<TerminalTab> {
     });
   }
 
+  Future<void> _copyTranscript() async {
+    final text = _lines.map((line) => line.text).join('\n').trimRight();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Terminal copied')),
+    );
+  }
+
   void _openLinux() {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -501,6 +512,12 @@ class _TerminalTabState extends State<TerminalTab> {
                     ),
                   ),
                 ),
+                IconAction(
+                  icon: Icons.copy_all_rounded,
+                  tooltip: 'Copy terminal',
+                  size: 17,
+                  onTap: () => unawaited(_copyTranscript()),
+                ),
                 if (_running)
                   IconAction(
                     icon: Icons.stop_circle_outlined,
@@ -536,8 +553,9 @@ class _TerminalTabState extends State<TerminalTab> {
                   final line = _lines[index];
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(Sp.x4, 1.5, Sp.x4, 1.5),
-                    child: Text(
+                    child: SelectableText(
                       line.text.isEmpty ? ' ' : line.text,
+                      onTap: _focus.requestFocus,
                       style: Txt.code.copyWith(
                         fontSize: 11.5,
                         height: 1.55,

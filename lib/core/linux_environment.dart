@@ -210,6 +210,7 @@ class LinuxEnvironment extends ChangeNotifier {
   String phase = '';
   String rootfsPath = '';
   String prootPath = '';
+  String prootLoaderPath = '';
   bool packageCaching = true;
   LinuxSnapshot snapshot = const LinuxSnapshot();
   final Map<LinuxRuntime, LinuxRuntimeStatus> runtimes = {
@@ -278,9 +279,19 @@ class LinuxEnvironment extends ChangeNotifier {
             'libproot.so is missing from the APK native libraries.',
           );
         }
+        // PRoot hands every guest exec to its companion loader. Without
+        // PROOT_LOADER it looks for a path that is not in the APK and reports
+        // a misleading ENOENT for /bin/busybox.
+        final bundledLoader = File('$libraryDir/libproot-loader.so');
+        if (!await bundledLoader.exists()) {
+          throw const LinuxUnavailableException(
+            'libproot-loader.so is missing from the APK native libraries.',
+          );
+        }
         // nativeLibraryDir is the executable location supplied by Android.
         // Copying proot into app data can hit Android 10+ W^X restrictions.
         prootPath = bundled.path;
+        prootLoaderPath = bundledLoader.path;
       } else {
         prootPath = '';
       }
@@ -534,6 +545,7 @@ class LinuxEnvironment extends ChangeNotifier {
           'LANG': 'C.UTF-8',
           'TMPDIR': '/tmp',
           'PROOT_TMP_DIR': hostTmp.path,
+          if (prootLoaderPath.isNotEmpty) 'PROOT_LOADER': prootLoaderPath,
         },
         includeParentEnvironment: true,
       );
