@@ -293,7 +293,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
         setState(() => _status = 'No SKILL.md files in ${repo.fullName}.');
         return;
       }
-      final selected = await showModalBottomSheet<DiscoveredSkill>(
+      await showModalBottomSheet<void>(
         context: context,
         useSafeArea: true,
         isScrollControlled: true,
@@ -301,9 +301,23 @@ class _SkillsScreenState extends State<SkillsScreen> {
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
-        builder: (_) => _SkillPickerSheet(repo: repo, skills: skills),
+        builder: (_) => _SkillPickerSheet(
+          repo: repo,
+          skills: skills,
+          installed: {
+            for (final skill in state.skills)
+              if (skill.source.isNotEmpty) '${skill.source}|${skill.name}',
+          },
+          onInstall: _install,
+          onPreview: (discovered) async {
+            final skill = await SkillDiscovery(
+              client: state.httpClient,
+              token: state.activeGithub?.token ?? '',
+            ).fetchSkill(discovered);
+            return skill.instructions;
+          },
+        ),
       );
-      if (selected != null && mounted) await _install(selected);
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -313,7 +327,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
     }
   }
 
-  Future<void> _install(DiscoveredSkill discovered) async {
+  Future<bool> _install(DiscoveredSkill discovered) async {
     setState(() {
       _installing = true;
       _error = null;
@@ -326,11 +340,13 @@ class _SkillsScreenState extends State<SkillsScreen> {
         token: state.activeGithub?.token ?? '',
       ).fetchSkill(discovered);
       await state.saveSkill(skill);
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() => _status = 'Installed “${skill.name}”.');
+      return true;
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() => _error = '$error');
+      return false;
     } finally {
       if (mounted) setState(() => _installing = false);
     }
@@ -556,11 +572,105 @@ class _RepositoryCard extends StatelessWidget {
   }
 }
 
-class _SkillPickerSheet extends StatelessWidget {
-  const _SkillPickerSheet({required this.repo, required this.skills});
+class _SkillPickerSheet extends StatefulWidget {
+  const _SkillPickerSheet({
+    required this.repo,
+    required this.skills,
+    required this.installed,
+    required this.onInstall,
+    required this.onPreview,
+  });
 
   final SkillRepository repo;
   final List<DiscoveredSkill> skills;
+  final Set<String> installed;
+  final Future<bool> Function(DiscoveredSkill) onInstall;
+  final Future<String> Function(DiscoveredSkill) onPreview;
+
+  @override
+  State<_SkillPickerSheet> createState() => _SkillPickerSheetState();
+}
+
+class _SkillPickerSheetState extends State<_SkillPickerSheet> {
+  final Set<String> _justInstalled = {};
+  String? _installing;
+
+  String _key(DiscoveredSkill skill) =>
+      '${skill.repository.fullName}|${skill.name}';
+
+  bool _isInstalled(DiscoveredSkill skill) =>
+      _justInstalled.contains(_key(skill)) ||
+      widget.installed.contains(_key(skill));
+
+  Future<void> _installSkill(DiscoveredSkill skill) async {
+    if (_installing != null) return;
+    setState(() => _installing = skill.path);
+    final ok = await widget.onInstall(skill);
+    if (!mounted) return;
+    setState(() {
+      _installing = null;
+      if (ok) _justInstalled.add(_key(skill));
+    });
+  }
+
+  Future<void> _showPreview(DiscoveredSkill skill) async {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: Text(skill.name),
+        content: SizedBox(
+          width: 460,
+          child: FutureBuilder<String>(
+            future: widget.onPreview(skill),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState != ConnectionState.done) {
+                return const SizedBox(
+                  height: 80,
+                  child: Center(child: CircularProgressIndicator()),
+                );
+              }
+              if (snapshot.hasError) {
+                return Text('${snapshot.error}', style: Txt.bodySoft);
+              }
+              return SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${skill.repository.fullName} · ${skill.path}',
+                      style: Txt.meta.copyWith(fontSize: 9.5),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      snapshot.data ?? '',
+                      style: Txt.body.copyWith(height: 1.5),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+          TextButton(
+            onPressed: _isInstalled(skill)
+                ? null
+                : () {
+                    Navigator.of(dialogContext).pop();
+                    _installSkill(skill);
+                  },
+            child: Text(_isInstalled(skill) ? 'Installed' : 'Install'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -577,10 +687,10 @@ class _SkillPickerSheet extends StatelessWidget {
             child: Row(
               children: [
                 Expanded(
-                  child: Text(repo.fullName,
+                  child: Text(widget.repo.fullName,
                       maxLines: 1, overflow: TextOverflow.ellipsis),
                 ),
-                Text('${skills.length} skills', style: Txt.meta),
+                Text('${widget.skills.length} skills', style: Txt.meta),
               ],
             ),
           ),
@@ -588,13 +698,13 @@ class _SkillPickerSheet extends StatelessWidget {
             child: ListView.builder(
               controller: scrollController,
               padding: const EdgeInsets.fromLTRB(Sp.x3, 0, Sp.x3, Sp.x6),
-              itemCount: skills.length,
+              itemCount: widget.skills.length,
               itemBuilder: (context, index) {
-                final skill = skills[index];
+                final skill = widget.skills[index];
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: GestureDetector(
-                    onTap: () => Navigator.of(context).pop(skill),
+                    onTap: () => _showPreview(skill),
                     behavior: HitTestBehavior.opaque,
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
@@ -629,8 +739,21 @@ class _SkillPickerSheet extends StatelessWidget {
                               ],
                             ),
                           ),
-                          Icon(Icons.download_rounded,
-                              size: 18, color: Pal.textDim),
+                          if (_isInstalled(skill))
+                            Icon(Icons.check_circle_rounded,
+                                size: 18, color: Pal.mint)
+                          else if (_installing == skill.path)
+                            const SizedBox(
+                              width: 17,
+                              height: 17,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          else
+                            GestureDetector(
+                              onTap: () => _installSkill(skill),
+                              child: Icon(Icons.download_rounded,
+                                  size: 18, color: Pal.ember),
+                            ),
                         ],
                       ),
                     ),

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/integrations.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
@@ -274,6 +275,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   ProjectKind _kind = ProjectKind.web;
   bool _creating = false;
   bool _loadingBranches = false;
+  bool _loadingRepos = false;
   String? _error;
   String? _branchError;
   List<String> _branches = const [];
@@ -321,6 +323,44 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       if (mounted) setState(() => _branchError = '$error');
     } finally {
       if (mounted) setState(() => _loadingBranches = false);
+    }
+  }
+
+  Future<void> _chooseRepo() async {
+    if (_loadingRepos) return;
+    final state = AppScope.of(context);
+    final account = state.activeGithub;
+    if (account == null) {
+      setState(() => _error = 'Connect GitHub in Integrations first.');
+      return;
+    }
+    setState(() {
+      _loadingRepos = true;
+      _error = null;
+    });
+    try {
+      final repos = await state.githubRepositories(account);
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<GitHubRepo>(
+        context: context,
+        useSafeArea: true,
+        isScrollControlled: true,
+        backgroundColor: Pal.surface,
+        builder: (_) => _RepositoryPickerSheet(repos: repos),
+      );
+      if (chosen == null || !mounted) return;
+      setState(() {
+        _repo.text = 'https://github.com/${chosen.owner}/${chosen.name}';
+        _branch.text = chosen.defaultBranch;
+        _branches = const [];
+      });
+      await _loadBranches();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Could not load repositories: $error');
+      }
+    } finally {
+      if (mounted) setState(() => _loadingRepos = false);
     }
   }
 
@@ -437,6 +477,14 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                         ),
                 ),
               ),
+              Align(
+                alignment: Alignment.centerRight,
+                child: GhostButton(
+                  label: _loadingRepos ? 'Loading…' : 'Choose repository',
+                  icon: Icons.folder_open_outlined,
+                  onTap: _loadingRepos ? null : _chooseRepo,
+                ),
+              ),
               const SizedBox(height: 10),
               GestureDetector(
                 onTap: _chooseBranch,
@@ -517,6 +565,70 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                   _clone ? Icons.download_rounded : Icons.arrow_forward_rounded,
               loading: _creating,
               onTap: _create,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RepositoryPickerSheet extends StatelessWidget {
+  const _RepositoryPickerSheet({required this.repos});
+
+  final List<GitHubRepo> repos;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.7,
+        child: Column(
+          children: [
+            const SheetHandle(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x2),
+              child: Row(
+                children: [
+                  Text('Your repositories',
+                      style: Txt.headline.copyWith(fontSize: 21)),
+                  const Spacer(),
+                  Text('${repos.length}', style: Txt.meta),
+                ],
+              ),
+            ),
+            const Hairline(),
+            Expanded(
+              child: repos.isEmpty
+                  ? const EmptyState(
+                      icon: Icons.folder_off_outlined,
+                      title: 'No repositories',
+                      body: 'This GitHub account has no repositories to clone.',
+                    )
+                  : ListView.builder(
+                      itemCount: repos.length,
+                      itemBuilder: (context, index) {
+                        final repo = repos[index];
+                        return ListTile(
+                          dense: true,
+                          leading: Icon(
+                            repo.private
+                                ? Icons.lock_outline_rounded
+                                : Icons.folder_open_outlined,
+                            size: 17,
+                            color: Pal.textDim,
+                          ),
+                          title: Text(
+                            '${repo.owner}/${repo.name}',
+                            style: Txt.code.copyWith(fontSize: 12),
+                          ),
+                          subtitle: Text(repo.defaultBranch, style: Txt.meta),
+                          trailing: Icon(Icons.chevron_right_rounded,
+                              size: 17, color: Pal.textDim),
+                          onTap: () => Navigator.of(context).pop(repo),
+                        );
+                      },
+                    ),
             ),
           ],
         ),
