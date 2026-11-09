@@ -320,6 +320,37 @@ const _compoundTools = <AiToolSpec>[
     },
   ),
   AiToolSpec(
+    name: 'write_files',
+    description:
+        'Create or overwrite two or more files in one call. Use this whenever a '
+        'request needs changes to multiple independent files; do not split the '
+        'same request into separate write_file calls.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'files': {
+          'type': 'array',
+          'description': '2–8 files, each with a path and complete content.',
+          'items': {
+            'type': 'object',
+            'properties': {
+              'path': {
+                'type': 'string',
+                'description': 'File path relative to the project root.',
+              },
+              'content': {
+                'type': 'string',
+                'description': 'Complete file contents.',
+              },
+            },
+            'required': ['path', 'content'],
+          },
+        },
+      },
+      'required': ['files'],
+    },
+  ),
+  AiToolSpec(
     name: 'apply_patch',
     description:
         'Apply a compact *** Begin Patch block or a unified diff to one or more '
@@ -746,6 +777,7 @@ class Agent {
           if (!mutated &&
               const {
                 'write_file',
+                'write_files',
                 'edit_file',
                 'apply_patch',
                 'download_file',
@@ -756,7 +788,7 @@ class Agent {
           }
           if (flags.loopGuards &&
               result.failed &&
-              const {'edit_file', 'write_file', 'apply_patch'}
+              const {'edit_file', 'write_file', 'write_files', 'apply_patch'}
                   .contains(call.name)) {
             final key = '${call.name}:${jsonEncode(call.arguments)}';
             final count = (_editFailureCounts[key] ?? 0) + 1;
@@ -856,6 +888,10 @@ How to work:
 - The project tree below is current. Skip list_files for simple edits. Read only
   the file you must change, then write it.
 ${parallelTools ? '- Batch independent reads and searches in one response so their results land together. Never batch a write with a read that depends on it.' : ''}
+- For more than one file, use the compound tools deliberately: one read_files '
+  call for all reads, and one write_files call for all complete-file writes in '
+  the same request. Do not issue separate read_file or write_file calls for '
+  independent files. Use apply_patch only for partial edits across files.
 - read_file is paged. When it says "Next offset", use that offset to continue.
   Never repeat a range you already received; if the needed code is in context,
   act on it.
@@ -1004,6 +1040,8 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
             'Wrote $bytes bytes to $path${await _verificationSuffix()}',
             diff: diff.isEmpty ? null : diff,
           );
+        case 'write_files':
+          return await _writeFiles(call);
         case 'edit_file':
           return await _editFile(call);
         case 'install_skill':
@@ -1069,6 +1107,7 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
 
   static const _checkpointGuardedTools = {
     'write_file',
+    'write_files',
     'edit_file',
     'apply_patch',
     'download_file',
@@ -1173,6 +1212,42 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
       output.writeln('Stopped after the first failing command.');
     }
     return _ToolOutcome(output.toString().trim());
+  }
+
+  Future<_ToolOutcome> _writeFiles(AiToolCall call) async {
+    final raw = call.arguments['files'];
+    if (raw is! List) {
+      return const _ToolOutcome('Error: files must be an array.');
+    }
+    if (raw.length < 2) {
+      return const _ToolOutcome(
+        'Error: write_files needs at least two files. Use write_file for one.',
+      );
+    }
+    if (raw.length > 8) {
+      return const _ToolOutcome(
+          'Error: at most 8 files can be written at once.');
+    }
+    final written = <String>[];
+    var total = 0;
+    for (final item in raw) {
+      if (item is! Map) {
+        return const _ToolOutcome('Error: every file must be an object.');
+      }
+      final path = (item['path'] as String? ?? '').trim();
+      final content = item['content'] as String? ?? '';
+      if (path.isEmpty) {
+        return const _ToolOutcome('Error: every file needs a path.');
+      }
+      final bytes = await fs.write(path, content);
+      total += bytes;
+      written.add(path);
+    }
+    return _ToolOutcome(
+      'Wrote $total bytes to ${written.length} files in one call:\n'
+      '${written.map((path) => '- $path').join('\n')}'
+      '${await _verificationSuffix()}',
+    );
   }
 
   Future<_ToolOutcome> _readFiles(AiToolCall call) async {
@@ -1578,6 +1653,10 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
       case 'edit_file':
       case 'read_file':
         return '${args['path'] ?? '?'}';
+      case 'write_files':
+        final files = args['files'];
+        if (files is List) return '${files.length} files';
+        return 'files';
       case 'run_command':
         return '${args['command'] ?? '?'}';
       case 'install_skill':

@@ -2,20 +2,26 @@ import 'package:flutter/material.dart';
 
 import 'theme/tokens.dart';
 
-enum ProjectKind { web, flutter, python, blank }
+enum ProjectKind { web, flutter, python, node, php, go, blank }
 
 extension ProjectKindX on ProjectKind {
   String get label => switch (this) {
         ProjectKind.web => 'Web',
         ProjectKind.flutter => 'Flutter',
         ProjectKind.python => 'Python',
+        ProjectKind.node => 'Node.js',
+        ProjectKind.php => 'PHP',
+        ProjectKind.go => 'Go',
         ProjectKind.blank => 'Empty',
       };
 
   String get blurb => switch (this) {
         ProjectKind.web => 'index.html, style.css, app.js — previews live',
         ProjectKind.flutter => 'Dart sources, edited on device',
-        ProjectKind.python => 'main.py — run from the shell',
+        ProjectKind.python => 'main.py — Python starter, run from the shell',
+        ProjectKind.node => 'server.js — Node.js starter, run from the shell',
+        ProjectKind.php => 'index.php — PHP starter, run from the shell',
+        ProjectKind.go => 'main.go — Go starter, run from the shell',
         ProjectKind.blank => 'Nothing but a folder',
       };
 
@@ -23,6 +29,9 @@ extension ProjectKindX on ProjectKind {
         ProjectKind.web => Icons.language_rounded,
         ProjectKind.flutter => Icons.flutter_dash,
         ProjectKind.python => Icons.code_rounded,
+        ProjectKind.node => Icons.hexagon_outlined,
+        ProjectKind.php => Icons.web_rounded,
+        ProjectKind.go => Icons.bolt_rounded,
         ProjectKind.blank => Icons.folder_open_rounded,
       };
 
@@ -30,6 +39,9 @@ extension ProjectKindX on ProjectKind {
         ProjectKind.web => Pal.mint,
         ProjectKind.flutter => Pal.sky,
         ProjectKind.python => Pal.amber,
+        ProjectKind.node => Pal.mint,
+        ProjectKind.php => Pal.ember,
+        ProjectKind.go => Pal.sky,
         ProjectKind.blank => Pal.textMuted,
       };
 
@@ -51,6 +63,27 @@ extension ProjectKindX on ProjectKind {
             MapEntry('main.py',
                 'def main():\n    print("hello from Praxis")\n\n\nif __name__ == "__main__":\n    main()\n'),
             MapEntry('README.md', '# New Python project\n'),
+          ],
+        ProjectKind.node => const [
+            MapEntry('package.json',
+                '{\n  "name": "praxis-node-app",\n  "private": true,\n  "scripts": { "start": "node server.js" }\n}\n'),
+            MapEntry('server.js',
+                'const http = require("http");\n\nconst server = http.createServer((req, res) => {\n  res.writeHead(200, { "Content-Type": "text/plain" });\n  res.end("hello from Praxis\\n");\n});\n\nserver.listen(3000, () => console.log("http://localhost:3000"));\n'),
+            MapEntry('README.md',
+                '# New Node.js project\n\nRun `npm start` from the shell.\n'),
+          ],
+        ProjectKind.php => const [
+            MapEntry('index.php',
+                '<?php\nheader("Content-Type: text/plain");\necho "hello from Praxis\\n";\n'),
+            MapEntry('README.md',
+                '# New PHP project\n\nRun `php index.php` from the shell.\n'),
+          ],
+        ProjectKind.go => const [
+            MapEntry('go.mod', 'module praxisapp\n\ngo 1.22\n'),
+            MapEntry('main.go',
+                'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hello from Praxis")\n}\n'),
+            MapEntry('README.md',
+                '# New Go project\n\nRun `go run main.go` from the shell.\n'),
           ],
         ProjectKind.blank => const [],
       };
@@ -493,6 +526,7 @@ class IntegrationAccount {
     required this.label,
     required this.username,
     required this.token,
+    this.accountId = '',
     this.createdAt,
   });
 
@@ -501,6 +535,10 @@ class IntegrationAccount {
   final String label;
   final String username;
   final String token;
+
+  /// Cloudflare account identifier. Pages deployments must target the same
+  /// account that owns the API token.
+  final String accountId;
   final DateTime? createdAt;
 
   String get displayName => label.trim().isNotEmpty
@@ -509,14 +547,19 @@ class IntegrationAccount {
           ? username
           : kind.label;
 
-  IntegrationAccount copyWith(
-          {String? label, String? username, String? token}) =>
+  IntegrationAccount copyWith({
+    String? label,
+    String? username,
+    String? token,
+    String? accountId,
+  }) =>
       IntegrationAccount(
         id: id,
         kind: kind,
         label: label ?? this.label,
         username: username ?? this.username,
         token: token ?? this.token,
+        accountId: accountId ?? this.accountId,
         createdAt: createdAt,
       );
 
@@ -526,6 +569,7 @@ class IntegrationAccount {
         'label': label,
         'username': username,
         'token': token,
+        'accountId': accountId,
         'createdAt': createdAt?.toIso8601String(),
       };
 
@@ -540,6 +584,7 @@ class IntegrationAccount {
         label: json['label'] as String? ?? '',
         username: json['username'] as String? ?? '',
         token: json['token'] as String? ?? '',
+        accountId: json['accountId'] as String? ?? '',
         createdAt: DateTime.tryParse(json['createdAt'] as String? ?? ''),
       );
 }

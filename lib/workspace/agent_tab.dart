@@ -211,10 +211,13 @@ class _AgentTabState extends State<AgentTab> {
             children: [
               Positioned.fill(
                 child: thread.isEmpty && !showLive
-                    ? _EmptyAgent(onPrompt: (value) {
-                        _composer.text = value;
-                        _send();
-                      })
+                    ? _EmptyAgent(
+                        kind: widget.project.kind,
+                        onPrompt: (value) {
+                          _composer.text = value;
+                          _send();
+                        },
+                      )
                     : SelectionArea(
                         child: ListView.builder(
                           controller: _scroll,
@@ -279,17 +282,50 @@ class _AgentTabState extends State<AgentTab> {
 }
 
 class _EmptyAgent extends StatelessWidget {
-  const _EmptyAgent({required this.onPrompt});
+  const _EmptyAgent({required this.kind, required this.onPrompt});
 
+  final ProjectKind kind;
   final ValueChanged<String> onPrompt;
 
   @override
   Widget build(BuildContext context) {
-    const suggestions = [
-      'Make the landing page look sharper',
-      'Add a dark mode toggle to app.js',
-      'List the files and explain them',
-    ];
+    final suggestions = switch (kind) {
+      ProjectKind.web => const [
+          'Add a responsive navigation bar',
+          'Add a dark mode toggle to app.js',
+          'Improve the landing page copy and layout',
+        ],
+      ProjectKind.flutter => const [
+          'Add a settings screen with a theme switch',
+          'Fix any layout overflow on a narrow screen',
+          'Add a widget test for the main screen',
+        ],
+      ProjectKind.python => const [
+          'Add command-line arguments to main.py',
+          'Write tests for the Python functions',
+          'Add a JSON configuration loader',
+        ],
+      ProjectKind.node => const [
+          'Add a JSON API route to server.js',
+          'Add request logging and graceful shutdown',
+          'Write a test for the Node.js server',
+        ],
+      ProjectKind.php => const [
+          'Add a form handler to index.php',
+          'Add a JSON API endpoint',
+          'Add input validation and error handling',
+        ],
+      ProjectKind.go => const [
+          'Add an HTTP health endpoint',
+          'Add command-line flags to main.go',
+          'Write a Go test for the handler',
+        ],
+      ProjectKind.blank => const [
+          'Create a README for this project',
+          'Scaffold a small web app',
+          'List the files and explain them',
+        ],
+    };
     return ListView(
       padding: const EdgeInsets.fromLTRB(Sp.page, Sp.x6, Sp.page, Sp.x4),
       children: [

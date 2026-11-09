@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/integrations.dart';
+import '../core/linux_environment.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
@@ -279,6 +280,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   String? _error;
   String? _branchError;
   List<String> _branches = const [];
+  IntegrationAccount? _cloneAccount;
 
   @override
   void initState() {
@@ -305,9 +307,10 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       _branchError = null;
     });
     try {
+      final account = _cloneAccount ?? state.activeGithub;
       final branches = await state.cloneBranches(
         _repo.text,
-        token: state.activeGithub?.token ?? '',
+        token: account?.token ?? '',
       );
       if (!mounted) return;
       setState(() {
@@ -329,8 +332,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   Future<void> _chooseRepo() async {
     if (_loadingRepos) return;
     final state = AppScope.of(context);
-    final account = state.activeGithub;
-    if (account == null) {
+    final accounts = state.integrations.ofKind(IntegrationKind.github);
+    if (accounts.isEmpty) {
       setState(() => _error = 'Connect GitHub in Integrations first.');
       return;
     }
@@ -339,19 +342,32 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       _error = null;
     });
     try {
-      final repos = await state.githubRepositories(account);
+      final groups = await Future.wait(accounts.map((account) async {
+        try {
+          return _RepositoryGroup(
+            account: account,
+            repos: await state.githubRepositories(account),
+          );
+        } catch (error) {
+          return _RepositoryGroup(account: account, error: '$error');
+        }
+      }));
       if (!mounted) return;
-      final chosen = await showModalBottomSheet<GitHubRepo>(
+      final chosen = await showModalBottomSheet<_RepositoryChoice>(
         context: context,
         useSafeArea: true,
         isScrollControlled: true,
         backgroundColor: Pal.surface,
-        builder: (_) => _RepositoryPickerSheet(repos: repos),
+        builder: (_) => _RepositoryPickerSheet(groups: groups),
       );
       if (chosen == null || !mounted) return;
+      await state.activateAccount(chosen.account);
+      if (!mounted) return;
       setState(() {
-        _repo.text = 'https://github.com/${chosen.owner}/${chosen.name}';
-        _branch.text = chosen.defaultBranch;
+        _cloneAccount = chosen.account;
+        _repo.text =
+            'https://github.com/${chosen.repo.owner}/${chosen.repo.name}';
+        _branch.text = chosen.repo.defaultBranch;
         _branches = const [];
       });
       await _loadBranches();
@@ -391,6 +407,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     });
     final state = AppScope.of(context);
     final navigator = Navigator.of(context);
+    final cloneAccount = _cloneAccount ?? state.activeGithub;
     try {
       final project = _clone
           ? await state.cloneProject(
@@ -398,7 +415,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
               repoUrl: _repo.text,
               branch:
                   _branch.text.trim().isEmpty ? 'main' : _branch.text.trim(),
-              token: state.activeGithub?.token ?? '',
+              token: cloneAccount?.token ?? '',
             )
           : await state.createProject(_name.text, _kind);
       if (!mounted) return;
@@ -414,6 +431,19 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final githubAccounts = state.integrations.ofKind(IntegrationKind.github);
+    final cloneAccount = _cloneAccount ?? state.activeGithub;
+    final installedRuntimes = [
+      for (final runtime in LinuxRuntime.values)
+        if (state.linux?.runtimes[runtime]?.installed ?? false) runtime,
+    ];
+    final runtimeKinds = <ProjectKind>[
+      if (installedRuntimes.contains(LinuxRuntime.node)) ProjectKind.node,
+      if (installedRuntimes.contains(LinuxRuntime.python)) ProjectKind.python,
+      if (installedRuntimes.contains(LinuxRuntime.php)) ProjectKind.php,
+      if (installedRuntimes.contains(LinuxRuntime.go)) ProjectKind.go,
+    ];
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: SingleChildScrollView(
@@ -444,8 +474,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
             const SizedBox(height: 6),
             Text(
               _clone
-                  ? 'The selected GitHub branch is downloaded as a real project. '
-                      'It uses your active GitHub account for private repositories.'
+                  ? 'Pick a private or public repository from any connected '
+                      'GitHub account, then clone the branch as a real project.'
                   : 'A folder is created under the app’s documents directory. '
                       'Everything works offline except model calls.',
               style: Txt.bodySoft,
@@ -459,6 +489,11 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                 cursorColor: Pal.ember,
                 autocorrect: false,
                 enableSuggestions: false,
+                onChanged: (_) {
+                  if (_cloneAccount != null) {
+                    setState(() => _cloneAccount = null);
+                  }
+                },
                 onSubmitted: (_) => _loadBranches(),
                 decoration: appField(
                   'owner/repo or github.com URL',
@@ -480,9 +515,28 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
               Align(
                 alignment: Alignment.centerRight,
                 child: GhostButton(
-                  label: _loadingRepos ? 'Loading…' : 'Choose repository',
+                  label: _loadingRepos
+                      ? 'Loading repositories…'
+                      : 'Select from GitHub',
                   icon: Icons.folder_open_outlined,
                   onTap: _loadingRepos ? null : _chooseRepo,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                githubAccounts.isEmpty
+                    ? 'Connect a GitHub account in Integrations to browse '
+                        'private repositories.'
+                    : cloneAccount == null
+                        ? '${githubAccounts.length} GitHub account'
+                            '${githubAccounts.length == 1 ? '' : 's'} connected. '
+                            'Private repositories are included.'
+                        : 'Using @${cloneAccount.displayName}. Private and public '
+                            'repositories are included.',
+                style: Txt.meta.copyWith(
+                  fontSize: 9.5,
+                  color: githubAccounts.isEmpty ? Pal.amber : Pal.textDim,
+                  height: 1.4,
                 ),
               ),
               const SizedBox(height: 10),
@@ -543,7 +597,11 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final kind in ProjectKind.values)
+                  for (final kind in const [
+                    ProjectKind.web,
+                    ProjectKind.flutter,
+                    ProjectKind.blank,
+                  ])
                     _KindChip(
                       kind: kind,
                       selected: kind == _kind,
@@ -551,6 +609,41 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                     ),
                 ],
               ),
+              if (runtimeKinds.isNotEmpty) ...[
+                const SizedBox(height: Sp.x3),
+                Text('INSTALLED RUNTIME TEMPLATES',
+                    style: Txt.overline.copyWith(fontSize: 8.5)),
+                const SizedBox(height: 7),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final kind in runtimeKinds)
+                      _KindChip(
+                        kind: kind,
+                        selected: kind == _kind,
+                        onTap: () => setState(() => _kind = kind),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 7),
+                for (final runtime in installedRuntimes)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      '${runtime.label} templates: '
+                      '${runtime.templates.join(' · ')}',
+                      style: Txt.meta.copyWith(fontSize: 8.5, height: 1.5),
+                    ),
+                  ),
+              ] else ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Install a runtime from the Linux environment to add its '
+                  'starter template here.',
+                  style: Txt.meta.copyWith(fontSize: 9),
+                ),
+              ],
               const SizedBox(height: 10),
               Text(_kind.blurb, style: Txt.meta),
             ],
@@ -573,16 +666,36 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   }
 }
 
-class _RepositoryPickerSheet extends StatelessWidget {
-  const _RepositoryPickerSheet({required this.repos});
+class _RepositoryGroup {
+  const _RepositoryGroup({
+    required this.account,
+    this.repos = const [],
+    this.error = '',
+  });
 
+  final IntegrationAccount account;
   final List<GitHubRepo> repos;
+  final String error;
+}
+
+class _RepositoryChoice {
+  const _RepositoryChoice(this.account, this.repo);
+
+  final IntegrationAccount account;
+  final GitHubRepo repo;
+}
+
+class _RepositoryPickerSheet extends StatelessWidget {
+  const _RepositoryPickerSheet({required this.groups});
+
+  final List<_RepositoryGroup> groups;
 
   @override
   Widget build(BuildContext context) {
+    final total = groups.fold<int>(0, (sum, group) => sum + group.repos.length);
     return SafeArea(
       child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.7,
+        height: MediaQuery.sizeOf(context).height * 0.78,
         child: Column(
           children: [
             const SheetHandle(),
@@ -590,45 +703,121 @@ class _RepositoryPickerSheet extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x2),
               child: Row(
                 children: [
-                  Text('Your repositories',
-                      style: Txt.headline.copyWith(fontSize: 21)),
-                  const Spacer(),
-                  Text('${repos.length}', style: Txt.meta),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Your repositories',
+                            style: Txt.headline.copyWith(fontSize: 21)),
+                        const SizedBox(height: 2),
+                        Text(
+                          '$total from ${groups.length} connected GitHub '
+                          'account${groups.length == 1 ? '' : 's'}',
+                          style: Txt.meta,
+                        ),
+                      ],
+                    ),
+                  ),
+                  StatusPill('Private included', color: Pal.mint),
                 ],
               ),
             ),
             const Hairline(),
             Expanded(
-              child: repos.isEmpty
-                  ? const EmptyState(
+              child: ListView(
+                padding: const EdgeInsets.only(bottom: Sp.x4),
+                children: [
+                  if (total == 0)
+                    const EmptyState(
                       icon: Icons.folder_off_outlined,
                       title: 'No repositories',
-                      body: 'This GitHub account has no repositories to clone.',
-                    )
-                  : ListView.builder(
-                      itemCount: repos.length,
-                      itemBuilder: (context, index) {
-                        final repo = repos[index];
-                        return ListTile(
+                      body: 'These GitHub accounts have no repositories to '
+                          'clone. Check the account token in Integrations.',
+                    ),
+                  for (final group in groups) ...[
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Sp.page,
+                        Sp.x3,
+                        Sp.page,
+                        3,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.account_circle_outlined,
+                              size: 16, color: Pal.textDim),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              '@${group.account.displayName}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.label.copyWith(
+                                color: Pal.text,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          Text('${group.repos.length}', style: Txt.meta),
+                        ],
+                      ),
+                    ),
+                    if (group.error.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          Sp.page,
+                          4,
+                          Sp.page,
+                          4,
+                        ),
+                        child: Text(
+                          group.error,
+                          style:
+                              Txt.meta.copyWith(color: Pal.rose, height: 1.4),
+                        ),
+                      )
+                    else if (group.repos.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(
+                          Sp.page,
+                          4,
+                          Sp.page,
+                          4,
+                        ),
+                        child: Text(
+                          'No repositories in this account.',
+                          style: Txt.meta,
+                        ),
+                      )
+                    else
+                      for (final repo in group.repos)
+                        ListTile(
                           dense: true,
                           leading: Icon(
                             repo.private
                                 ? Icons.lock_outline_rounded
                                 : Icons.folder_open_outlined,
                             size: 17,
-                            color: Pal.textDim,
+                            color: repo.private ? Pal.amber : Pal.textDim,
                           ),
                           title: Text(
                             '${repo.owner}/${repo.name}',
                             style: Txt.code.copyWith(fontSize: 12),
                           ),
-                          subtitle: Text(repo.defaultBranch, style: Txt.meta),
+                          subtitle: Text(
+                            '${repo.private ? 'Private' : 'Public'} · '
+                            '${repo.defaultBranch}',
+                            style: Txt.meta,
+                          ),
                           trailing: Icon(Icons.chevron_right_rounded,
                               size: 17, color: Pal.textDim),
-                          onTap: () => Navigator.of(context).pop(repo),
-                        );
-                      },
-                    ),
+                          onTap: () => Navigator.of(context).pop(
+                            _RepositoryChoice(group.account, repo),
+                          ),
+                        ),
+                  ],
+                ],
+              ),
             ),
           ],
         ),

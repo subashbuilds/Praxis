@@ -137,6 +137,7 @@ class LinuxProcess {
     required this.user,
     this.cpu = '',
     this.memory = '',
+    this.rssKb = 0,
   });
 
   final String pid;
@@ -144,24 +145,33 @@ class LinuxProcess {
   final String user;
   final String cpu;
   final String memory;
+  final int rssKb;
 }
 
 class LinuxSnapshot {
   const LinuxSnapshot({
     this.diskBytes = 0,
     this.cacheBytes = 0,
+    this.projectBytes = 0,
     this.ramUsedBytes,
     this.ramTotalBytes,
     this.load1,
+    this.cpuPercent,
     this.processes = const [],
     this.measuredAt,
   });
 
   final int diskBytes;
   final int cacheBytes;
+  final int projectBytes;
+
+  /// Memory currently used by guest processes, not the phone's total RAM.
   final int? ramUsedBytes;
   final int? ramTotalBytes;
   final double? load1;
+
+  /// Sum of CPU percentages of guest processes only.
+  final double? cpuPercent;
   final List<LinuxProcess> processes;
   final DateTime? measuredAt;
 }
@@ -695,30 +705,26 @@ class LinuxEnvironment extends ChangeNotifier {
     try {
       final project = _lastProjectRoot ?? base.path;
       final ps = await run(
-        'ps -o pid,user,pcpu,pmem,comm 2>/dev/null || ps aux 2>/dev/null || ps',
+        'ps -o pid,user,pcpu,rss,comm 2>/dev/null || ps aux 2>/dev/null || ps',
         projectRoot: project,
         timeout: const Duration(seconds: 12),
       );
-      final free = await run(
-        'free -m 2>/dev/null || cat /proc/meminfo',
-        projectRoot: project,
-        timeout: const Duration(seconds: 8),
-      );
-      final load = await run(
-        'cat /proc/loadavg 2>/dev/null',
-        projectRoot: project,
-        timeout: const Duration(seconds: 5),
-      );
       final processes = _parseProcesses(ps.output);
-      final ram = _parseMemory(free.output);
-      final load1 =
-          double.tryParse(load.output.trim().split(RegExp(r'\s+')).first);
+      final ramBytes = processes.isEmpty
+          ? null
+          : processes.fold<int>(0, (sum, item) => sum + item.rssKb) * 1024;
+      final cpu = processes.isEmpty
+          ? null
+          : processes.fold<double>(
+              0,
+              (sum, item) => sum + (double.tryParse(item.cpu) ?? 0),
+            );
       snapshot = LinuxSnapshot(
         diskBytes: await _directorySize(Directory(rootfsPath)),
         cacheBytes: await _cacheSize(),
-        ramUsedBytes: ram?.$1,
-        ramTotalBytes: ram?.$2,
-        load1: load1,
+        projectBytes: await _directorySize(Directory(project)),
+        ramUsedBytes: ramBytes,
+        cpuPercent: cpu,
         processes: processes,
         measuredAt: DateTime.now(),
       );
@@ -731,50 +737,58 @@ class LinuxEnvironment extends ChangeNotifier {
   }
 
   List<LinuxProcess> _parseProcesses(String output) {
-    final lines = output.split('\n').where((line) => line.trim().isNotEmpty);
+    final lines = output
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
     final result = <LinuxProcess>[];
+    var pidIndex = 0;
+    var userIndex = 1;
+    var cpuIndex = 2;
+    var rssIndex = 3;
+    var nameIndex = 4;
+    var sawHeader = false;
     for (final line in lines) {
-      final columns = line.trim().split(RegExp(r'\s+'));
-      if (columns.isEmpty || int.tryParse(columns.first) == null) continue;
-      if (columns.length < 3) continue;
-      final pid = columns[0];
-      final user = columns[1];
-      final cpu = columns.length > 4 && columns[2].contains(RegExp(r'[0-9]'))
-          ? columns[2]
-          : '';
-      final memory = columns.length > 4 && columns[3].contains(RegExp(r'[0-9]'))
-          ? columns[3]
-          : '';
-      final name =
-          columns.sublist(columns.length > 4 ? 4 : 2).join(' ').split('/').last;
+      final columns = line.split(RegExp(r'\s+'));
+      final lower = columns.map((value) => value.toLowerCase()).toList();
+      if (!sawHeader && lower.contains('pid')) {
+        sawHeader = true;
+        pidIndex = lower.indexOf('pid');
+        userIndex = lower.indexOf('user');
+        cpuIndex = lower.indexOf('%cpu');
+        rssIndex = lower.indexOf('rss');
+        nameIndex = lower.indexOf('comm');
+        if (userIndex < 0) userIndex = lower.indexOf('user');
+        if (cpuIndex < 0) cpuIndex = lower.indexOf('pcpu');
+        if (rssIndex < 0) rssIndex = lower.indexOf('rss');
+        if (nameIndex < 0) nameIndex = lower.indexOf('command');
+        continue;
+      }
+      if (columns.length <= pidIndex ||
+          int.tryParse(columns[pidIndex]) == null) {
+        continue;
+      }
+      String at(int index) =>
+          index >= 0 && index < columns.length ? columns[index] : '';
+      final pid = at(pidIndex);
+      final user = at(userIndex);
+      final cpu = at(cpuIndex);
+      final rss = int.tryParse(at(rssIndex)) ?? 0;
+      final start = nameIndex >= 0 ? nameIndex : columns.length - 1;
+      final rawName = columns.sublist(start.clamp(0, columns.length)).join(' ');
+      final name = rawName.split('/').last.trim();
       if (name.isEmpty) continue;
       result.add(LinuxProcess(
         pid: pid,
-        user: user,
-        cpu: cpu,
-        memory: memory,
+        user: user.isEmpty ? 'root' : user,
+        cpu: cpu.isEmpty ? '0.0%' : '$cpu%',
+        memory: humanBytes(rss * 1024),
+        rssKb: rss,
         name: name.length > 28 ? name.substring(0, 28) : name,
       ));
-      if (result.length >= 12) break;
     }
     return result;
-  }
-
-  (int, int)? _parseMemory(String output) {
-    final line = output
-        .split('\n')
-        .where((line) => line.trimLeft().startsWith('Mem:'))
-        .firstOrNull;
-    if (line == null) return null;
-    final numbers = RegExp(r'\d+')
-        .allMatches(line)
-        .map((match) => int.tryParse(match.group(0) ?? ''))
-        .whereType<int>()
-        .toList();
-    if (numbers.length < 2) return null;
-    final total = numbers[0];
-    final used = numbers.length >= 6 ? numbers[0] - numbers[5] : numbers[1];
-    return (math.max(0, used) * 1024 * 1024, total * 1024 * 1024);
   }
 
   Future<int> _cacheSize() async {

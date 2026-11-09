@@ -755,10 +755,18 @@ class VercelClient {
 /// Cloudflare Pages Direct Upload. Assets are uploaded to the Pages asset
 /// store with a short-lived JWT, then a deployment manifest points at them.
 class CloudflarePagesClient {
-  CloudflarePagesClient(this.token, {http.Client? client})
-      : _client = client ?? http.Client();
+  CloudflarePagesClient(
+    this.token, {
+    this.accountId = '',
+    http.Client? client,
+  }) : _client = client ?? http.Client();
 
   final String token;
+
+  /// The account that owns the Pages projects. Cloudflare requires this
+  /// alongside the API token; when omitted, older accounts fall back to the
+  /// first account returned by the token.
+  final String accountId;
   final http.Client _client;
 
   Map<String, String> get _headers => {
@@ -768,6 +776,10 @@ class CloudflarePagesClient {
       };
 
   Future<(String, String)> _account() async {
+    final configured = accountId.trim();
+    if (configured.isNotEmpty) {
+      return (configured, 'Cloudflare');
+    }
     final response = await _client
         .get(Uri.parse('https://api.cloudflare.com/client/v4/accounts'),
             headers: _headers)

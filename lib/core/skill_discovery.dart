@@ -154,6 +154,19 @@ class SkillDiscovery {
     return found.take(80).toList();
   }
 
+  /// Stable identity for a discovered skill. This survives app restarts and
+  /// lets the picker keep its green tick without relying on a renamed title.
+  static String skillId(DiscoveredSkill discovered) {
+    final source = discovered.repository.fullName;
+    final key = '$source/${discovered.path}';
+    var hash = 0x811c9dc5;
+    for (final code in key.codeUnits) {
+      hash ^= code;
+      hash = (hash * 0x01000193) & 0xffffffff;
+    }
+    return 'gh-${source.replaceAll('/', '-')}-${hash.toRadixString(16)}';
+  }
+
   Future<Skill> fetchSkill(DiscoveredSkill discovered) async {
     final rawPath =
         '/${discovered.repository.owner}/${discovered.repository.name}/'
@@ -178,8 +191,7 @@ class SkillDiscovery {
     final source =
         '${discovered.repository.owner}/${discovered.repository.name}';
     return Skill(
-      id: 'gh-${source.replaceAll('/', '-')}-'
-          '${discovered.path.hashCode.abs()}',
+      id: skillId(discovered),
       name: name,
       instructions: instructions,
       source: source,

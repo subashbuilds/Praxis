@@ -87,6 +87,7 @@ class AppState extends ChangeNotifier {
   static const _kIntegrations = 'praxis.integrations';
   static const _kActiveProvider = 'praxis.activeProvider';
   static const _kWordWrap = 'praxis.wrap';
+  static const _kEditorFontSize = 'praxis.editorFontSize';
   static const _kAutoNextKey = 'praxis.autoNextKey';
   static const _kAutoNextProvider = 'praxis.autoNextProvider';
   static const _kDarkMode = 'praxis.darkMode';
@@ -115,6 +116,7 @@ class AppState extends ChangeNotifier {
   String activeProviderId = '';
   bool busy = false;
   bool wordWrap = false;
+  int editorFontSize = 13;
   bool autoNextKey = false;
   bool autoNextProvider = false;
   bool darkMode = true;
@@ -224,6 +226,8 @@ class AppState extends ChangeNotifier {
     await _loadCheckpoints();
     _loadDrafts();
     wordWrap = store.read(_kWordWrap) == 'true';
+    editorFontSize =
+        (int.tryParse(store.read(_kEditorFontSize) ?? '') ?? 13).clamp(8, 22);
     autoNextKey = store.read(_kAutoNextKey) == 'true';
     autoNextProvider = store.read(_kAutoNextProvider) == 'true';
     darkMode = store.read(_kDarkMode) != 'false';
@@ -365,6 +369,12 @@ class AppState extends ChangeNotifier {
         kind = ProjectKind.web;
       } else if (cloned.files.keys.any((path) => path.endsWith('.py'))) {
         kind = ProjectKind.python;
+      } else if (cloned.files.keys.any((path) => path.endsWith('.go'))) {
+        kind = ProjectKind.go;
+      } else if (cloned.files.keys.any((path) => path.endsWith('.php'))) {
+        kind = ProjectKind.php;
+      } else if (await fs.exists('package.json')) {
+        kind = ProjectKind.node;
       }
       final project = Project(
         id: id,
@@ -1617,8 +1627,10 @@ Continue the task. Do not repeat a write or destructive action that already comp
     required IntegrationKind kind,
     required String token,
     String label = '',
+    String accountId = '',
   }) async {
     final trimmed = token.trim();
+    final trimmedAccountId = accountId.trim();
     if (trimmed.isEmpty) {
       throw IntegrationException('Paste a token first.');
     }
@@ -1627,7 +1639,8 @@ Continue the task. Do not repeat a write or destructive action that already comp
         await GitHubClient(trimmed, client: httpClient).login(),
       IntegrationKind.vercel =>
         await VercelClient(trimmed, client: httpClient).login(),
-      IntegrationKind.cloudflare => await _verifyCloudflareToken(trimmed),
+      IntegrationKind.cloudflare =>
+        await _verifyCloudflareToken(trimmed, trimmedAccountId),
       IntegrationKind.supabase => await _verifySupabaseToken(trimmed),
       IntegrationKind.expo => 'Expo',
       IntegrationKind.tavily => 'Tavily',
@@ -1638,6 +1651,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
       label: label.trim(),
       username: username,
       token: trimmed,
+      accountId: kind == IntegrationKind.cloudflare ? trimmedAccountId : '',
       createdAt: DateTime.now(),
     );
     await saveIntegrations(integrations.addOrReplace(account));
@@ -1650,20 +1664,41 @@ Continue the task. Do not repeat a write or destructive action that already comp
   Future<void> activateAccount(IntegrationAccount account) =>
       saveIntegrations(integrations.activate(account));
 
-  Future<String> _verifyCloudflareToken(String token) async {
+  Future<String> _verifyCloudflareToken(String token, String accountId) async {
+    if (accountId.isEmpty) {
+      throw IntegrationException(
+          'Paste the Cloudflare Account ID for these Pages projects.');
+    }
     final response = await httpClient.get(
-      Uri.https('api.cloudflare.com', '/client/v4/user/tokens/verify'),
-      headers: {'Authorization': 'Bearer $token'},
+      Uri.https(
+        'api.cloudflare.com',
+        '/client/v4/accounts/$accountId/pages/projects',
+        {'per_page': '1'},
+      ),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      },
     ).timeout(const Duration(seconds: 25));
+    if (response.statusCode == 401 ||
+        response.statusCode == 403 ||
+        response.statusCode == 404) {
+      throw IntegrationException(
+          'Cloudflare rejected that Account ID or API token '
+          '(HTTP ${response.statusCode}). Check both and the Pages: Edit '
+          'permission.');
+    }
     if (response.statusCode != 200) {
       throw IntegrationException(
-          'Cloudflare rejected that token (HTTP ${response.statusCode}).');
+          'Cloudflare returned HTTP ${response.statusCode} while checking '
+          'the Pages project.');
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     if (body['success'] != true) {
-      throw IntegrationException('Cloudflare rejected that token.');
+      throw IntegrationException(
+          'Cloudflare rejected that Account ID or API token.');
     }
-    return 'Cloudflare';
+    return accountId;
   }
 
   Future<String> _verifySupabaseToken(String token) async {
@@ -2258,7 +2293,11 @@ Continue the task. Do not repeat a write or destructive action that already comp
     String branch = 'main',
   }) async {
     final files = await fsFor(project).textFiles();
-    return CloudflarePagesClient(account.token, client: httpClient).deploy(
+    return CloudflarePagesClient(
+      account.token,
+      accountId: account.accountId,
+      client: httpClient,
+    ).deploy(
       project: projectName,
       files: files,
       environment: environment,
@@ -2317,6 +2356,14 @@ Continue the task. Do not repeat a write or destructive action that already comp
   Future<void> setWordWrap(bool value) async {
     wordWrap = value;
     await store.write(_kWordWrap, value.toString());
+    notifyListeners();
+  }
+
+  Future<void> setEditorFontSize(int value) async {
+    final next = value.clamp(8, 22);
+    if (next == editorFontSize) return;
+    editorFontSize = next;
+    await store.write(_kEditorFontSize, '$next');
     notifyListeners();
   }
 

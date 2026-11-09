@@ -309,12 +309,14 @@ class CodeEditor extends StatefulWidget {
     required this.language,
     required this.onChanged,
     this.wrap = false,
+    this.fontSize = 12.5,
   });
 
   final CodeController controller;
   final CodeLanguage language;
   final ValueChanged<String> onChanged;
   final bool wrap;
+  final double fontSize;
 
   @override
   State<CodeEditor> createState() => _CodeEditorState();
@@ -326,13 +328,13 @@ class _CodeEditorState extends State<CodeEditor> {
   final _focus = FocusNode();
 
   static const _gutter = 46.0;
-  static const _fontSize = 12.5;
   static const _lineHeight = 1.5;
   static const _top = 14.0;
   static const _bottom = 40.0;
   static const _left = 14.0;
   static const _right = 16.0;
-  static double get _row => _fontSize * _lineHeight;
+  double get _fontSize => widget.fontSize;
+  double get _row => _fontSize * _lineHeight;
 
   List<double> _lineHeights = const [];
   double _viewportWidth = 0;
@@ -344,7 +346,7 @@ class _CodeEditorState extends State<CodeEditor> {
         letterSpacing: 0,
       );
 
-  StrutStyle get _strut => const StrutStyle(
+  StrutStyle get _strut => StrutStyle(
         fontFamily: Txt.mono,
         fontSize: _fontSize,
         height: _lineHeight,
@@ -364,7 +366,10 @@ class _CodeEditorState extends State<CodeEditor> {
       oldWidget.controller.removeListener(_onChanged);
       widget.controller.addListener(_onChanged);
     }
-    if (oldWidget.wrap != widget.wrap) _lineHeights = const [];
+    if (oldWidget.wrap != widget.wrap ||
+        oldWidget.fontSize != widget.fontSize) {
+      _lineHeights = const [];
+    }
   }
 
   @override

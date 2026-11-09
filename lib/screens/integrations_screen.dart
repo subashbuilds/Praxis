@@ -205,6 +205,13 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
     final state = AppScope.of(context);
     final token = TextEditingController();
     final label = TextEditingController();
+    final accountId = TextEditingController();
+    void disposeFields() {
+      token.dispose();
+      label.dispose();
+      accountId.dispose();
+    }
+
     final submitted = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -226,6 +233,20 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
                 style: Txt.bodySoft.copyWith(fontSize: 12),
               ),
               const SizedBox(height: 12),
+              if (kind == IntegrationKind.cloudflare) ...[
+                TextField(
+                  controller: accountId,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  style: Txt.code.copyWith(fontSize: 12),
+                  cursorColor: Pal.ember,
+                  decoration: appField(
+                    '32-character account ID',
+                    label: 'Cloudflare Account ID',
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
               TextField(
                 controller: token,
                 autofocus: true,
@@ -260,8 +281,7 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
       ),
     );
     if (!(submitted ?? false) || !mounted) {
-      token.dispose();
-      label.dispose();
+      disposeFields();
       return;
     }
     setState(() => _busyKind = kind);
@@ -270,6 +290,7 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
         kind: kind,
         token: token.text,
         label: label.text,
+        accountId: accountId.text,
       );
       if (!mounted) return;
       _showMessage('${kind.label} connected · ${account.displayName}');
@@ -277,8 +298,7 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
       if (!mounted) return;
       _showMessage('$error');
     } finally {
-      token.dispose();
-      label.dispose();
+      disposeFields();
       if (mounted) setState(() => _busyKind = null);
     }
   }
@@ -320,8 +340,9 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
         IntegrationKind.vercel =>
           'Create an access token from Vercel Account Settings → Tokens.',
         IntegrationKind.cloudflare =>
-          'Create an API token with Cloudflare Pages: Edit permission. '
-              'The token is checked against the Cloudflare API.',
+          'Copy the Account ID from the Cloudflare dashboard overview and '
+              'create an API token with Cloudflare Pages: Edit permission. '
+              'Both are checked against your Pages projects.',
         IntegrationKind.expo =>
           'Create an access token from expo.dev → Account Settings → '
               'Access tokens. It is stored locally for EAS builds.',
@@ -413,14 +434,27 @@ class _ConnectedService extends StatelessWidget {
                     ),
                     const SizedBox(width: 7),
                     Expanded(
-                      child: Text(
-                        account.displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Txt.label.copyWith(
-                          color: Pal.text,
-                          fontWeight: FontWeight.w600,
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            account.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Txt.label.copyWith(
+                              color: Pal.text,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (account.kind == IntegrationKind.cloudflare &&
+                              account.accountId.isNotEmpty)
+                            Text(
+                              'Account ID ${account.accountId}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.meta.copyWith(fontSize: 8.5),
+                            ),
+                        ],
                       ),
                     ),
                     IconAction(

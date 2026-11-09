@@ -33,6 +33,7 @@ class _TerminalTabState extends State<TerminalTab> {
   final _history = <String>[];
   final _skills = <ProjectSkill>[];
   bool _running = false;
+  bool _ctrlArmed = false;
   bool _started = false;
   bool _loadedSkills = false;
   int _historyIndex = 0;
@@ -51,6 +52,8 @@ class _TerminalTabState extends State<TerminalTab> {
       _loadedSkills = true;
       unawaited(_refreshSkills());
     }
+    _input.removeListener(_onCtrlInput);
+    _input.addListener(_onCtrlInput);
   }
 
   List<ShellLine> _welcome(LinuxEnvironment? linux) {
@@ -179,10 +182,55 @@ class _TerminalTabState extends State<TerminalTab> {
 
   @override
   void dispose() {
+    _input.removeListener(_onCtrlInput);
     _input.dispose();
     _focus.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onCtrlInput() {
+    if (!_ctrlArmed || !mounted) return;
+    final text = _input.text;
+    if (text.isEmpty) return;
+    final key = text.substring(text.length - 1).toLowerCase();
+    _input.removeListener(_onCtrlInput);
+    _input.clear();
+    _input.addListener(_onCtrlInput);
+    setState(() => _ctrlArmed = false);
+    final shell = AppScope.of(context).systemShellFor(widget.project);
+    switch (key) {
+      case 'c':
+        shell.cancel();
+        break;
+      case 'l':
+        setState(() {
+          _lines
+            ..clear()
+            ..addAll(_welcome(AppScope.of(context).linux));
+        });
+        break;
+      case 'd':
+        _focus.unfocus();
+        break;
+      case 'a':
+        _input.selection = const TextSelection.collapsed(offset: 0);
+        break;
+      case 'e':
+        _input.selection = TextSelection.collapsed(offset: _input.text.length);
+        break;
+      case 'u':
+        _input.clear();
+        break;
+      case 'w':
+        final value = _input.text;
+        final trimmed = value.replaceFirst(RegExp(r'\s*\S+$'), '');
+        _input.text = trimmed;
+        _input.selection = TextSelection.collapsed(offset: _input.text.length);
+        break;
+      default:
+        break;
+    }
   }
 
   void _feed(String chunk, ShellTone tone, StringBuffer pending) {
@@ -290,11 +338,11 @@ class _TerminalTabState extends State<TerminalTab> {
 
   String _resources(LinuxEnvironment? linux) {
     if (linux == null || !linux.ready) return '';
-    final load = linux.snapshot.load1;
     final ram = linux.snapshot.ramUsedBytes;
-    final cpu = load == null ? '—' : load.toStringAsFixed(2);
+    final cpu = linux.snapshot.cpuPercent;
     final memory = ram == null ? '—' : humanBytes(ram);
-    return 'CPU $cpu · RAM $memory';
+    final guestCpu = cpu == null ? '—' : '${cpu.toStringAsFixed(1)}%';
+    return 'Alpine $guestCpu · $memory';
   }
 
   Color _tone(ShellTone tone) => switch (tone) {
@@ -338,49 +386,11 @@ class _TerminalTabState extends State<TerminalTab> {
     _focus.requestFocus();
   }
 
-  void _showCtrlMenu() {
-    showModalBottomSheet<void>(
-      context: context,
-      useSafeArea: true,
-      backgroundColor: Pal.surface,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SheetHandle(),
-            ListTile(
-              leading: Icon(Icons.stop_circle_outlined, color: Pal.rose),
-              title: const Text('Ctrl + C · interrupt'),
-              onTap: () {
-                AppScope.of(context).systemShellFor(widget.project).cancel();
-                Navigator.of(sheetContext).pop();
-              },
-            ),
-            ListTile(
-              leading: Icon(Icons.cleaning_services_outlined, color: Pal.amber),
-              title: const Text('Ctrl + L · clear screen'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                setState(() {
-                  _lines
-                    ..clear()
-                    ..addAll(_welcome(AppScope.of(context).linux));
-                });
-              },
-            ),
-            ListTile(
-              leading: Icon(Icons.keyboard_hide_rounded, color: Pal.textMuted),
-              title: const Text('Ctrl + D · close keyboard'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                _focus.unfocus();
-              },
-            ),
-            const SizedBox(height: Sp.x2),
-          ],
-        ),
-      ),
-    );
+  void _toggleCtrl() {
+    setState(() => _ctrlArmed = !_ctrlArmed);
+    if (_ctrlArmed) {
+      _focus.requestFocus();
+    }
   }
 
   Widget _promptRow() {
@@ -393,17 +403,27 @@ class _TerminalTabState extends State<TerminalTab> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Text(
-              '$promptPath\$ ',
-              style: Txt.code.copyWith(
-                fontSize: 11.5,
-                color: Pal.mint,
-                fontWeight: FontWeight.w600,
+          if (!_running)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                '$promptPath\$ ',
+                style: Txt.code.copyWith(
+                  fontSize: 11.5,
+                  color: Pal.mint,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            )
+          else
+            const Padding(
+              padding: EdgeInsets.only(top: 11, right: 8),
+              child: SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(strokeWidth: 1.8),
               ),
             ),
-          ),
           Expanded(
             child: TextField(
               controller: _input,
@@ -414,12 +434,16 @@ class _TerminalTabState extends State<TerminalTab> {
               textInputAction: TextInputAction.send,
               autocorrect: false,
               enableSuggestions: false,
-              onSubmitted: _submit,
+              onSubmitted: _running ? null : _submit,
               decoration: InputDecoration(
                 isDense: true,
                 border: InputBorder.none,
                 contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                hintText: 'Run a command',
+                hintText: _ctrlArmed
+                    ? 'Ctrl is armed — press a key'
+                    : _running
+                        ? 'Command running — Ctrl+C interrupts'
+                        : 'Run a command',
                 hintStyle:
                     Txt.code.copyWith(fontSize: 11.5, color: Pal.textDim),
               ),
@@ -664,7 +688,11 @@ class _TerminalTabState extends State<TerminalTab> {
             _focus.unfocus();
           }),
           _specialKey(
-              'Ctrl', Icons.keyboard_command_key_rounded, _showCtrlMenu),
+            'Ctrl',
+            Icons.keyboard_command_key_rounded,
+            _toggleCtrl,
+            active: _ctrlArmed,
+          ),
           const Spacer(),
           _specialKey(
               null, Icons.keyboard_arrow_left_rounded, () => _moveCursor(-1)),
@@ -690,23 +718,32 @@ class _TerminalTabState extends State<TerminalTab> {
     IconData icon,
     VoidCallback onTap, {
     bool emphasized = false,
+    bool active = false,
   }) {
+    final glow = emphasized || active;
     return Semantics(
       button: true,
+      selected: active,
       label: label ?? 'Terminal key',
       child: InkWell(
         onTap: onTap,
         borderRadius: Rd.sm,
-        child: SizedBox(
+        child: Container(
           width: label == null ? 42 : 52,
           height: 42,
+          decoration: BoxDecoration(
+            color: active ? Pal.ember.withOpacity(0.14) : null,
+            borderRadius: Rd.sm,
+            border:
+                active ? Border.all(color: Pal.ember.withOpacity(0.55)) : null,
+          ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
                 icon,
                 size: 18,
-                color: emphasized ? Pal.ember : Pal.textMuted,
+                color: glow ? Pal.ember : Pal.textMuted,
               ),
               if (label != null) ...[
                 const SizedBox(width: 4),
@@ -714,7 +751,8 @@ class _TerminalTabState extends State<TerminalTab> {
                   label,
                   style: Txt.meta.copyWith(
                     fontSize: 9,
-                    color: emphasized ? Pal.ember : Pal.textMuted,
+                    color: glow ? Pal.ember : Pal.textMuted,
+                    fontWeight: active ? FontWeight.w700 : FontWeight.w400,
                   ),
                 ),
               ],

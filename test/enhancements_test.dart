@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:praxis/core/agent.dart';
 import 'package:praxis/core/ai.dart';
 import 'package:praxis/core/diff.dart';
+import 'package:praxis/core/integrations.dart';
 import 'package:praxis/core/shell.dart';
 import 'package:praxis/core/system_shell.dart';
 import 'package:praxis/core/usage.dart';
@@ -209,6 +210,72 @@ void main() {
     final environment = await shell.run('printf "%s\\n" "\$HOME" "\$TMPDIR"');
     expect(environment.output, contains(temp.path));
     expect(environment.output, contains('${temp.path}/.praxis/tmp'));
+  });
+
+  group('integration accounts', () {
+    test('Cloudflare account id round-trips', () {
+      const account = IntegrationAccount(
+        id: 'cloudflare-1',
+        kind: IntegrationKind.cloudflare,
+        label: 'Work',
+        username: 'abc123',
+        token: 'cf-token',
+        accountId: 'abc123',
+      );
+      final restored = IntegrationAccount.fromJson(account.toJson());
+      expect(restored.accountId, 'abc123');
+      expect(restored.kind, IntegrationKind.cloudflare);
+    });
+
+    test('GitHub repository selection includes private repositories', () async {
+      final client = MockClient((request) async {
+        expect(request.url.path, '/user/repos');
+        return http.Response(
+          jsonEncode([
+            {
+              'name': 'secret',
+              'private': true,
+              'default_branch': 'trunk',
+              'owner': {'login': 'acme'},
+            },
+            {
+              'name': 'site',
+              'private': false,
+              'default_branch': 'main',
+              'owner': {'login': 'acme'},
+            },
+          ]),
+          200,
+        );
+      });
+
+      final repos =
+          await GitHubClient('github-token', client: client).repositories();
+      expect(repos, hasLength(2));
+      expect(repos.first.fullName, 'acme/secret');
+      expect(repos.first.private, isTrue);
+      expect(repos.first.defaultBranch, 'trunk');
+    });
+
+    test('Cloudflare Pages targets the configured account id', () async {
+      final paths = <String>[];
+      final client = MockClient((request) async {
+        paths.add(request.url.path);
+        expect(request.headers['Authorization'], 'Bearer cf-token');
+        return http.Response(
+          jsonEncode({'success': true, 'result': []}),
+          200,
+        );
+      });
+
+      final projects = await CloudflarePagesClient(
+        'cf-token',
+        accountId: 'acct-123',
+        client: client,
+      ).projects();
+      expect(projects, isEmpty);
+      expect(paths, ['/client/v4/accounts/acct-123/pages/projects']);
+    });
   });
 
   group('usage', () {

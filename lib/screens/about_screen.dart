@@ -160,9 +160,9 @@ class AboutScreen extends StatelessWidget {
                   ),
                   const SectionLabel('CREDITS'),
                   Text(
-                    'Built with Flutter. Markdown previews use flutter_markdown_plus; '
-                    'icons use flutter_svg; archives use archive. Each package '
-                    'keeps its original licence.',
+                    'Built with Flutter. Markdown previews use GitHub-flavoured '
+                    'HTML with the markdown package; icons use flutter_svg; '
+                    'archives use archive. Each package keeps its original licence.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x5),

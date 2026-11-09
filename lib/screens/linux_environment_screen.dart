@@ -314,9 +314,13 @@ class _AlpineCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final disk = linux.snapshot.diskBytes;
-    const maxDisk = 512 * 1024 * 1024;
-    final ratio = disk <= 0 ? 0.0 : (disk / maxDisk).clamp(0.02, 1.0);
+    final snapshot = linux.snapshot;
+    final rootfs = snapshot.diskBytes;
+    final cache = snapshot.cacheBytes.clamp(0, rootfs);
+    final system = (rootfs - cache).clamp(0, rootfs);
+    final project = snapshot.projectBytes;
+    final total = system + cache + project;
+    const capacity = 512 * 1024 * 1024;
     return Panel(
       padding: const EdgeInsets.all(Sp.x3),
       child: Column(
@@ -361,43 +365,62 @@ class _AlpineCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
-                  child: Text('Disk usage',
-                      style: Txt.title.copyWith(fontSize: 14))),
+                child: Text(
+                  'Disk usage${total <= 0 ? '' : ': ${humanBytes(total)}'}',
+                  style: Txt.title.copyWith(fontSize: 14),
+                ),
+              ),
               Text(
-                disk <= 0 ? 'Not measured' : humanBytes(disk),
-                style: Txt.meta.copyWith(fontSize: 11),
+                total <= 0 ? 'Not measured' : humanBytes(total),
+                style: Txt.meta.copyWith(fontSize: 10.5),
               ),
             ],
           ),
           const SizedBox(height: Sp.x2),
           ClipRRect(
             borderRadius: Rd.pill,
-            child: LinearProgressIndicator(
-              value: disk <= 0 ? null : ratio,
-              minHeight: 6,
-              backgroundColor: Pal.raised,
-              valueColor: AlwaysStoppedAnimation(Pal.ember),
+            child: SizedBox(
+              height: 8,
+              child: total <= 0
+                  ? ColoredBox(color: Pal.raised)
+                  : Row(
+                      children: [
+                        Expanded(
+                          flex: system.clamp(1, 100000),
+                          child: ColoredBox(color: Pal.rose),
+                        ),
+                        Expanded(
+                          flex: project.clamp(0, 100000) + 1,
+                          child: ColoredBox(color: Pal.mint),
+                        ),
+                        Expanded(
+                          flex: cache.clamp(0, 100000) + 1,
+                          child: ColoredBox(color: Pal.amber),
+                        ),
+                      ],
+                    ),
             ),
           ),
-          const SizedBox(height: Sp.x2),
-          Wrap(
-            spacing: 14,
-            runSpacing: 5,
-            children: [
-              _Legend(
-                color: Pal.ember,
-                text: 'System + runtimes: ${humanBytes(disk)}',
-              ),
-              _Legend(
-                color: Pal.mint,
-                text: 'Projects: outside rootfs',
-              ),
-              _Legend(
-                color: Pal.amber,
-                text:
-                    'Package caches: ${humanBytes(linux.snapshot.cacheBytes)}',
-              ),
-            ],
+          const SizedBox(height: 3),
+          Text(
+            'of ${humanBytes(capacity)} rootfs capacity',
+            style: Txt.meta.copyWith(fontSize: 8.5),
+          ),
+          const SizedBox(height: Sp.x3),
+          _Legend(
+            color: Pal.rose,
+            text: 'System + runtimes: ${humanBytes(system)}',
+          ),
+          const SizedBox(height: 5),
+          _Legend(
+            color: Pal.mint,
+            text: '${project <= 0 ? 'Project' : '1 project'}: '
+                '${project <= 0 ? 'outside rootfs' : humanBytes(project)}',
+          ),
+          const SizedBox(height: 5),
+          _Legend(
+            color: Pal.amber,
+            text: 'Package caches: ${humanBytes(cache)}',
           ),
         ],
       ),
@@ -452,8 +475,10 @@ class _ResourceCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ram = snapshot.ramUsedBytes;
-    final total = snapshot.ramTotalBytes;
-    final load = snapshot.load1;
+    final cpu = snapshot.cpuPercent;
+    final count = snapshot.processes.length;
+    final processes = [...snapshot.processes]
+      ..sort((a, b) => b.rssKb.compareTo(a.rssKb));
     return Panel(
       padding: const EdgeInsets.all(Sp.x3),
       child: Column(
@@ -464,20 +489,21 @@ class _ResourceCard extends StatelessWidget {
               GlyphBadge(
                 icon: Icons.monitor_heart_outlined,
                 color: Pal.ember,
-                size: 36,
-                iconSize: 18,
+                size: 42,
+                iconSize: 21,
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 11),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Linux usage',
-                        style: Txt.title.copyWith(fontSize: 15)),
+                    Text('Linux Usage',
+                        style: Txt.title.copyWith(fontSize: 17)),
+                    const SizedBox(height: 2),
                     Text(
-                      snapshot.processes.isEmpty
+                      count == 0
                           ? 'Idle · run a command to wake the guest'
-                          : '${snapshot.processes.length} active guest processes',
+                          : '$count active guest processes',
                       style: Txt.meta.copyWith(fontSize: 9.5),
                     ),
                   ],
@@ -491,17 +517,17 @@ class _ResourceCard extends StatelessWidget {
           ),
           const SizedBox(height: Sp.x3),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
                 child: _Metric(
                   icon: Icons.memory_rounded,
                   label: 'RAM',
+                  badge: 'RAM',
                   value: ram == null ? '—' : humanBytes(ram),
-                  detail: ram == null
-                      ? 'Idle guest memory'
-                      : total == null
-                          ? 'Guest memory'
-                          : 'of ${humanBytes(total)} guest memory',
+                  detail:
+                      count == 0 ? 'No guest processes' : 'Processes: $count',
+                  fraction: ram == null ? 0 : null,
                   color: Pal.ember,
                 ),
               ),
@@ -509,11 +535,12 @@ class _ResourceCard extends StatelessWidget {
               Expanded(
                 child: _Metric(
                   icon: Icons.speed_rounded,
-                  label: 'CPU load',
-                  value: load == null ? '—' : load.toStringAsFixed(2),
-                  detail: load == null
-                      ? 'No guest load yet'
-                      : '1-minute guest load',
+                  label: 'CPU Load',
+                  badge: 'GUEST',
+                  value: cpu == null ? '—' : '${cpu.toStringAsFixed(1)}%',
+                  detail:
+                      count == 0 ? 'No guest load yet' : 'Guest process CPU',
+                  fraction: cpu == null ? 0 : (cpu / 100).clamp(0.0, 1.0),
                   color: Pal.mint,
                 ),
               ),
@@ -521,10 +548,9 @@ class _ResourceCard extends StatelessWidget {
           ),
           const SizedBox(height: Sp.x3),
           const Hairline(),
-          const SizedBox(height: Sp.x2),
-          if (snapshot.processes.isEmpty)
+          if (processes.isEmpty)
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: Sp.x3),
+              padding: const EdgeInsets.symmetric(vertical: Sp.x4),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -536,67 +562,110 @@ class _ResourceCard extends StatelessWidget {
               ),
             )
           else ...[
-            Row(
+            const SizedBox(height: Sp.x1),
+            const Row(
               children: [
-                SizedBox(
-                    width: 48,
-                    child: Text('PID',
-                        style: Txt.overline.copyWith(fontSize: 8.5))),
-                Expanded(
-                    child: Text('PROCESS',
-                        style: Txt.overline.copyWith(fontSize: 8.5))),
-                SizedBox(
-                    width: 42,
-                    child: Text('CPU',
-                        style: Txt.overline.copyWith(fontSize: 8.5))),
-                SizedBox(
-                    width: 48,
-                    child: Text('MEM',
-                        style: Txt.overline.copyWith(fontSize: 8.5))),
+                _ProcessHeader('PID', width: 38),
+                Expanded(child: _ProcessHeader('PROCESS')),
+                _ProcessHeader('USER', width: 38),
+                _ProcessHeader('CPU', width: 38, right: true),
+                _ProcessHeader('MEM', width: 52, right: true),
               ],
             ),
-            for (final process in snapshot.processes.take(6))
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 5),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 48,
-                      child: Text(process.pid,
-                          style: Txt.code
-                              .copyWith(fontSize: 9.5, color: Pal.textMuted)),
-                    ),
-                    Expanded(
-                      child: Row(
-                        children: [
-                          Icon(Icons.data_object_rounded,
-                              size: 12, color: Pal.ember),
-                          const SizedBox(width: 5),
-                          Expanded(
-                            child: Text(
-                              process.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Txt.code.copyWith(fontSize: 9.5),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    SizedBox(
-                      width: 42,
-                      child: Text(process.cpu.isEmpty ? '—' : process.cpu,
-                          style: Txt.code.copyWith(fontSize: 9.5)),
-                    ),
-                    SizedBox(
-                      width: 48,
-                      child: Text(process.memory.isEmpty ? '—' : process.memory,
-                          style: Txt.code.copyWith(fontSize: 9.5)),
-                    ),
-                  ],
-                ),
-              ),
+            const SizedBox(height: 2),
+            for (final process in processes.take(7))
+              _ProcessRow(process: process),
+            const SizedBox(height: Sp.x2),
+            Text(
+              'Live values from inside Alpine, not the phone.',
+              style: Txt.meta.copyWith(fontSize: 8.5, color: Pal.textDim),
+            ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ProcessHeader extends StatelessWidget {
+  const _ProcessHeader(this.text, {this.width, this.right = false});
+  final String text;
+  final double? width;
+  final bool right;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = Text(
+      text,
+      textAlign: right ? TextAlign.right : TextAlign.left,
+      style: Txt.overline.copyWith(fontSize: 8),
+    );
+    return width == null ? label : SizedBox(width: width, child: label);
+  }
+}
+
+class _ProcessRow extends StatelessWidget {
+  const _ProcessRow({required this.process});
+  final LinuxProcess process;
+
+  IconData get _icon {
+    final name = process.name.toLowerCase();
+    if (name.contains('apk')) return Icons.widgets_outlined;
+    if (name.contains('proot')) return Icons.cloud_outlined;
+    if (name.contains('sh')) return Icons.terminal_rounded;
+    return Icons.memory_rounded;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.5),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 38,
+            child: Text(process.pid,
+                style: Txt.code.copyWith(fontSize: 9, color: Pal.textMuted)),
+          ),
+          Expanded(
+            child: Row(
+              children: [
+                Icon(_icon, size: 12, color: Pal.ember),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(
+                    process.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Txt.code.copyWith(fontSize: 9.5),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            width: 38,
+            child: Text(process.user,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Txt.code.copyWith(fontSize: 8.5, color: Pal.textDim)),
+          ),
+          SizedBox(
+            width: 38,
+            child: Text(process.cpu,
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                overflow: TextOverflow.clip,
+                style: Txt.code.copyWith(fontSize: 8.5, color: Pal.textMuted)),
+          ),
+          SizedBox(
+            width: 52,
+            child: Text(process.memory,
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                overflow: TextOverflow.clip,
+                style: Txt.code.copyWith(fontSize: 8.5)),
+          ),
         ],
       ),
     );
@@ -607,15 +676,19 @@ class _Metric extends StatelessWidget {
   const _Metric({
     required this.icon,
     required this.label,
+    required this.badge,
     required this.value,
     required this.detail,
+    required this.fraction,
     required this.color,
   });
 
   final IconData icon;
   final String label;
+  final String badge;
   final String value;
   final String detail;
+  final double? fraction;
   final Color color;
 
   @override
@@ -634,17 +707,44 @@ class _Metric extends StatelessWidget {
             children: [
               Icon(icon, size: 14, color: color),
               const SizedBox(width: 6),
-              Text(label, style: Txt.meta.copyWith(fontSize: 9.5)),
+              Expanded(
+                child: Text(label, style: Txt.meta.copyWith(fontSize: 9.5)),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.14),
+                  borderRadius: Rd.pill,
+                ),
+                child: Text(
+                  badge,
+                  style: Txt.overline.copyWith(
+                    fontSize: 7.5,
+                    color: color,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ),
             ],
           ),
-          const SizedBox(height: 9),
+          const SizedBox(height: 10),
           Text(
             value,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: Txt.title.copyWith(fontSize: 20),
+            style: Txt.title.copyWith(fontSize: 24, letterSpacing: -0.8),
           ),
-          const SizedBox(height: 3),
+          const SizedBox(height: 7),
+          ClipRRect(
+            borderRadius: Rd.pill,
+            child: LinearProgressIndicator(
+              value: fraction,
+              minHeight: 4,
+              backgroundColor: Pal.line,
+              valueColor: AlwaysStoppedAnimation(color),
+            ),
+          ),
+          const SizedBox(height: 6),
           Text(
             detail,
             maxLines: 2,
@@ -790,80 +890,110 @@ class _RuntimeSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.84;
     return SafeArea(
-      child: DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.54,
-        minChildSize: 0.38,
-        maxChildSize: 0.82,
-        builder: (_, scrollController) => ListView(
-          controller: scrollController,
-          padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x5),
-          children: [
-            Row(
-              children: [
-                Text(runtime.label, style: Txt.headline.copyWith(fontSize: 24)),
-                const Spacer(),
-                IconAction(
-                  icon: Icons.close_rounded,
-                  tooltip: 'Close',
-                  onTap: () => Navigator.of(context).pop(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                StatusPill(
-                  status.installed ? 'Installed' : 'Not installed',
-                  color: status.installed ? Pal.mint : Pal.textDim,
-                ),
-                if (status.version.isNotEmpty) ...[
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(status.version,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Txt.meta.copyWith(fontSize: 10)),
+      child: Padding(
+        padding:
+            EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxHeight),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              const SheetHandle(),
+              Flexible(
+                fit: FlexFit.loose,
+                child: SingleChildScrollView(
+                  padding:
+                      const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x3),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Text(runtime.label,
+                              style: Txt.headline.copyWith(fontSize: 24)),
+                          const Spacer(),
+                          IconAction(
+                            icon: Icons.close_rounded,
+                            tooltip: 'Close',
+                            onTap: () => Navigator.of(context).pop(),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          StatusPill(
+                            status.installed ? 'Installed' : 'Not installed',
+                            color: status.installed ? Pal.mint : Pal.textDim,
+                          ),
+                          if (status.version.isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                status.version,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Txt.meta.copyWith(fontSize: 10),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      const SizedBox(height: Sp.x4),
+                      if (status.error.isNotEmpty) ...[
+                        Text(status.error,
+                            style: Txt.bodySoft.copyWith(color: Pal.rose)),
+                        const SizedBox(height: Sp.x3),
+                      ],
+                      SectionLabel('PACKAGES',
+                          trailing: Text('${runtime.packages.length}',
+                              style: Txt.meta)),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final package in runtime.packages)
+                            MonoChip(package, tint: Pal.textMuted),
+                        ],
+                      ),
+                      SectionLabel(
+                        'USED BY TEMPLATES',
+                        trailing: Text('${runtime.templates.length}',
+                            style: Txt.meta),
+                      ),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final template in runtime.templates)
+                            MonoChip(template,
+                                icon: Icons.code_rounded, tint: Pal.sky),
+                        ],
+                      ),
+                    ],
                   ),
-                ],
-              ],
-            ),
-            const SizedBox(height: Sp.x4),
-            if (status.error.isNotEmpty) ...[
-              Text(status.error, style: Txt.bodySoft.copyWith(color: Pal.rose)),
-              const SizedBox(height: Sp.x3),
-            ],
-            SectionLabel('PACKAGES',
-                trailing: Text('${runtime.packages.length}', style: Txt.meta)),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final package in runtime.packages)
-                  MonoChip(package, tint: Pal.textMuted),
-              ],
-            ),
-            SectionLabel(
-              'USED BY TEMPLATES',
-              trailing: Text('${runtime.templates.length}', style: Txt.meta),
-            ),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final template in runtime.templates)
-                  MonoChip(template, icon: Icons.code_rounded, tint: Pal.sky),
-              ],
-            ),
-            const SizedBox(height: Sp.x4),
-            if (!status.installed)
-              EmberButton(
-                label: 'Install',
-                icon: Icons.download_rounded,
-                onTap: status.busy ? null : onInstall,
+                ),
               ),
-          ],
+              if (!status.installed)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Sp.x4,
+                    Sp.x2,
+                    Sp.x4,
+                    Sp.x4,
+                  ),
+                  child: EmberButton(
+                    label: 'Install',
+                    icon: Icons.download_rounded,
+                    onTap: status.busy ? null : onInstall,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

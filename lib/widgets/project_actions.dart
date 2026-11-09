@@ -436,7 +436,7 @@ class _DeploySheetState extends State<_DeploySheet> {
       _cfAccounts = cfAccounts;
       _account =
           _state.activeVercel ?? (accounts.isEmpty ? null : accounts.first);
-      _cfAccount = cfAccounts.isEmpty ? null : cfAccounts.first;
+      _cfAccount = _state.integrations.activeFor(IntegrationKind.cloudflare);
       _fileCount = files.length;
       if (accounts.isEmpty && cfAccounts.isNotEmpty) {
         _platform = IntegrationKind.cloudflare;
@@ -449,6 +449,7 @@ class _DeploySheetState extends State<_DeploySheet> {
     try {
       final projects = await CloudflarePagesClient(
         account.token,
+        accountId: account.accountId,
         client: _state.httpClient,
       ).projects();
       if (!mounted || _cfAccount?.id != account.id) return;
@@ -622,6 +623,13 @@ class _DeploySheetState extends State<_DeploySheet> {
                       value:
                           '@${_platform == IntegrationKind.vercel ? (_account?.username ?? '—') : (_cfAccount?.username ?? '—')}',
                     ),
+                    if (_platform == IntegrationKind.cloudflare)
+                      _DetailRow(
+                        label: 'Account ID',
+                        value: _cfAccount?.accountId.isEmpty ?? true
+                            ? 'Auto-detected'
+                            : _cfAccount!.accountId,
+                      ),
                     _DetailRow(
                       label: 'Files',
                       value: '$_fileCount text files',

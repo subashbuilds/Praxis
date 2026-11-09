@@ -306,7 +306,10 @@ class _SkillsScreenState extends State<SkillsScreen> {
           skills: skills,
           installed: {
             for (final skill in state.skills)
-              if (skill.source.isNotEmpty) '${skill.source}|${skill.name}',
+              if (skill.source.isNotEmpty) ...[
+                skill.id,
+                '${skill.source}|${skill.name}',
+              ],
           },
           onInstall: _install,
           onPreview: (discovered) async {
@@ -595,79 +598,47 @@ class _SkillPickerSheetState extends State<_SkillPickerSheet> {
   final Set<String> _justInstalled = {};
   String? _installing;
 
-  String _key(DiscoveredSkill skill) =>
+  String _key(DiscoveredSkill skill) => SkillDiscovery.skillId(skill);
+  String _nameKey(DiscoveredSkill skill) =>
       '${skill.repository.fullName}|${skill.name}';
 
   bool _isInstalled(DiscoveredSkill skill) =>
       _justInstalled.contains(_key(skill)) ||
-      widget.installed.contains(_key(skill));
+      _justInstalled.contains(_nameKey(skill)) ||
+      widget.installed.contains(_key(skill)) ||
+      widget.installed.contains(_nameKey(skill));
 
-  Future<void> _installSkill(DiscoveredSkill skill) async {
-    if (_installing != null) return;
+  Future<bool> _installSkill(DiscoveredSkill skill) async {
+    if (_installing != null) return false;
     setState(() => _installing = skill.path);
     final ok = await widget.onInstall(skill);
-    if (!mounted) return;
+    if (!mounted) return ok;
     setState(() {
       _installing = null;
-      if (ok) _justInstalled.add(_key(skill));
+      if (ok) {
+        _justInstalled.add(_key(skill));
+        _justInstalled.add(_nameKey(skill));
+      }
     });
+    return ok;
   }
 
   Future<void> _showPreview(DiscoveredSkill skill) async {
-    showDialog<void>(
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: Pal.surface,
-        title: Text(skill.name),
-        content: SizedBox(
-          width: 460,
-          child: FutureBuilder<String>(
-            future: widget.onPreview(skill),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const SizedBox(
-                  height: 80,
-                  child: Center(child: CircularProgressIndicator()),
-                );
-              }
-              if (snapshot.hasError) {
-                return Text('${snapshot.error}', style: Txt.bodySoft);
-              }
-              return SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${skill.repository.fullName} · ${skill.path}',
-                      style: Txt.meta.copyWith(fontSize: 9.5),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      snapshot.data ?? '',
-                      style: Txt.body.copyWith(height: 1.5),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Close'),
-          ),
-          TextButton(
-            onPressed: _isInstalled(skill)
-                ? null
-                : () {
-                    Navigator.of(dialogContext).pop();
-                    _installSkill(skill);
-                  },
-            child: Text(_isInstalled(skill) ? 'Installed' : 'Install'),
-          ),
-        ],
+      useSafeArea: true,
+      isScrollControlled: true,
+      isDismissible: true,
+      enableDrag: true,
+      backgroundColor: Pal.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => _SkillPreviewSheet(
+        skill: skill,
+        installed: _isInstalled(skill),
+        onPreview: widget.onPreview,
+        onInstall: () => _installSkill(skill),
       ),
     );
   }
@@ -731,7 +702,7 @@ class _SkillPickerSheetState extends State<_SkillPickerSheet> {
                                     )),
                                 const SizedBox(height: 2),
                                 Text(
-                                  skill.path,
+                                  '${skill.repository.fullName} · ${skill.path}',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: Txt.meta.copyWith(fontSize: 9),
@@ -763,6 +734,153 @@ class _SkillPickerSheetState extends State<_SkillPickerSheet> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _SkillPreviewSheet extends StatefulWidget {
+  const _SkillPreviewSheet({
+    required this.skill,
+    required this.installed,
+    required this.onPreview,
+    required this.onInstall,
+  });
+
+  final DiscoveredSkill skill;
+  final bool installed;
+  final Future<String> Function(DiscoveredSkill) onPreview;
+  final Future<bool> Function() onInstall;
+
+  @override
+  State<_SkillPreviewSheet> createState() => _SkillPreviewSheetState();
+}
+
+class _SkillPreviewSheetState extends State<_SkillPreviewSheet> {
+  late final Future<String> _content = widget.onPreview(widget.skill);
+  late bool _installed = widget.installed;
+  bool _busy = false;
+
+  Future<void> _install() async {
+    if (_busy || _installed) return;
+    setState(() => _busy = true);
+    final ok = await widget.onInstall();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _installed = ok;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.86;
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            const SheetHandle(),
+            Flexible(
+              fit: FlexFit.loose,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x3, Sp.x4, Sp.x3),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(widget.skill.name,
+                              style: Txt.headline.copyWith(fontSize: 21)),
+                        ),
+                        IconAction(
+                          icon: Icons.close_rounded,
+                          tooltip: 'Close',
+                          onTap: () => Navigator.of(context).pop(),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${widget.skill.repository.fullName} · ${widget.skill.path}',
+                      style: Txt.meta.copyWith(fontSize: 9.5),
+                    ),
+                    const SizedBox(height: Sp.x3),
+                    FutureBuilder<String>(
+                      future: _content,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState != ConnectionState.done) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: Sp.x5),
+                            child: Center(child: CircularProgressIndicator()),
+                          );
+                        }
+                        if (snapshot.hasError) {
+                          return Text('${snapshot.error}',
+                              style: Txt.bodySoft.copyWith(color: Pal.rose));
+                        }
+                        return SelectableText(
+                          snapshot.data ?? '',
+                          style: Txt.body.copyWith(height: 1.55),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: GhostButton(
+                      label: 'Close',
+                      onTap: () => Navigator.of(context).pop(),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _installed
+                        ? Container(
+                            height: 46,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: Pal.mint.withOpacity(0.10),
+                              borderRadius: Rd.sm,
+                              border: Border.all(
+                                color: Pal.mint.withOpacity(0.45),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.check_circle_rounded,
+                                    size: 18, color: Pal.mint),
+                                const SizedBox(width: 6),
+                                Text('Installed',
+                                    style: Txt.label.copyWith(
+                                        color: Pal.mint,
+                                        fontWeight: FontWeight.w600)),
+                              ],
+                            ),
+                          )
+                        : EmberButton(
+                            label: _busy ? 'Installing' : 'Install',
+                            icon: Icons.download_rounded,
+                            loading: _busy,
+                            onTap: _busy ? null : _install,
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

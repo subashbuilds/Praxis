@@ -1,17 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../core/file_types.dart';
-import '../core/readme_html.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/code_editor.dart';
 import '../widgets/confirm_dialog.dart';
 import '../widgets/file_glyph.dart';
-import '../widgets/readme_image.dart';
+import '../widgets/github_markdown.dart';
 import '../widgets/ui.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -37,7 +35,6 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _preview = false;
   Uint8List? _bytes;
   String? _error;
-  final _previewScroll = ScrollController();
   AppState? _appState;
   bool _markedActive = false;
 
@@ -75,17 +72,11 @@ class _EditorScreenState extends State<EditorScreen> {
   void dispose() {
     _appState?.setActiveFile(widget.project.id, null);
     _controller.dispose();
-    _previewScroll.dispose();
     super.dispose();
   }
 
   void _togglePreview() {
     setState(() => _preview = !_preview);
-    if (_preview) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_previewScroll.hasClients) _previewScroll.jumpTo(0);
-      });
-    }
   }
 
   Future<void> _load() async {
@@ -255,6 +246,7 @@ class _EditorScreenState extends State<EditorScreen> {
                         ),
                       ),
                     ),
+                  if (!_preview && _canEdit) _fontSizeControl(state),
                   if (!_preview && _canEdit)
                     IconAction(
                       icon: state.wordWrap
@@ -279,6 +271,69 @@ class _EditorScreenState extends State<EditorScreen> {
             Expanded(child: _content(language, state.wordWrap)),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _fontSizeControl(AppState state) {
+    final value = state.editorFontSize;
+    Widget step(String label, int delta, bool enabled) {
+      return Semantics(
+        button: true,
+        label: delta < 0 ? 'Decrease font size' : 'Increase font size',
+        child: GestureDetector(
+          onTap: enabled ? () => state.setEditorFontSize(value + delta) : null,
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            width: 32,
+            height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: enabled ? Pal.raised : Pal.raised.withOpacity(0.45),
+              borderRadius: Rd.sm,
+              border: Border.all(
+                color: enabled ? Pal.lineStrong : Pal.line,
+              ),
+            ),
+            child: Text(
+              label,
+              style: Txt.meta.copyWith(
+                fontSize: 10,
+                color: enabled ? Pal.text : Pal.textDim,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.pill,
+        border: Border.all(color: Pal.lineStrong),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          step('A-', -1, value > 8),
+          SizedBox(
+            width: 24,
+            child: Text(
+              '$value',
+              textAlign: TextAlign.center,
+              style: Txt.meta.copyWith(
+                fontSize: 9.5,
+                color: Pal.text,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          step('A+', 1, value < 22),
+        ],
       ),
     );
   }
@@ -309,17 +364,17 @@ class _EditorScreenState extends State<EditorScreen> {
     if (_svg && _preview) return _svgPreview();
     if (_binary) return _binaryPreview();
     if (_isMarkdown && _preview) {
-      return _MarkdownPreview(
-        data: markdownFromReadme(_controller.text),
-        controller: _previewScroll,
+      return GithubMarkdownPreview(
         project: widget.project,
         path: widget.path,
+        source: _controller.text,
       );
     }
     return CodeEditor(
       controller: _controller,
       language: language,
       wrap: wrap,
+      fontSize: AppScope.of(context).editorFontSize.toDouble(),
       onChanged: (_) {
         if (!_dirty) setState(() => _dirty = true);
       },
@@ -404,107 +459,6 @@ class _EditorScreenState extends State<EditorScreen> {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _MarkdownPreview extends StatelessWidget {
-  const _MarkdownPreview({
-    required this.data,
-    required this.controller,
-    required this.project,
-    required this.path,
-  });
-
-  final String data;
-  final ScrollController controller;
-  final Project project;
-  final String path;
-
-  Future<Uint8List?> _loadLocalImage(BuildContext context, Uri uri) async {
-    final relative = resolveReadmeImagePath(path, uri);
-    if (relative.isEmpty) return null;
-    final state = AppScope.of(context);
-    try {
-      return await state.readFileBytes(project, relative);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Pal.canvas,
-      child: Scrollbar(
-        controller: controller,
-        child: SingleChildScrollView(
-          controller: controller,
-          padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, Sp.x8),
-          child: MarkdownBody(
-            data: data.isEmpty ? '_This file is empty._' : data,
-            selectable: true,
-            imageBuilder: (uri, title, alt) => ReadmeImage(
-              uri: uri,
-              title: title,
-              alt: alt,
-              loadLocal: uri.scheme.isEmpty && !uri.hasAuthority
-                  ? (uri) => _loadLocalImage(context, uri)
-                  : null,
-            ),
-            onTapLink: (text, href, title) {
-              if (href == null || href.isEmpty) return;
-              Clipboard.setData(ClipboardData(text: href));
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Link copied: $href')),
-              );
-            },
-            styleSheet: MarkdownStyleSheet(
-              p: Txt.body.copyWith(height: 1.65),
-              h1: Txt.headline.copyWith(fontSize: 27),
-              h2: Txt.headline.copyWith(fontSize: 22),
-              h3: Txt.title.copyWith(fontSize: 18),
-              h4: Txt.title.copyWith(fontSize: 16),
-              strong: Txt.body.copyWith(fontWeight: FontWeight.w700),
-              em: Txt.body.copyWith(fontStyle: FontStyle.italic),
-              a: Txt.body.copyWith(
-                color: Pal.ember,
-                decoration: TextDecoration.underline,
-                decorationColor: Pal.ember,
-              ),
-              code: Txt.code.copyWith(
-                fontSize: 12,
-                color: Pal.ghText,
-                backgroundColor: Pal.ghPanel,
-              ),
-              codeblockDecoration: BoxDecoration(
-                color: Pal.ghBg,
-                borderRadius: Rd.sm,
-                border: Border.all(color: Pal.ghLine),
-              ),
-              codeblockPadding: const EdgeInsets.all(Sp.x3),
-              blockquote: Txt.bodySoft.copyWith(
-                fontStyle: FontStyle.italic,
-                color: Pal.textMuted,
-              ),
-              blockquoteDecoration: BoxDecoration(
-                border: Border(left: BorderSide(color: Pal.ember, width: 2)),
-              ),
-              blockquotePadding: const EdgeInsets.only(left: Sp.x4),
-              listBullet: Txt.body,
-              horizontalRuleDecoration: BoxDecoration(
-                border: Border(top: BorderSide(color: Pal.line)),
-              ),
-              tableHead: Txt.label.copyWith(fontWeight: FontWeight.w700),
-              tableBody: Txt.bodySoft,
-              tableBorder: TableBorder.all(color: Pal.line),
-              tableCellsPadding: const EdgeInsets.all(8),
-              tableColumnWidth: const FlexColumnWidth(),
-              blockSpacing: 10,
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
