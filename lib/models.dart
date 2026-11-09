@@ -126,6 +126,7 @@ class ProviderConfig {
     this.requiresKey = true,
     this.isCustom = false,
     this.hint = '',
+    this.dailyLimit = 0,
   });
 
   final String id;
@@ -147,6 +148,10 @@ class ProviderConfig {
   final bool requiresKey;
   final bool isCustom;
   final String hint;
+
+  /// A user-set daily request allowance. Zero means no local limit; provider
+  /// limits are never guessed or hardcoded.
+  final int dailyLimit;
 
   String get apiKey {
     if (keys.isEmpty) return '';
@@ -171,6 +176,7 @@ class ProviderConfig {
     List<String>? models,
     List<String>? selectedModels,
     bool? requiresKey,
+    int? dailyLimit,
   }) =>
       ProviderConfig(
         id: id,
@@ -186,6 +192,7 @@ class ProviderConfig {
         requiresKey: requiresKey ?? this.requiresKey,
         isCustom: isCustom,
         hint: hint,
+        dailyLimit: dailyLimit ?? this.dailyLimit,
       );
 
   Map<String, dynamic> toJson() => {
@@ -202,6 +209,7 @@ class ProviderConfig {
         'requiresKey': requiresKey,
         'isCustom': isCustom,
         'hint': hint,
+        'dailyLimit': dailyLimit,
       };
 
   static List<String> _strings(Object? raw) =>
@@ -234,6 +242,7 @@ class ProviderConfig {
       requiresKey: json['requiresKey'] as bool? ?? true,
       isCustom: json['isCustom'] as bool? ?? false,
       hint: json['hint'] as String? ?? '',
+      dailyLimit: (json['dailyLimit'] as int? ?? 0).clamp(0, 100000),
     );
   }
 }
@@ -366,12 +375,39 @@ class AiProviderException implements Exception {
   String toString() => message;
 }
 
+/// One provider-independent quota failure. Adapters map HTTP 429, 402 and
+/// provider-specific quota bodies to this type so the rest of the app never
+/// parses provider error prose.
+class QuotaExceeded extends AiProviderException {
+  QuotaExceeded(
+    super.message, {
+    super.status,
+    this.retryAfter,
+    this.providerId = '',
+  });
+
+  final Duration? retryAfter;
+  final String providerId;
+
+  @override
+  bool get isLimit => true;
+
+  String get retryLabel {
+    final wait = retryAfter;
+    if (wait == null) return '';
+    if (wait.inSeconds < 60) return 'Retry in ${wait.inSeconds}s.';
+    if (wait.inMinutes < 60) return 'Retry in ${wait.inMinutes}m.';
+    return 'Retry in ${wait.inHours}h.';
+  }
+}
+
 class Skill {
   const Skill({
     required this.id,
     required this.name,
     required this.instructions,
     this.enabled = true,
+    this.source = '',
   });
 
   final String id;
@@ -379,11 +415,21 @@ class Skill {
   final String instructions;
   final bool enabled;
 
-  Skill copyWith({String? name, String? instructions, bool? enabled}) => Skill(
+  /// `owner/repo/path` for a discovered skill; empty for local skills.
+  final String source;
+
+  Skill copyWith({
+    String? name,
+    String? instructions,
+    bool? enabled,
+    String? source,
+  }) =>
+      Skill(
         id: id,
         name: name ?? this.name,
         instructions: instructions ?? this.instructions,
         enabled: enabled ?? this.enabled,
+        source: source ?? this.source,
       );
 
   Map<String, dynamic> toJson() => {
@@ -391,6 +437,7 @@ class Skill {
         'name': name,
         'instructions': instructions,
         'enabled': enabled,
+        'source': source,
       };
 
   static Skill fromJson(Map<String, dynamic> json) => Skill(
@@ -398,6 +445,7 @@ class Skill {
         name: json['name'] as String? ?? 'Skill',
         instructions: json['instructions'] as String? ?? '',
         enabled: json['enabled'] as bool? ?? true,
+        source: json['source'] as String? ?? '',
       );
 }
 

@@ -11,6 +11,7 @@ import 'project_skills.dart';
 import 'round_log.dart';
 import 'sensitive_paths.dart';
 import 'shell.dart';
+import 'task_checkpoint.dart';
 import 'system_shell.dart';
 import 'tool_validation.dart';
 import 'vfs.dart';
@@ -366,6 +367,8 @@ class Agent {
     this.onCommitAndPush,
     this.onPullLatest,
     this.onProviderLimit,
+    this.onModelRequest,
+    this.skipActionFingerprints = const {},
     this.onTextDelta,
     this.onThinkingDelta,
     this.onToolStart,
@@ -396,6 +399,11 @@ class Agent {
   final AgentGitAction? onCommitAndPush;
   final AgentPullAction? onPullLatest;
   final ProviderLimitHandler? onProviderLimit;
+  final void Function(ProviderConfig provider)? onModelRequest;
+
+  /// Exact actions that finished before a checkpoint. Matching calls are
+  /// acknowledged but never executed a second time.
+  final Set<String> skipActionFingerprints;
   final void Function(String delta)? onTextDelta;
   final void Function(String delta)? onThinkingDelta;
   final void Function(AiToolCall call)? onToolStart;
@@ -490,6 +498,7 @@ class Agent {
           final requestedAt = DateTime.now();
           final thisRound = requestIndex++;
           final requestProvider = current;
+          onModelRequest?.call(current);
           try {
             reply = await client.stream(
               provider: current,
@@ -532,6 +541,13 @@ class Agent {
               outcome =
                   error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
               rethrow;
+            }
+            if (next.id != current.id &&
+                !providerSupportsParallelToolCalls(next)) {
+              turns.add(const AiTurn.user(
+                'Capability update: the new provider does not support parallel '
+                'read calls. Do not batch tool calls; request one at a time.',
+              ));
             }
             current = next;
             switches++;
@@ -1051,11 +1067,33 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
     return 'This patch will change:\n${paths.map((path) => '- $path').join('\n')}';
   }
 
+  static const _checkpointGuardedTools = {
+    'write_file',
+    'edit_file',
+    'apply_patch',
+    'download_file',
+    'install_skill',
+    'run_command',
+    'run_commands',
+    'commit_and_push',
+    'pull_latest',
+  };
+
   Future<_ToolOutcome> _executeAfterValidation(
     AiToolCall call,
     String? validation,
   ) async {
     if (validation != null) return _ToolOutcome('Error: $validation');
+    if (_checkpointGuardedTools.contains(call.name)) {
+      final fingerprint =
+          TaskCheckpoint.actionFingerprint(call.name, call.arguments);
+      if (skipActionFingerprints.contains(fingerprint)) {
+        return const _ToolOutcome(
+          'Already completed at the checkpoint. Skipped to avoid a duplicate '
+          'write or destructive action.',
+        );
+      }
+    }
     return _execute(call);
   }
 

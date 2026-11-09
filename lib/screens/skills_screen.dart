@@ -19,6 +19,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
   List<SkillRepository> _repos = const [];
   bool _searching = false;
   bool _installing = false;
+  int _page = 1;
   String? _error;
   String? _status;
 
@@ -195,7 +196,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
                       'Results from GitHub will appear here.',
                       style: Txt.meta.copyWith(fontSize: 10),
                     )
-                  else
+                  else ...[
                     for (final repo in _repos)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 7),
@@ -204,6 +205,16 @@ class _SkillsScreenState extends State<SkillsScreen> {
                           onTap: _installing ? null : () => _openRepo(repo),
                         ),
                       ),
+                    if (_repos.length >= 12 && !_searching)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: GhostButton(
+                          label: 'Load 12 more',
+                          icon: Icons.expand_more_rounded,
+                          onTap: () => _searchOnline(more: true),
+                        ),
+                      ),
+                  ],
                   if (_installing)
                     Padding(
                       padding: const EdgeInsets.only(top: Sp.x2),
@@ -231,8 +242,9 @@ class _SkillsScreenState extends State<SkillsScreen> {
     );
   }
 
-  Future<void> _searchOnline() async {
+  Future<void> _searchOnline({bool more = false}) async {
     if (_searching || _installing) return;
+    final nextPage = more ? _page + 1 : 1;
     setState(() {
       _searching = true;
       _error = null;
@@ -243,17 +255,20 @@ class _SkillsScreenState extends State<SkillsScreen> {
       final repos = await SkillDiscovery(
         client: state.httpClient,
         token: state.activeGithub?.token ?? '',
-      ).search(_search.text);
+      ).search(_search.text, page: nextPage);
       if (!mounted) return;
       setState(() {
-        _repos = repos;
-        _status = repos.isEmpty ? 'No repositories matched that search.' : null;
+        _page = nextPage;
+        _repos = more ? [..._repos, ...repos] : repos;
+        _status = repos.isEmpty
+            ? 'No more repositories with a SKILL.md matched that search.'
+            : null;
       });
     } catch (error) {
       if (!mounted) return;
       setState(() {
         _error = '$error';
-        _repos = const [];
+        if (!more) _repos = const [];
       });
     } finally {
       if (mounted) setState(() => _searching = false);
@@ -390,9 +405,19 @@ class _SkillsScreenState extends State<SkillsScreen> {
               style: TextButton.styleFrom(foregroundColor: Pal.rose),
               child: const Text('Delete'),
             ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Save'),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: name,
+            builder: (_, nameValue, __) =>
+                ValueListenableBuilder<TextEditingValue>(
+              valueListenable: instructions,
+              builder: (_, instructionsValue, __) => TextButton(
+                onPressed: nameValue.text.trim().isNotEmpty &&
+                        instructionsValue.text.trim().isNotEmpty
+                    ? () => Navigator.of(dialogContext).pop(true)
+                    : null,
+                child: const Text('Save'),
+              ),
+            ),
           ),
         ],
       ),
@@ -441,7 +466,9 @@ class _SkillCard extends StatelessWidget {
                 Text(skill.name, style: Txt.title.copyWith(fontSize: 14)),
                 const SizedBox(height: 2),
                 Text(
-                  skill.instructions,
+                  skill.source.isNotEmpty
+                      ? '${skill.source} · ${skill.instructions}'
+                      : skill.instructions,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Txt.meta.copyWith(height: 1.4),

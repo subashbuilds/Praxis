@@ -149,6 +149,7 @@ class LinuxProcess {
 class LinuxSnapshot {
   const LinuxSnapshot({
     this.diskBytes = 0,
+    this.cacheBytes = 0,
     this.ramUsedBytes,
     this.ramTotalBytes,
     this.load1,
@@ -157,6 +158,7 @@ class LinuxSnapshot {
   });
 
   final int diskBytes;
+  final int cacheBytes;
   final int? ramUsedBytes;
   final int? ramTotalBytes;
   final double? load1;
@@ -223,6 +225,8 @@ class LinuxEnvironment extends ChangeNotifier {
   Future<void>? _preparing;
   Timer? _refreshTimer;
   bool _refreshing = false;
+
+  File get _runtimesFile => File('${base.path}/runtimes.json');
 
   bool get ready => state == LinuxState.ready;
   bool get busy => state == LinuxState.preparing;
@@ -295,6 +299,7 @@ class LinuxEnvironment extends ChangeNotifier {
       } else {
         prootPath = '';
       }
+      await _loadRuntimeState();
       state = LinuxState.ready;
       phase = 'Ready';
       notifyListeners();
@@ -638,8 +643,45 @@ class LinuxEnvironment extends ChangeNotifier {
       version: version,
       error: installed ? '' : _lastLine(result.output),
     );
+    await _saveRuntimeState();
     notifyListeners();
     await refresh();
+  }
+
+  Future<void> _loadRuntimeState() async {
+    try {
+      if (!await _runtimesFile.exists()) return;
+      final raw = jsonDecode(await _runtimesFile.readAsString());
+      if (raw is! Map) return;
+      for (final runtime in LinuxRuntime.values) {
+        final item = raw[runtime.name];
+        if (item is! Map) continue;
+        final installed = item['installed'] as bool? ?? false;
+        if (!installed) continue;
+        runtimes[runtime] = runtimes[runtime]!.copyWith(
+          installed: true,
+          version: item['version'] as String? ?? 'Installed',
+        );
+      }
+      notifyListeners();
+    } catch (_) {
+      // A corrupt status file must not prevent Alpine from starting.
+    }
+  }
+
+  Future<void> _saveRuntimeState() async {
+    try {
+      await base.create(recursive: true);
+      await _runtimesFile.writeAsString(
+          jsonEncode({
+            for (final runtime in LinuxRuntime.values)
+              runtime.name: {
+                'installed': runtimes[runtime]!.installed,
+                'version': runtimes[runtime]!.version,
+              },
+          }),
+          flush: true);
+    } catch (_) {}
   }
 
   String? _lastProjectRoot;
@@ -673,6 +715,7 @@ class LinuxEnvironment extends ChangeNotifier {
           double.tryParse(load.output.trim().split(RegExp(r'\s+')).first);
       snapshot = LinuxSnapshot(
         diskBytes: await _directorySize(Directory(rootfsPath)),
+        cacheBytes: await _cacheSize(),
         ramUsedBytes: ram?.$1,
         ramTotalBytes: ram?.$2,
         load1: load1,
@@ -732,6 +775,20 @@ class LinuxEnvironment extends ChangeNotifier {
     final total = numbers[0];
     final used = numbers.length >= 6 ? numbers[0] - numbers[5] : numbers[1];
     return (math.max(0, used) * 1024 * 1024, total * 1024 * 1024);
+  }
+
+  Future<int> _cacheSize() async {
+    var bytes = 0;
+    for (final path in const [
+      '/var/cache/apk',
+      '/root/.cache',
+      '/root/.npm',
+      '/tmp',
+    ]) {
+      final directory = Directory('$rootfsPath$path');
+      if (await directory.exists()) bytes += await _directorySize(directory);
+    }
+    return bytes;
   }
 
   Future<int> _directorySize(Directory directory) async {

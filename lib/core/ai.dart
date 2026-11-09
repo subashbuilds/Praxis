@@ -178,7 +178,12 @@ class AiClient {
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final body = await response.stream.bytesToString();
-      throw _failureFrom(provider, response.statusCode, body);
+      throw _failureFrom(
+        provider,
+        response.statusCode,
+        body,
+        headers: response.headers,
+      );
     }
 
     final contentType = response.headers['content-type'] ?? '';
@@ -849,10 +854,19 @@ class AiClient {
 
   AiProviderException _failure(
           ProviderConfig provider, http.Response response) =>
-      _failureFrom(provider, response.statusCode, response.body);
+      _failureFrom(
+        provider,
+        response.statusCode,
+        response.body,
+        headers: response.headers,
+      );
 
   AiProviderException _failureFrom(
-      ProviderConfig provider, int status, String body) {
+    ProviderConfig provider,
+    int status,
+    String body, {
+    Map<String, String> headers = const {},
+  }) {
     var detail = '';
     try {
       final decoded = jsonDecode(body);
@@ -870,6 +884,20 @@ class AiClient {
       detail = body.length > 300 ? body.substring(0, 300) : body;
     }
 
+    final quotaText = _looksLikeQuota(status, detail, body);
+    if (quotaText) {
+      final wait = _retryAfter(headers);
+      final suffix = wait == null ? '' : '\nRetry after ${wait.inSeconds}s.';
+      final base =
+          '${provider.name} has reached its request quota or rate limit.';
+      return QuotaExceeded(
+        detail.isEmpty ? '$base$suffix' : '$base\n$detail$suffix',
+        status: status,
+        providerId: provider.id,
+        retryAfter: wait,
+      );
+    }
+
     final hint = switch (status) {
       401 ||
       403 =>
@@ -878,8 +906,7 @@ class AiClient {
         '${provider.name} says the account is out of credit. Add credit or switch provider.',
       404 =>
         'Endpoint or model not found. Check the base URL and model name for ${provider.name}.',
-      429 =>
-        'Rate limited by ${provider.name}. If another key is saved, Praxis can switch to it.',
+      429 => 'Rate limited by ${provider.name}. Try again later.',
       400 => '${provider.name} rejected the request.',
       _ => '${provider.name} failed with HTTP $status.',
     };
@@ -887,6 +914,29 @@ class AiClient {
       detail.isEmpty ? hint : '$hint\n$detail',
       status: status,
     );
+  }
+
+  bool _looksLikeQuota(int status, String detail, String body) {
+    if (status == 429 || status == 402) return true;
+    final text = '$detail $body'.toLowerCase();
+    return text.contains('quota') ||
+        text.contains('rate limit') ||
+        text.contains('rate_limit') ||
+        text.contains('too many requests') ||
+        text.contains('insufficient_quota') ||
+        text.contains('out of credit') ||
+        text.contains('exceeded your current quota');
+  }
+
+  Duration? _retryAfter(Map<String, String> headers) {
+    final raw = headers['retry-after'] ?? headers['Retry-After'];
+    if (raw == null || raw.trim().isEmpty) return null;
+    final seconds = int.tryParse(raw.trim());
+    if (seconds != null && seconds >= 0) return Duration(seconds: seconds);
+    final date = DateTime.tryParse(raw.trim());
+    if (date == null) return null;
+    final wait = date.difference(DateTime.now());
+    return wait.isNegative ? Duration.zero : wait;
   }
 }
 

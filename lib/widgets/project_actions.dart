@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/integrations.dart';
 import '../models.dart';
+import '../screens/integrations_screen.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/confirm_dialog.dart';
@@ -197,7 +198,7 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
     );
     if (!mounted) return;
     widget.onChanged?.call();
-    if (result == true) _snack('Deployment sent to Vercel.');
+    if (result == true) _snack('Deployment sent.');
   }
 
   void _snack(String message) {
@@ -396,6 +397,12 @@ class _DeploySheetState extends State<_DeploySheet> {
   IntegrationResult? _result;
   List<IntegrationAccount> _accounts = const [];
   IntegrationAccount? _account;
+  List<IntegrationAccount> _cfAccounts = const [];
+  IntegrationAccount? _cfAccount;
+  List<CloudflarePagesProject> _projects = const [];
+  CloudflarePagesProject? _project;
+  IntegrationKind _platform = IntegrationKind.vercel;
+  String _environment = 'production';
   int _fileCount = 0;
 
   @override
@@ -421,30 +428,86 @@ class _DeploySheetState extends State<_DeploySheet> {
 
   Future<void> _load() async {
     final accounts = _state.integrations.ofKind(IntegrationKind.vercel);
+    final cfAccounts = _state.integrations.ofKind(IntegrationKind.cloudflare);
     final files = await _state.fsFor(widget.project).textFiles();
     if (!mounted) return;
     setState(() {
       _accounts = accounts;
+      _cfAccounts = cfAccounts;
       _account =
           _state.activeVercel ?? (accounts.isEmpty ? null : accounts.first);
+      _cfAccount = cfAccounts.isEmpty ? null : cfAccounts.first;
       _fileCount = files.length;
+      if (accounts.isEmpty && cfAccounts.isNotEmpty) {
+        _platform = IntegrationKind.cloudflare;
+      }
     });
+    if (_cfAccount != null) await _loadProjects(_cfAccount!);
+  }
+
+  Future<void> _loadProjects(IntegrationAccount account) async {
+    try {
+      final projects = await CloudflarePagesClient(
+        account.token,
+        client: _state.httpClient,
+      ).projects();
+      if (!mounted || _cfAccount?.id != account.id) return;
+      setState(() {
+        _projects = projects;
+        _project = projects.isEmpty ? null : projects.first;
+      });
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
+  }
+
+  void _selectPlatform(IntegrationKind value) {
+    setState(() {
+      _platform = value;
+      _result = null;
+      _error = null;
+    });
+    if (value == IntegrationKind.cloudflare &&
+        _cfAccount != null &&
+        _projects.isEmpty) {
+      _loadProjects(_cfAccount!);
+    }
+  }
+
+  void _addAccount() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const IntegrationsScreen()),
+    );
   }
 
   Future<void> _deploy() async {
-    final account = _account;
-    if (account == null || _name.text.trim().isEmpty) return;
+    final name = _name.text.trim();
+    if (name.isEmpty) return;
+    if (_platform == IntegrationKind.vercel && _account == null) return;
+    if (_platform == IntegrationKind.cloudflare &&
+        (_cfAccount == null || _project == null)) {
+      return;
+    }
     FocusScope.of(context).unfocus();
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      final result = await _state.deployToVercel(
-        _state.projectById(widget.project.id),
-        account,
-        name: _name.text.trim(),
-      );
+      final result = _platform == IntegrationKind.vercel
+          ? await _state.deployToVercel(
+              _state.projectById(widget.project.id),
+              _account!,
+              name: name,
+              environment: _environment,
+            )
+          : await _state.deployToCloudflare(
+              _state.projectById(widget.project.id),
+              _cfAccount!,
+              projectName: _project!.name,
+              environment: _environment,
+              branch: widget.project.branch,
+            );
       if (mounted) setState(() => _result = result);
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -473,7 +536,7 @@ class _DeploySheetState extends State<_DeploySheet> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Deploy to Vercel', style: Txt.headline),
+                        Text('Deploy', style: Txt.headline),
                         const SizedBox(height: 2),
                         Text(
                           'A static deployment of the project as it is now.',
@@ -496,43 +559,109 @@ class _DeploySheetState extends State<_DeploySheet> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (_accounts.isEmpty)
-                    const EmptyState(
-                      icon: Icons.link_off_rounded,
-                      title: 'No Vercel account',
-                      body:
-                          'Add a Vercel token in Settings → Integrations before deploying.',
+                  _PlatformPicker(
+                    value: _platform,
+                    onChanged: _selectPlatform,
+                  ),
+                  const SizedBox(height: Sp.x4),
+                  if ((_platform == IntegrationKind.vercel
+                          ? _accounts
+                          : _cfAccounts)
+                      .isEmpty)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        EmptyState(
+                          icon: Icons.link_off_rounded,
+                          title: 'No ${_platform.label} account',
+                          body: 'Connect ${_platform.label} once, then deploy '
+                              'this project without leaving Praxis.',
+                        ),
+                        const SizedBox(height: Sp.x3),
+                        EmberButton(
+                          label: 'Add ${_platform.label} account',
+                          icon: Icons.add_link_rounded,
+                          onTap: _addAccount,
+                        ),
+                      ],
                     )
                   else ...[
-                    if (_accounts.length > 1) ...[
+                    if ((_platform == IntegrationKind.vercel
+                                ? _accounts
+                                : _cfAccounts)
+                            .length >
+                        1) ...[
                       const _Label('ACCOUNT'),
                       _AccountDropdown(
-                        accounts: _accounts,
-                        value: _account,
-                        onChanged: (value) => setState(() => _account = value),
+                        accounts: _platform == IntegrationKind.vercel
+                            ? _accounts
+                            : _cfAccounts,
+                        value: _platform == IntegrationKind.vercel
+                            ? _account
+                            : _cfAccount,
+                        onChanged: (value) {
+                          setState(() {
+                            if (_platform == IntegrationKind.vercel) {
+                              _account = value;
+                            } else {
+                              _cfAccount = value;
+                              _projects = const [];
+                              _project = null;
+                            }
+                          });
+                          if (_platform == IntegrationKind.cloudflare &&
+                              value != null) {
+                            _loadProjects(value);
+                          }
+                        },
                       ),
                       const SizedBox(height: Sp.x3),
                     ],
                     _DetailRow(
                       label: 'Account',
-                      value: _account == null
-                          ? '—'
-                          : '@${_account!.username}${_account!.label.isEmpty ? '' : ' · ${_account!.label}'}',
-                    ),
-                    _DetailRow(
-                      label: 'Project',
-                      value: widget.project.name,
+                      value:
+                          '@${_platform == IntegrationKind.vercel ? (_account?.username ?? '—') : (_cfAccount?.username ?? '—')}',
                     ),
                     _DetailRow(
                       label: 'Files',
                       value: '$_fileCount text files',
                     ),
-                    const _DetailRow(label: 'Target', value: 'Production'),
+                    if (_platform == IntegrationKind.cloudflare) ...[
+                      const _Label('PAGES PROJECT'),
+                      if (_projects.isEmpty)
+                        Text(
+                          'No Pages projects found. Create one in Cloudflare, '
+                          'then reopen this sheet.',
+                          style: Txt.meta.copyWith(fontSize: 10),
+                        )
+                      else
+                        _ProjectDropdown(
+                          projects: _projects,
+                          value: _project,
+                          onChanged: (value) =>
+                              setState(() => _project = value),
+                        ),
+                    ] else ...[
+                      _Field(
+                        controller: _name,
+                        label: 'Deployment name',
+                        hint: 'my-project',
+                      ),
+                    ],
                     const SizedBox(height: Sp.x3),
-                    _Field(
-                      controller: _name,
-                      label: 'Deployment name',
-                      hint: 'my-project',
+                    const _Label('ENVIRONMENT'),
+                    Wrap(
+                      spacing: 7,
+                      children: [
+                        for (final value in const ['production', 'preview'])
+                          _TargetChoice(
+                            label: value == 'production'
+                                ? 'Production'
+                                : 'Preview',
+                            active: _environment == value,
+                            onTap: () => setState(() => _environment = value),
+                          ),
+                      ],
                     ),
                     if (_error != null) ...[
                       const SizedBox(height: 12),
@@ -551,13 +680,154 @@ class _DeploySheetState extends State<_DeploySheet> {
                       label: _result == null ? 'Deploy' : 'Deploy again',
                       icon: Icons.rocket_launch_outlined,
                       loading: _busy,
-                      onTap: _busy || _account == null ? null : _deploy,
+                      onTap: _busy ? null : _deploy,
                     ),
                   ],
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PlatformPicker extends StatelessWidget {
+  const _PlatformPicker({required this.value, required this.onChanged});
+
+  final IntegrationKind value;
+  final ValueChanged<IntegrationKind> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        for (final kind in const [
+          IntegrationKind.vercel,
+          IntegrationKind.cloudflare,
+        ])
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(
+                right: kind == IntegrationKind.vercel ? 7 : 0,
+              ),
+              child: GestureDetector(
+                onTap: () => onChanged(kind),
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                  decoration: BoxDecoration(
+                    color:
+                        value == kind ? Pal.ember.withOpacity(0.1) : Pal.raised,
+                    borderRadius: Rd.sm,
+                    border: Border.all(
+                      color: value == kind
+                          ? Pal.ember.withOpacity(0.55)
+                          : Pal.line,
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Icon(
+                        kind == IntegrationKind.vercel
+                            ? Icons.change_history_rounded
+                            : Icons.cloud_outlined,
+                        size: 19,
+                        color: value == kind ? Pal.ember : Pal.textMuted,
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        kind.label,
+                        style: Txt.label.copyWith(
+                          fontSize: 11,
+                          color: value == kind ? Pal.ember : Pal.text,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _TargetChoice extends StatelessWidget {
+  const _TargetChoice({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? Pal.ember.withOpacity(0.12) : Pal.raised,
+          borderRadius: Rd.sm,
+          border: Border.all(
+            color: active ? Pal.ember.withOpacity(0.5) : Pal.line,
+          ),
+        ),
+        child: Text(
+          label,
+          style: Txt.label.copyWith(
+            fontSize: 11,
+            color: active ? Pal.ember : Pal.textMuted,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProjectDropdown extends StatelessWidget {
+  const _ProjectDropdown({
+    required this.projects,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final List<CloudflarePagesProject> projects;
+  final CloudflarePagesProject? value;
+  final ValueChanged<CloudflarePagesProject?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.line),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<CloudflarePagesProject>(
+          value: value,
+          isExpanded: true,
+          dropdownColor: Pal.raised,
+          icon: Icon(Icons.unfold_more_rounded, size: 17, color: Pal.textDim),
+          style: Txt.body.copyWith(fontSize: 13),
+          items: [
+            for (final project in projects)
+              DropdownMenuItem(
+                value: project,
+                child: Text(project.name),
+              ),
+          ],
+          onChanged: onChanged,
         ),
       ),
     );

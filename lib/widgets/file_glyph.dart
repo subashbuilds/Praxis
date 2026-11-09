@@ -133,6 +133,34 @@ class FileGlyph extends StatelessWidget {
     return null;
   }
 
+  Color get _assetColor {
+    if (_lower == 'dockerfile' || _lower.startsWith('dockerfile.')) {
+      return const Color(0xFF2496ED);
+    }
+    return switch (_extension) {
+      'dart' => const Color(0xFF40C4FF),
+      'py' || 'pyi' => const Color(0xFFFFD54F),
+      'js' || 'jsx' || 'mjs' || 'cjs' => const Color(0xFFF7DF1E),
+      'ts' || 'tsx' || 'mts' || 'cts' => const Color(0xFF42A5F5),
+      'md' || 'markdown' || 'mdx' => const Color(0xFF90CAF9),
+      'yaml' || 'yml' => const Color(0xFFF06292),
+      'json' || 'jsonc' => const Color(0xFFFFB74D),
+      'html' || 'htm' || 'xhtml' => const Color(0xFFFF7043),
+      'css' || 'scss' || 'sass' || 'less' => const Color(0xFF64B5F6),
+      'php' => const Color(0xFF9575CD),
+      'go' => const Color(0xFF4DD0E1),
+      'rs' => const Color(0xFFFF8A65),
+      'java' => const Color(0xFFEF9A9A),
+      'kt' || 'kts' => const Color(0xFFBA68C8),
+      'swift' => const Color(0xFFFFAB91),
+      'rb' || 'erb' => const Color(0xFFE57373),
+      'c' || 'h' => const Color(0xFF90A4AE),
+      'cpp' || 'cc' || 'cxx' || 'hpp' => const Color(0xFF7986CB),
+      'sh' || 'bash' || 'zsh' || 'fish' => const Color(0xFF81C784),
+      _ => Pal.text,
+    };
+  }
+
   Color get _fallbackColor {
     if (_lower.startsWith('license') || _lower.startsWith('licence')) {
       return Pal.amber;
@@ -165,7 +193,7 @@ class FileGlyph extends StatelessWidget {
     }
 
     final asset = _asset;
-    if (asset != null) return _assetTile(asset, Pal.text, size);
+    if (asset != null) return _assetTile(asset, _assetColor, size);
     final icon = _fallbackIcon;
     if (icon != null) {
       return Icon(icon, size: size, color: _fallbackColor);

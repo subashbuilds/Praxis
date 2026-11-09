@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'file_types.dart';
@@ -33,6 +34,25 @@ class GitHubRepo {
   final String defaultBranch;
 
   String get fullName => '$owner/$name';
+}
+
+class VercelProject {
+  const VercelProject({required this.id, required this.name});
+
+  final String id;
+  final String name;
+}
+
+class CloudflarePagesProject {
+  const CloudflarePagesProject({
+    required this.name,
+    required this.productionBranch,
+    this.url = '',
+  });
+
+  final String name;
+  final String productionBranch;
+  final String url;
 }
 
 class GitHubSnapshot {
@@ -645,9 +665,36 @@ class VercelClient {
     return name;
   }
 
+  Future<List<VercelProject>> projects() async {
+    final response = await _client
+        .get(
+          Uri.parse('https://api.vercel.com/v9/projects?limit=100'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 45));
+    if (response.statusCode != 200) {
+      throw IntegrationException(_error(response, 'Could not list projects'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final list = body['projects'];
+    if (list is! List) return const [];
+    return [
+      for (final item in list)
+        if (item is Map)
+          VercelProject(
+            id: item['id'] as String? ?? '',
+            name: item['name'] as String? ?? '',
+          ),
+    ]
+        .where((project) => project.id.isNotEmpty && project.name.isNotEmpty)
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+  }
+
   Future<IntegrationResult> deploy({
     required String name,
     required Map<String, String> files,
+    String environment = 'production',
   }) async {
     if (token.trim().isEmpty) {
       throw IntegrationException('Add a Vercel account first.');
@@ -662,7 +709,7 @@ class VercelClient {
           headers: _headers,
           body: jsonEncode({
             'name': name,
-            'target': 'production',
+            'target': environment == 'preview' ? 'preview' : 'production',
             'files': [
               for (final entry in files.entries)
                 {
@@ -685,8 +732,8 @@ class VercelClient {
           message: 'Deployment queued for @$account · ${files.length} files.');
     }
     return IntegrationResult(
-      message:
-          'Deployed ${files.length} files for @$account to Vercel production.',
+      message: 'Deployed ${files.length} files for @$account to Vercel '
+          '${environment == 'preview' ? 'preview' : 'production'}.',
       url: 'https://$url',
     );
   }
@@ -704,3 +751,199 @@ class VercelClient {
     return '$fallback (HTTP ${response.statusCode}).';
   }
 }
+
+/// Cloudflare Pages Direct Upload. Assets are uploaded to the Pages asset
+/// store with a short-lived JWT, then a deployment manifest points at them.
+class CloudflarePagesClient {
+  CloudflarePagesClient(this.token, {http.Client? client})
+      : _client = client ?? http.Client();
+
+  final String token;
+  final http.Client _client;
+
+  Map<String, String> get _headers => {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      };
+
+  Future<(String, String)> _account() async {
+    final response = await _client
+        .get(Uri.parse('https://api.cloudflare.com/client/v4/accounts'),
+            headers: _headers)
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Cloudflare rejected the token'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final result = body['result'];
+    if (body['success'] != true || result is! List || result.isEmpty) {
+      throw IntegrationException(
+          'No Cloudflare account is available for this token.');
+    }
+    final first = result.first as Map;
+    final id = first['id'] as String? ?? '';
+    final name = first['name'] as String? ?? 'Cloudflare';
+    if (id.isEmpty) {
+      throw IntegrationException('Cloudflare returned no account id.');
+    }
+    return (id, name);
+  }
+
+  Future<String> login() async => (await _account()).$2;
+
+  Future<List<CloudflarePagesProject>> projects() async {
+    final (accountId, _) = await _account();
+    final response = await _client
+        .get(
+          Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
+              '$accountId/pages/projects?per_page=100'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 45));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Could not list Pages projects'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final list = body['result'];
+    if (list is! List) return const [];
+    return [
+      for (final item in list)
+        if (item is Map)
+          CloudflarePagesProject(
+            name: item['name'] as String? ?? '',
+            productionBranch: item['production_branch'] as String? ?? 'main',
+            url: item['subdomain'] is String
+                ? 'https://${item['subdomain']}'
+                : '',
+          ),
+    ].where((project) => project.name.isNotEmpty).toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+  }
+
+  Future<IntegrationResult> deploy({
+    required String project,
+    required Map<String, String> files,
+    String environment = 'production',
+    String branch = 'main',
+  }) async {
+    if (files.isEmpty) {
+      throw IntegrationException('This project has no text files to deploy.');
+    }
+    final (accountId, accountName) = await _account();
+    final tokenResponse = await _client
+        .get(
+          Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
+              '$accountId/pages/projects/$project/upload-token'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 30));
+    if (tokenResponse.statusCode != 200) {
+      throw IntegrationException(
+          _error(tokenResponse, 'Could not get a Pages upload token'));
+    }
+    final tokenBody = jsonDecode(tokenResponse.body) as Map<String, dynamic>;
+    final jwt = (tokenBody['result'] as Map?)?['jwt'] as String? ?? '';
+    if (jwt.isEmpty) {
+      throw IntegrationException('Cloudflare returned no upload token.');
+    }
+
+    final hashes = <String, String>{};
+    for (final entry in files.entries) {
+      hashes[entry.key] = digestForPages(entry.value);
+    }
+    final uploads = [
+      for (final entry in files.entries)
+        {
+          'base64': true,
+          'key': hashes[entry.key],
+          'value': base64Encode(utf8.encode(entry.value)),
+          'metadata': {'contentType': _contentType(entry.key)},
+        },
+    ];
+    for (var start = 0; start < uploads.length; start += 50) {
+      final chunk = uploads.sublist(
+        start,
+        math.min(start + 50, uploads.length),
+      );
+      final upload = await _client
+          .post(
+            Uri.parse(
+                'https://api.cloudflare.com/client/v4/pages/assets/upload'),
+            headers: {
+              'Authorization': 'Bearer $jwt',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode(chunk),
+          )
+          .timeout(const Duration(seconds: 90));
+      if (upload.statusCode < 200 || upload.statusCode >= 300) {
+        throw IntegrationException(
+            _error(upload, 'Could not upload Pages assets'));
+      }
+    }
+
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
+          '$accountId/pages/projects/$project/deployments'),
+    )..headers['Authorization'] = 'Bearer $token';
+    request.fields.addAll({
+      'manifest': jsonEncode(hashes),
+      'branch': branch,
+      'environment': environment == 'preview' ? 'preview' : 'production',
+      'commit_message': 'Deploy ${files.length} files from Praxis',
+      'commit_dirty': 'true',
+    });
+    final response = await http.Response.fromStream(
+      await request.send().timeout(const Duration(seconds: 90)),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw IntegrationException(_error(response, 'Deployment failed'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final result = body['result'] as Map<String, dynamic>?;
+    final aliases = result?['aliases'];
+    final firstAlias =
+        aliases is List && aliases.isNotEmpty ? aliases.first.toString() : '';
+    final url = firstAlias.startsWith('http')
+        ? firstAlias
+        : 'https://$project.pages.dev';
+    return IntegrationResult(
+      message: 'Deployed ${files.length} files to $accountName · '
+          '$project ${environment == 'preview' ? 'preview' : 'production'}.',
+      url: url,
+    );
+  }
+
+  String _error(http.Response response, String fallback) {
+    try {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final errors = body['errors'];
+      if (errors is List && errors.isNotEmpty && errors.first is Map) {
+        final message = (errors.first as Map)['message'];
+        if (message is String && message.isNotEmpty) {
+          return '$fallback (${response.statusCode}): $message';
+        }
+      }
+    } catch (_) {}
+    return '$fallback (HTTP ${response.statusCode}).';
+  }
+
+  static String _contentType(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.html')) return 'text/html; charset=utf-8';
+    if (lower.endsWith('.css')) return 'text/css; charset=utf-8';
+    if (lower.endsWith('.js') || lower.endsWith('.mjs')) {
+      return 'application/javascript; charset=utf-8';
+    }
+    if (lower.endsWith('.json')) return 'application/json';
+    if (lower.endsWith('.svg')) return 'image/svg+xml';
+    return 'text/plain; charset=utf-8';
+  }
+}
+
+String digestForPages(String content) =>
+    sha256.convert(utf8.encode(content)).toString().substring(0, 32);

@@ -19,6 +19,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
   late final TextEditingController _name;
   late final TextEditingController _model;
   late final TextEditingController _baseUrl;
+  late final TextEditingController _dailyLimit;
   late final TextEditingController _search;
   late final List<TextEditingController> _keys;
   late final List<bool> _reveal;
@@ -38,6 +39,10 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     _name = TextEditingController(text: widget.provider.name);
     _model = TextEditingController(text: widget.provider.model);
     _baseUrl = TextEditingController(text: widget.provider.baseUrl);
+    _dailyLimit = TextEditingController(
+      text:
+          widget.provider.dailyLimit > 0 ? '${widget.provider.dailyLimit}' : '',
+    );
     _search = TextEditingController();
     final stored =
         widget.provider.keys.where((key) => key.trim().isNotEmpty).toList();
@@ -57,6 +62,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     _name.dispose();
     _model.dispose();
     _baseUrl.dispose();
+    _dailyLimit.dispose();
     _search.dispose();
     for (final controller in _keys) {
       controller.dispose();
@@ -82,6 +88,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
         keyIndex: _activeIndex,
         models: _models,
         selectedModels: _selected.toList()..sort(),
+        dailyLimit: int.tryParse(_dailyLimit.text.trim()) ?? 0,
       );
 
   void _addKey() {
@@ -230,6 +237,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
       keyIndex: keys.isEmpty ? 0 : _keyIndex.clamp(0, keys.length - 1),
       models: _models,
       selectedModels: _selected.toList()..sort(),
+      dailyLimit: int.tryParse(_dailyLimit.text.trim()) ?? 0,
     );
     await state.saveProvider(provider);
     if (activate) await state.setActiveProvider(provider.id);
@@ -404,6 +412,23 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
               autocorrect: false,
               enableSuggestions: false,
               decoration: appField('model-name', label: 'Active model'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _dailyLimit,
+              style: Txt.code.copyWith(fontSize: 12),
+              cursorColor: Pal.ember,
+              keyboardType: TextInputType.number,
+              decoration: appField(
+                'No limit',
+                label: 'Daily request limit (your plan)',
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              'Requests are counted on this device and reset at local '
+              'midnight. Leave blank if your provider has no daily request cap.',
+              style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
             ),
             if (_selected.isNotEmpty) ...[
               const SizedBox(height: 8),

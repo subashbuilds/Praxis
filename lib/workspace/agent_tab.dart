@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../core/diff.dart';
+import '../core/task_checkpoint.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
@@ -248,6 +249,21 @@ class _AgentTabState extends State<AgentTab> {
             ],
           ),
         ),
+        if (state.activeQuota.hasLimit &&
+            (state.activeQuota.warning ||
+                state.activeQuota.low ||
+                state.activeQuota.exhausted))
+          _QuotaWarning(
+            used: state.activeQuota.used,
+            limit: state.activeQuota.limit,
+            exhausted: state.activeQuota.exhausted,
+          ),
+        if (state.checkpointFor(widget.project.id)?.resumable ?? false)
+          _ResumeCard(
+            checkpoint: state.checkpointFor(widget.project.id)!,
+            onResume: () => state.resumeTask(widget.project.id),
+            onDismiss: () => state.dismissCheckpoint(widget.project.id),
+          ),
         _Composer(
           controller: _composer,
           busy: state.busy,
@@ -801,6 +817,7 @@ class _ToolPillState extends State<_ToolPill> {
   IconData get _icon => switch (entry.tool) {
         'write_file' => Icons.edit_note_rounded,
         'read_file' => Icons.description_outlined,
+        'read_files' => Icons.description_outlined,
         'run_command' => Icons.terminal_rounded,
         'list_files' => Icons.folder_open_rounded,
         _ => Icons.build_outlined,
@@ -906,6 +923,9 @@ class _ToolBody extends StatelessWidget {
       return _DiffTable(diff: diff!);
     }
     if (content.isEmpty) return const SizedBox.shrink();
+    if (entry.tool == 'read_files') {
+      return _ReadFilesBody(text: content);
+    }
     final numbered = entry.tool == 'read_file' || entry.tool == 'list_files';
     return Container(
       width: double.infinity,
@@ -1303,3 +1323,195 @@ class _JumpToBottom extends StatelessWidget {
 }
 
 double mathMax(double a, double b) => a > b ? a : b;
+
+class _QuotaWarning extends StatelessWidget {
+  const _QuotaWarning({
+    required this.used,
+    required this.limit,
+    required this.exhausted,
+  });
+
+  final int used;
+  final int limit;
+  final bool exhausted;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = exhausted ? Pal.rose : Pal.amber;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(Sp.x3, 0, Sp.x3, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: Rd.sm,
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            exhausted ? Icons.block_rounded : Icons.speed_rounded,
+            size: 14,
+            color: color,
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              exhausted
+                  ? '$used/$limit requests used today. This provider has no requests left for today.'
+                  : '$used/$limit requests used today. This task may use the rest of today\'s allowance.',
+              style: Txt.meta.copyWith(fontSize: 9.5, color: color),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResumeCard extends StatelessWidget {
+  const _ResumeCard({
+    required this.checkpoint,
+    required this.onResume,
+    required this.onDismiss,
+  });
+
+  final TaskCheckpoint checkpoint;
+  final VoidCallback onResume;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(Sp.x3, 0, Sp.x3, 6),
+      padding: const EdgeInsets.fromLTRB(11, 10, 8, 8),
+      decoration: BoxDecoration(
+        color: Pal.ember.withOpacity(0.07),
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.ember.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.restore_rounded, size: 15, color: Pal.ember),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Task paused · ${checkpoint.completed.length} completed',
+                  style: Txt.label.copyWith(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              IconAction(
+                icon: Icons.close_rounded,
+                tooltip: 'Dismiss checkpoint',
+                size: 15,
+                onTap: onDismiss,
+              ),
+            ],
+          ),
+          if (checkpoint.pendingStep.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 22, top: 2),
+              child: Text(
+                checkpoint.pendingStep,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+              ),
+            ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Text(
+                '${checkpoint.changedFiles.length} changed files · '
+                '${checkpoint.providerName} ${checkpoint.model}',
+                style: Txt.meta.copyWith(fontSize: 8.5),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: onResume,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Pal.ember,
+                    borderRadius: Rd.sm,
+                  ),
+                  child: Text(
+                    'Resume',
+                    style: Txt.label.copyWith(
+                      fontSize: 10,
+                      color: Pal.onEmber,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ReadFilesBody extends StatelessWidget {
+  const _ReadFilesBody({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final matches =
+        RegExp(r'^\[(.+?) · lines', multiLine: true).allMatches(text).toList();
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.line),
+      ),
+      child: matches.isEmpty
+          ? Text(
+              text,
+              style: Txt.code.copyWith(fontSize: 10.5, height: 1.5),
+            )
+          : Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final match in matches)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Pal.surface,
+                      borderRadius: Rd.sm,
+                      border: Border.all(color: Pal.line),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.description_outlined,
+                            size: 12, color: Pal.sky),
+                        const SizedBox(width: 5),
+                        Text(
+                          match.group(1) ?? '',
+                          style: Txt.code.copyWith(fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+}

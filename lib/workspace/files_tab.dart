@@ -709,20 +709,29 @@ class _FilesTabState extends State<FilesTab> {
                             _ChangeBadge(change: change),
                             const SizedBox(width: 7),
                           ] else if (folderChanges > 0) ...[
-                            Text(
-                              '$folderChanges',
-                              style: Txt.meta.copyWith(
-                                fontSize: 9,
-                                color: Pal.amber,
-                                fontWeight: FontWeight.w700,
+                            SizedBox(
+                              width: 19,
+                              child: Text(
+                                '$folderChanges',
+                                textAlign: TextAlign.center,
+                                style: Txt.meta.copyWith(
+                                  fontSize: 9,
+                                  height: 1,
+                                  color: Pal.amber,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
                             const SizedBox(width: 7),
                           ],
                           if (!entry.isDir)
-                            Text(
-                              humanSize(entry.size),
-                              style: Txt.meta.copyWith(fontSize: 9.5),
+                            SizedBox(
+                              width: 38,
+                              child: Text(
+                                humanSize(entry.size),
+                                textAlign: TextAlign.right,
+                                style: Txt.meta.copyWith(fontSize: 9.5),
+                              ),
                             ),
                         ],
                       ),

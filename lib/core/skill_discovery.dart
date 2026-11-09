@@ -55,7 +55,7 @@ class SkillDiscovery {
         if (token.isNotEmpty) 'Authorization': 'Bearer $token',
       };
 
-  Future<List<SkillRepository>> search(String query) async {
+  Future<List<SkillRepository>> search(String query, {int page = 1}) async {
     final cleaned = query.trim();
     final q = cleaned.isEmpty
         ? 'claude skills in:name,description,readme'
@@ -65,6 +65,7 @@ class SkillDiscovery {
       'sort': 'stars',
       'order': 'desc',
       'per_page': '12',
+      'page': '$page',
     });
     final response = await client
         .get(uri, headers: _headers)
@@ -82,7 +83,7 @@ class SkillDiscovery {
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     final items = body['items'];
     if (items is! List) return const [];
-    return [
+    final candidates = [
       for (final item in items)
         if (item is Map)
           SkillRepository(
@@ -93,6 +94,19 @@ class SkillDiscovery {
             branch: item['default_branch'] as String? ?? 'main',
           ),
     ].where((repo) => repo.owner.isNotEmpty && repo.name.isNotEmpty).toList();
+    // A repository is only useful in this screen if it actually contains a
+    // SKILL.md. Verify before showing it so search never leads to a dead end.
+    final verified = await Future.wait(candidates.map((repo) async {
+      try {
+        return (await skillsIn(repo)).isNotEmpty ? repo : null;
+      } catch (_) {
+        return null;
+      }
+    }));
+    return [
+      for (final repo in verified)
+        if (repo != null) repo,
+    ];
   }
 
   Future<List<DiscoveredSkill>> skillsIn(SkillRepository repo) async {
@@ -161,10 +175,14 @@ class SkillDiscovery {
     }
     final name =
         parsed.name.trim().isEmpty ? discovered.name : parsed.name.trim();
+    final source =
+        '${discovered.repository.owner}/${discovered.repository.name}';
     return Skill(
-      id: 'skill-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}',
+      id: 'gh-${source.replaceAll('/', '-')}-'
+          '${discovered.path.hashCode.abs()}',
       name: name,
       instructions: instructions,
+      source: source,
     );
   }
 

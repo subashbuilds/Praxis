@@ -18,8 +18,10 @@ import '../core/linux_environment.dart';
 import '../core/model_info.dart';
 import '../core/project_skills.dart';
 import '../core/push_state.dart';
+import '../core/quota_tracker.dart';
 import '../core/repo_clone.dart';
 import '../core/round_log.dart';
+import '../core/task_checkpoint.dart';
 import '../core/shell.dart';
 import '../core/store.dart';
 import '../core/system_shell.dart';
@@ -75,6 +77,7 @@ class AppState extends ChangeNotifier {
     required this.store,
     http.Client? httpClient,
     this.roundLog,
+    this.checkpointStore,
     this.linux,
     this.seedWelcome = true,
   }) : httpClient = httpClient ?? http.Client();
@@ -88,6 +91,7 @@ class AppState extends ChangeNotifier {
   static const _kAutoNextProvider = 'praxis.autoNextProvider';
   static const _kDarkMode = 'praxis.darkMode';
   static const _kUsage = 'praxis.usage';
+  static const _kQuota = 'praxis.quota.requests';
   static const _kDrafts = 'praxis.drafts';
   static const _kChatPrefix = 'praxis.chat.';
 
@@ -95,6 +99,7 @@ class AppState extends ChangeNotifier {
   final KVStore store;
   final http.Client httpClient;
   final RoundLogStore? roundLog;
+  final TaskCheckpointStore? checkpointStore;
   final LinuxEnvironment? linux;
   final bool seedWelcome;
 
@@ -136,6 +141,9 @@ class AppState extends ChangeNotifier {
   final Map<String, Shell> _shells = {};
   final Map<String, SystemShell> _systemShells = {};
   final Map<String, PushState> _pushStates = {};
+  final Map<String, TaskCheckpoint> _checkpoints = {};
+  QuotaTracker _quota = QuotaTracker();
+  Future<void> _checkpointWrite = Future.value();
 
   bool _ready = false;
   bool get ready => _ready;
@@ -157,12 +165,18 @@ class AppState extends ChangeNotifier {
     final directory = await getApplicationDocumentsDirectory();
     final root = Directory('${directory.path}/praxis');
     RoundLogStore? roundLog;
+    TaskCheckpointStore? checkpointStore;
     LinuxEnvironment? linux;
     try {
       final support = await getApplicationSupportDirectory();
       final fileLog = FileRoundLog(Directory('${support.path}/praxis/logs'));
       await fileLog.prepare();
       roundLog = fileLog;
+      final fileCheckpoints = FileTaskCheckpointStore(
+        Directory('${support.path}/praxis/checkpoints'),
+      );
+      await fileCheckpoints.prepare();
+      checkpointStore = fileCheckpoints;
       linux = LinuxEnvironment(
         base: Directory('${support.path}/praxis/linux'),
       );
@@ -175,6 +189,7 @@ class AppState extends ChangeNotifier {
       root: root,
       store: PrefsStore(prefs),
       roundLog: roundLog,
+      checkpointStore: checkpointStore,
       linux: linux,
     );
     await state.init();
@@ -205,6 +220,8 @@ class AppState extends ChangeNotifier {
     _loadSkills();
     _loadIntegrations();
     _loadUsage();
+    _loadQuota();
+    await _loadCheckpoints();
     _loadDrafts();
     wordWrap = store.read(_kWordWrap) == 'true';
     autoNextKey = store.read(_kAutoNextKey) == 'true';
@@ -647,6 +664,17 @@ class AppState extends ChangeNotifier {
     String projectId,
     String raw, {
     List<String> attachments = const [],
+  }) =>
+      _runPrompt(projectId, raw, attachments: attachments);
+
+  Future<void> _runPrompt(
+    String projectId,
+    String raw, {
+    List<String> attachments = const [],
+    List<AiTurn>? historyOverride,
+    Set<String> skipActionFingerprints = const {},
+    TaskCheckpoint? resumeFrom,
+    bool recordUserMessage = true,
   }) async {
     final prompt = raw.trim();
     if ((prompt.isEmpty && attachments.isEmpty) || busy) return;
@@ -655,26 +683,33 @@ class AppState extends ChangeNotifier {
     final thread = threadOf(projectId);
     final started = DateTime.now();
     _activeProjectId = projectId;
+    final quota = _quota.status(provider);
+    if (quota.exhausted) {
+      thread.add(_entry(
+        role: ChatRole.error,
+        text: 'Daily request limit reached for ${provider.name}: '
+            '${quota.used}/${quota.limit}. Raise the limit in the provider '
+            'settings, choose another provider, or resume tomorrow.',
+        ok: false,
+      ));
+      notifyListeners();
+      await _persistChat(projectId);
+      return;
+    }
 
     final stored = attachments.isEmpty
         ? const <String>[]
         : await attachFiles(project, attachments);
 
-    final history = <AiTurn>[];
-    for (final entry in thread) {
-      if (entry.role == ChatRole.user) {
-        history.add(AiTurn.user(entry.text));
-      } else if (entry.role == ChatRole.assistant &&
-          entry.text.trim().isNotEmpty) {
-        history.add(AiTurn.assistant(entry.text, const []));
-      }
-    }
+    final history = historyOverride ?? _historyFor(thread);
 
-    thread.add(_entry(
-      role: ChatRole.user,
-      text: prompt.isEmpty ? 'Look at the attached files.' : prompt,
-      attachments: stored,
-    ));
+    if (recordUserMessage) {
+      thread.add(_entry(
+        role: ChatRole.user,
+        text: prompt.isEmpty ? 'Look at the attached files.' : prompt,
+        attachments: stored,
+      ));
+    }
     _clearLive();
     notifyListeners();
     await _persistChat(projectId);
@@ -695,6 +730,30 @@ class AppState extends ChangeNotifier {
     _cancelled = false;
     notifyListeners();
 
+    var checkpoint = (resumeFrom ??
+            TaskCheckpoint(
+              taskId: '$projectId-${started.microsecondsSinceEpoch}',
+              projectId: projectId,
+              providerId: provider.id,
+              providerName: provider.name,
+              model: provider.model,
+              originalPrompt: TaskCheckpoint.sanitize(prompt),
+              createdAt: started,
+              updatedAt: started,
+            ))
+        .copyWith(
+      providerId: provider.id,
+      providerName: provider.name,
+      model: provider.model,
+      status: TaskCheckpointStatus.running,
+      updatedAt: DateTime.now(),
+      pendingStep: resumeFrom?.pendingStep ?? '',
+      conversationTail: _checkpointTurns(thread),
+    );
+    final pendingCalls = <String, AiToolCall>{};
+    var checkpointError = '';
+    _queueCheckpoint(checkpoint);
+
     final agent = Agent(
       client: ai,
       provider: provider,
@@ -714,6 +773,17 @@ class AppState extends ChangeNotifier {
       onPullLatest:
           activeGithub == null ? null : () => agentPullLatest(projectId),
       onProviderLimit: _handleProviderLimit,
+      onModelRequest: (used) {
+        checkpoint = checkpoint.copyWith(
+          providerId: used.id,
+          providerName: used.name,
+          model: used.model,
+          updatedAt: DateTime.now(),
+        );
+        _queueCheckpoint(checkpoint);
+        unawaited(_recordModelRequest(used));
+      },
+      skipActionFingerprints: skipActionFingerprints,
       onTextDelta: (delta) {
         liveText += delta;
         notifyListeners();
@@ -723,10 +793,12 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       },
       onToolStart: (call) {
+        final detail = _toolDetail(call);
+        pendingCalls['${call.name}|$detail'] = call;
         liveTools.add(ToolDraft(
           id: '${DateTime.now().microsecondsSinceEpoch}',
           tool: call.name,
-          detail: _toolDetail(call),
+          detail: detail,
         ));
         notifyListeners();
       },
@@ -749,12 +821,42 @@ class AppState extends ChangeNotifier {
       onEvent: (event) {
         if (event.kind == AgentEventKind.text) {
           _clearLive();
+          checkpoint = checkpoint.copyWith(
+            pendingStep: TaskCheckpoint.sanitize(event.text),
+            updatedAt: DateTime.now(),
+          );
+          _queueCheckpoint(checkpoint);
           thread.add(_entry(
             role: ChatRole.assistant,
             text: event.text,
             thinking: event.thinking,
           ));
         } else if (event.kind == AgentEventKind.tool) {
+          final call = pendingCalls.remove('${event.tool}|${event.detail}');
+          if (event.ok && call != null && _isCheckpointAction(event.tool)) {
+            final label = _checkpointLabel(event.tool, event.detail);
+            checkpoint = checkpoint
+                .withAction(CheckpointAction(
+                  fingerprint: TaskCheckpoint.actionFingerprint(
+                    event.tool,
+                    call.arguments,
+                  ),
+                  tool: event.tool,
+                  label: TaskCheckpoint.sanitize(label, maxLength: 160),
+                ))
+                .copyWith(
+                  completed: [
+                    ...checkpoint.completed,
+                    TaskCheckpoint.sanitize(label, maxLength: 160),
+                  ].take(12).toList(),
+                  updatedAt: DateTime.now(),
+                );
+            final path = _checkpointPath(event.tool, call.arguments);
+            if (path.isNotEmpty) {
+              checkpoint = checkpoint.withChangedFile(path, '');
+            }
+            _queueCheckpoint(checkpoint);
+          }
           if (liveTools.isNotEmpty) {
             final index = liveTools.indexWhere((draft) =>
                 draft.tool == event.tool && draft.detail == event.detail);
@@ -800,10 +902,19 @@ class AppState extends ChangeNotifier {
         prompt: modelPrompt,
         isCancelled: () => _cancelled,
       );
+      if (!_cancelled) {
+        checkpoint = checkpoint.copyWith(
+          status: TaskCheckpointStatus.completed,
+          pendingStep: '',
+          updatedAt: DateTime.now(),
+        );
+      }
     } on AiProviderException catch (error) {
+      checkpointError = error.message;
       _clearLive();
       thread.add(_entry(role: ChatRole.error, text: error.message, ok: false));
     } catch (error) {
+      checkpointError = '$error';
       _clearLive();
       thread.add(_entry(
         role: ChatRole.error,
@@ -813,6 +924,52 @@ class AppState extends ChangeNotifier {
     } finally {
       _clearLive();
       final elapsed = DateTime.now().difference(started);
+      final interrupted = _cancelled || checkpointError.isNotEmpty;
+      if (interrupted) {
+        for (final path in checkpoint.changedFiles.keys.toList()) {
+          try {
+            final text = await fsFor(project).read(path);
+            checkpoint = checkpoint.withChangedFile(
+              path,
+              TaskCheckpoint.digestText(text),
+            );
+          } catch (_) {
+            // A deleted file is still recorded; resume will report it.
+          }
+        }
+        checkpoint = checkpoint.copyWith(
+          status: TaskCheckpointStatus.resumable,
+          lastError: TaskCheckpoint.sanitize(checkpointError),
+          pendingStep: checkpoint.pendingStep.isEmpty
+              ? 'Continue the original request from the last completed step.'
+              : checkpoint.pendingStep,
+          gitBranch: project.branch,
+          conversationTail: _checkpointTurns(thread),
+          updatedAt: DateTime.now(),
+        );
+        try {
+          final changes = await changesFor(project);
+          checkpoint = checkpoint.copyWith(
+            gitPaths: changes.map((change) => change.path).take(40).toList(),
+          );
+        } catch (_) {}
+        _queueCheckpoint(checkpoint);
+        await _checkpointWrite;
+        thread.add(_entry(
+          role: ChatRole.note,
+          text: 'Paused - this task can be resumed. '
+              '${checkpoint.completed.isEmpty ? 'No completed steps yet.' : 'Completed: ${checkpoint.completed.last}.'} '
+              '${checkpoint.changedFiles.isEmpty ? '' : '${checkpoint.changedFiles.length} changed files recorded.'}',
+        ));
+      } else {
+        checkpoint = checkpoint.copyWith(
+          status: TaskCheckpointStatus.completed,
+          gitBranch: project.branch,
+          conversationTail: _checkpointTurns(thread),
+          updatedAt: DateTime.now(),
+        );
+        _queueCheckpoint(checkpoint);
+      }
       thread.add(_entry(
         role: ChatRole.note,
         text:
@@ -824,6 +981,67 @@ class AppState extends ChangeNotifier {
       await _persistChat(projectId);
     }
   }
+
+  List<AiTurn> _historyFor(List<ChatEntry> thread) {
+    final history = <AiTurn>[];
+    for (final entry in thread) {
+      if (entry.role == ChatRole.user) {
+        history.add(AiTurn.user(entry.text));
+      } else if (entry.role == ChatRole.assistant &&
+          entry.text.trim().isNotEmpty) {
+        history.add(AiTurn.assistant(entry.text, const []));
+      }
+    }
+    return history;
+  }
+
+  List<CheckpointTurn> _checkpointTurns(List<ChatEntry> thread) => [
+        for (final entry
+            in thread.skip(thread.length > 8 ? thread.length - 8 : 0))
+          if (entry.role == ChatRole.user || entry.role == ChatRole.assistant)
+            CheckpointTurn(
+              role: entry.role.name,
+              text: TaskCheckpoint.sanitize(entry.text, maxLength: 280),
+            ),
+      ];
+
+  static const _checkpointTools = {
+    'write_file',
+    'edit_file',
+    'apply_patch',
+    'download_file',
+    'install_skill',
+    'run_command',
+    'run_commands',
+    'commit_and_push',
+    'pull_latest',
+  };
+
+  bool _isCheckpointAction(String tool) => _checkpointTools.contains(tool);
+
+  String _checkpointPath(String tool, Map<String, dynamic> args) =>
+      switch (tool) {
+        'write_file' ||
+        'edit_file' ||
+        'download_file' ||
+        'install_skill' =>
+          (args['path'] as String? ?? '').trim(),
+        _ => '',
+      };
+
+  String _checkpointLabel(String tool, String detail) => switch (tool) {
+        'run_command' => 'Ran ${detail.isEmpty ? 'a command' : detail}',
+        'run_commands' => 'Ran a command batch',
+        'write_file' => 'Wrote ${detail.isEmpty ? 'a file' : detail}',
+        'edit_file' => 'Edited ${detail.isEmpty ? 'a file' : detail}',
+        'apply_patch' => 'Applied a patch',
+        'download_file' => 'Downloaded ${detail.isEmpty ? 'a file' : detail}',
+        'install_skill' =>
+          'Installed skill ${detail.isEmpty ? '' : detail}'.trim(),
+        'commit_and_push' => 'Committed and pushed changes',
+        'pull_latest' => 'Pulled the latest commit',
+        _ => tool,
+      };
 
   Future<List<AgentTask>> loadAgentTasks() async {
     final log = roundLog;
@@ -967,14 +1185,16 @@ class AppState extends ChangeNotifier {
     }
     if (candidate == null) return null;
 
-    final allowed = autoNextProvider ||
-        await (limitPrompt?.call(
-              'Provider limit reached',
-              '${current.name} has no usable keys left.\n\n'
-                  'Continue with ${candidate.name} (${candidate.model})?',
-              'Use ${candidate.name}',
-            ) ??
-            Future.value(false));
+    // Provider fallback always needs consent for this task: providers differ
+    // in data handling and capabilities, so it is never silent.
+    final allowed = await (limitPrompt?.call(
+          'Provider limit reached',
+          '${current.name} has no usable keys left.\n\n'
+              'Continue on ${candidate.name} (${candidate.model})? '
+              'This is only for the current task; no default provider is changed.',
+          'Continue on ${candidate.name}',
+        ) ??
+        Future.value(false));
     if (!allowed) return null;
     activeProviderId = candidate.id;
     _clearLive();
@@ -984,6 +1204,112 @@ class AppState extends ChangeNotifier {
     await store.write(_kActiveProvider, candidate.id);
     notifyListeners();
     return candidate;
+  }
+
+  TaskCheckpoint? checkpointFor(String projectId) => _checkpoints[projectId];
+
+  bool hasResumableCheckpoint(String projectId) =>
+      _checkpoints[projectId]?.resumable ?? false;
+
+  Future<void> resumeTask(String projectId) async {
+    if (busy) return;
+    final checkpoint = _checkpoints[projectId];
+    if (checkpoint == null || !checkpoint.resumable) return;
+    final project = projectById(projectId);
+    final external = await _externalChanges(project, checkpoint);
+    final provider = activeProvider;
+    final summary = _resumeSummary(checkpoint, external);
+    final skip =
+        checkpoint.completedActions.map((action) => action.fingerprint).toSet();
+    final thread = threadOf(projectId);
+    thread.add(_entry(
+      role: ChatRole.note,
+      text: 'Resumed with ${provider.name} (${provider.model}). '
+          '${checkpoint.completed.isEmpty ? 'No completed steps.' : 'Completed ${checkpoint.completed.length} steps; '}'
+          '${checkpoint.changedFiles.length} changed files. '
+          '${external.isEmpty ? 'No external file changes detected.' : '${external.length} file(s) changed outside the task.'}',
+    ));
+    _queueCheckpoint(checkpoint.copyWith(
+      status: TaskCheckpointStatus.running,
+      updatedAt: DateTime.now(),
+    ));
+    notifyListeners();
+    await _persistChat(projectId);
+    await _runPrompt(
+      projectId,
+      summary,
+      historyOverride: const [],
+      skipActionFingerprints: skip,
+      resumeFrom: checkpoint,
+      recordUserMessage: false,
+    );
+  }
+
+  Future<List<String>> _externalChanges(
+    Project project,
+    TaskCheckpoint checkpoint,
+  ) async {
+    final changed = <String>[];
+    final fs = fsFor(project);
+    for (final entry in checkpoint.changedFiles.entries) {
+      try {
+        final text = await fs.read(entry.key);
+        final digest = TaskCheckpoint.digestText(text);
+        if (entry.value.isNotEmpty && digest != entry.value) {
+          changed.add(entry.key);
+        }
+      } catch (_) {
+        // A file that disappeared is an external change too.
+        changed.add(entry.key);
+      }
+    }
+    try {
+      final current = await changesFor(project);
+      for (final change in current) {
+        if (!checkpoint.gitPaths.contains(change.path) &&
+            !changed.contains(change.path)) {
+          changed.add(change.path);
+        }
+      }
+    } catch (_) {}
+    return changed.take(20).toList();
+  }
+
+  String _resumeSummary(TaskCheckpoint checkpoint, List<String> external) {
+    final completed = checkpoint.completed.isEmpty
+        ? '- No completed steps were recorded.'
+        : checkpoint.completed.map((step) => '- $step').join('\n');
+    final files = checkpoint.changedFiles.keys.isEmpty
+        ? '- None recorded.'
+        : checkpoint.changedFiles.keys.map((path) => '- $path').join('\n');
+    final externalText = external.isEmpty
+        ? '- None.'
+        : external.map((path) => '- $path').join('\n');
+    return '''RESUME TASK
+Original request: ${checkpoint.originalPrompt}
+
+Completed before the interruption:
+$completed
+
+Files changed before the checkpoint:
+$files
+
+External changes since the checkpoint (re-read these before editing):
+$externalText
+
+Remaining step: ${checkpoint.pendingStep.isEmpty ? 'Continue the original request from the last completed step.' : checkpoint.pendingStep}
+Git branch: ${checkpoint.gitBranch.isEmpty ? 'unknown' : checkpoint.gitBranch}
+
+Continue the task. Do not repeat a write or destructive action that already completed. Use the current files on disk, not assumptions from before the interruption.'''
+        .trim();
+  }
+
+  Future<void> dismissCheckpoint(String projectId) async {
+    final checkpoint = _checkpoints[projectId];
+    if (checkpoint == null) return;
+    _checkpoints.remove(projectId);
+    notifyListeners();
+    await checkpointStore?.remove(checkpoint.taskId);
   }
 
   void stop() {
@@ -1006,9 +1332,69 @@ class AppState extends ChangeNotifier {
   Future<void> clearChat(String projectId) async {
     _threads[projectId] = [];
     _clearLive();
+    _checkpoints.remove(projectId);
     await store.remove('$_kChatPrefix$projectId');
     notifyListeners();
   }
+
+  Future<void> _recordModelRequest(ProviderConfig provider) async {
+    _quota.record(provider.id);
+    notifyListeners();
+    await store.write(_kQuota, jsonEncode(_quota.toJson()));
+  }
+
+  void _loadQuota() {
+    try {
+      final raw = store.read(_kQuota);
+      _quota = QuotaTracker.fromJson(raw == null ? null : jsonDecode(raw));
+    } catch (_) {
+      _quota = QuotaTracker();
+    }
+  }
+
+  Future<void> _loadCheckpoints() async {
+    _checkpoints.clear();
+    final store = checkpointStore;
+    if (store == null) return;
+    try {
+      final all = await store.loadAll();
+      for (final checkpoint in all) {
+        final current = _checkpoints[checkpoint.projectId];
+        if (current == null ||
+            checkpoint.updatedAt.isAfter(current.updatedAt)) {
+          _checkpoints[checkpoint.projectId] = checkpoint;
+        }
+      }
+      for (final entry in _checkpoints.entries.toList()) {
+        final checkpoint = entry.value;
+        if (checkpoint.status == TaskCheckpointStatus.running) {
+          _checkpoints[entry.key] = checkpoint.copyWith(
+            status: TaskCheckpointStatus.resumable,
+            lastError: 'The app closed before this task finished.',
+            updatedAt: DateTime.now(),
+          );
+        }
+      }
+    } catch (_) {
+      _checkpoints.clear();
+    }
+  }
+
+  void _queueCheckpoint(TaskCheckpoint checkpoint) {
+    _checkpoints[checkpoint.projectId] = checkpoint;
+    final store = checkpointStore;
+    if (store == null) return;
+    _checkpointWrite = _checkpointWrite.then((_) async {
+      try {
+        await store.save(checkpoint);
+      } catch (_) {}
+    });
+  }
+
+  QuotaStatus get activeQuota => _quota.status(activeProvider);
+
+  QuotaStatus quotaStatusFor(ProviderConfig provider) =>
+      _quota.status(provider);
 
   // -------------------------------------------------------------- providers
 
@@ -1857,10 +2243,27 @@ class AppState extends ChangeNotifier {
     Project project,
     IntegrationAccount account, {
     required String name,
+    String environment = 'production',
   }) async {
     final files = await fsFor(project).textFiles();
     return VercelClient(account.token, client: httpClient)
-        .deploy(name: name, files: files);
+        .deploy(name: name, files: files, environment: environment);
+  }
+
+  Future<IntegrationResult> deployToCloudflare(
+    Project project,
+    IntegrationAccount account, {
+    required String projectName,
+    String environment = 'production',
+    String branch = 'main',
+  }) async {
+    final files = await fsFor(project).textFiles();
+    return CloudflarePagesClient(account.token, client: httpClient).deploy(
+      project: projectName,
+      files: files,
+      environment: environment,
+      branch: branch,
+    );
   }
 
   // ---------------------------------------------------------------- usage

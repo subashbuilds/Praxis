@@ -283,9 +283,9 @@ class _TerminalTabState extends State<TerminalTab> {
 
   String _displayCwd(SystemShell shell, LinuxEnvironment? linux) {
     if (linux == null) return shell.cwdDisplay;
-    return shell.cwd.isEmpty
-        ? '/workspace'
-        : '/workspace/${shell.cwd.replaceAll(RegExp(r'/+$'), '')}';
+    if (shell.cwd.isEmpty) return '/';
+    final folder = shell.cwd.replaceAll(RegExp(r'/+$'), '').split('/').last;
+    return '$folder/';
   }
 
   String _resources(LinuxEnvironment? linux) {
@@ -386,8 +386,8 @@ class _TerminalTabState extends State<TerminalTab> {
   Widget _promptRow() {
     final shell = AppScope.of(context).systemShellFor(widget.project);
     final linux = AppScope.of(context).linux;
-    final prompt =
-        linux == null ? shell.promptDisplay : 'alpine:${shell.promptDisplay}';
+    final promptPath =
+        linux == null ? shell.promptDisplay : _displayCwd(shell, linux);
     return Padding(
       padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x3),
       child: Row(
@@ -396,10 +396,10 @@ class _TerminalTabState extends State<TerminalTab> {
           Padding(
             padding: const EdgeInsets.only(top: 10),
             child: Text(
-              '\$ ',
+              '$promptPath\$ ',
               style: Txt.code.copyWith(
-                fontSize: 12,
-                color: Pal.ember,
+                fontSize: 11.5,
+                color: Pal.mint,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -419,7 +419,7 @@ class _TerminalTabState extends State<TerminalTab> {
                 isDense: true,
                 border: InputBorder.none,
                 contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                hintText: '$prompt \$ ',
+                hintText: 'Run a command',
                 hintStyle:
                     Txt.code.copyWith(fontSize: 11.5, color: Pal.textDim),
               ),

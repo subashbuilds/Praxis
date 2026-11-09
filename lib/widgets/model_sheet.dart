@@ -71,6 +71,7 @@ class _ModelSheet extends StatelessWidget {
                 alignment: Alignment.centerLeft,
                 child: Text(
                   'Only the models you kept in each provider are listed. '
+                  'Request counts are local and reset at midnight. '
                   'Context is the window, not the tokens used.',
                   style: Txt.bodySoft,
                 ),
@@ -113,6 +114,7 @@ class _ModelSheet extends StatelessWidget {
                     final active = provider.id == state.activeProviderId &&
                         provider.model == model;
                     final limit = contextWindowFor(model);
+                    final quota = state.quotaStatusFor(provider);
                     return InkWell(
                       onTap: () async {
                         await state.setActiveModel(provider.id, model);
@@ -158,6 +160,20 @@ class _ModelSheet extends StatelessWidget {
                                     '${limit == null ? 'context unknown' : '${compactContext(limit)} context'}',
                                     style: Txt.meta.copyWith(fontSize: 9.5),
                                   ),
+                                  if (quota.hasLimit) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      quota.label,
+                                      style: Txt.meta.copyWith(
+                                        fontSize: 9.5,
+                                        color: quota.exhausted
+                                            ? Pal.rose
+                                            : quota.warning
+                                                ? Pal.amber
+                                                : Pal.mint,
+                                      ),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),

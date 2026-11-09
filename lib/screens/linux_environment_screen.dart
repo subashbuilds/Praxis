@@ -74,14 +74,19 @@ class _LinuxEnvironmentScreenState extends State<LinuxEnvironmentScreen> {
   }
 
   Future<void> _confirmClearCache(LinuxEnvironment linux) async {
+    final size = humanBytes(linux.snapshot.cacheBytes);
     final confirmed = await showPraxisConfirm(
       context,
-      title: 'Clear package caches?',
-      body: 'Removes downloaded apk archives and package-manager caches only. '
-          'Installed runtimes and project files remain.',
+      title: 'Clear ${size == '0 B' ? 'package caches' : size}?',
+      body: 'Removes $size of downloaded apk archives and package-manager '
+          'caches only. Installed runtimes and project files remain.',
       confirmLabel: 'Clear cache',
       cancelLabel: 'Cancel',
       icon: Icons.cleaning_services_outlined,
+      details: [
+        ConfirmDetail('Cached downloads', size),
+        const ConfirmDetail('Runtimes', 'Stay installed'),
+      ],
     );
     if (confirmed) await linux.clearCache();
   }
@@ -386,6 +391,11 @@ class _AlpineCard extends StatelessWidget {
               _Legend(
                 color: Pal.mint,
                 text: 'Projects: outside rootfs',
+              ),
+              _Legend(
+                color: Pal.amber,
+                text:
+                    'Package caches: ${humanBytes(linux.snapshot.cacheBytes)}',
               ),
             ],
           ),
@@ -783,9 +793,9 @@ class _RuntimeSheet extends StatelessWidget {
     return SafeArea(
       child: DraggableScrollableSheet(
         expand: false,
-        initialChildSize: 0.72,
-        minChildSize: 0.4,
-        maxChildSize: 0.94,
+        initialChildSize: 0.54,
+        minChildSize: 0.38,
+        maxChildSize: 0.82,
         builder: (_, scrollController) => ListView(
           controller: scrollController,
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x5),
@@ -849,7 +859,7 @@ class _RuntimeSheet extends StatelessWidget {
             const SizedBox(height: Sp.x4),
             if (!status.installed)
               EmberButton(
-                label: 'Install with apk',
+                label: 'Install',
                 icon: Icons.download_rounded,
                 onTap: status.busy ? null : onInstall,
               ),
@@ -914,7 +924,8 @@ class _MaintenanceCard extends StatelessWidget {
           _MaintenanceRow(
             icon: Icons.cleaning_services_outlined,
             title: 'Clear cache',
-            body: 'Downloads only · runtimes stay installed',
+            body:
+                '${humanBytes(linux.snapshot.cacheBytes)} cached · runtimes stay installed',
             onTap: onClearCache,
           ),
           const Hairline(),
