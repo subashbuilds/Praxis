@@ -32,12 +32,20 @@ class _LinuxEnvironmentScreenState extends State<LinuxEnvironmentScreen> {
     _linux = AppScope.of(context).linux;
     final linux = _linux;
     if (linux != null) {
-      unawaited(linux.prepare());
+      unawaited(linux.prepare().then((_) {
+        if (mounted) return _refresh(linux);
+      }));
     }
   }
 
   Future<void> _refresh(LinuxEnvironment linux) async {
-    await linux.refresh(projectRoot: _projectRoot());
+    final state = AppScope.of(context);
+    await linux.refresh(
+      projectRoot: _projectRoot(),
+      projectRoots: [
+        for (final project in state.projects) state.fsFor(project).rootPath,
+      ],
+    );
   }
 
   String? _projectRoot() {
@@ -319,8 +327,8 @@ class _AlpineCard extends StatelessWidget {
     final cache = snapshot.cacheBytes.clamp(0, rootfs);
     final system = (rootfs - cache).clamp(0, rootfs);
     final project = snapshot.projectBytes;
+    final projectCount = snapshot.projectCount;
     final total = system + cache + project;
-    const capacity = 512 * 1024 * 1024;
     return Panel(
       padding: const EdgeInsets.all(Sp.x3),
       child: Column(
@@ -403,7 +411,7 @@ class _AlpineCard extends StatelessWidget {
           ),
           const SizedBox(height: 3),
           Text(
-            'of ${humanBytes(capacity)} rootfs capacity',
+            'Shared Alpine rootfs + all projects on this device',
             style: Txt.meta.copyWith(fontSize: 8.5),
           ),
           const SizedBox(height: Sp.x3),
@@ -414,8 +422,10 @@ class _AlpineCard extends StatelessWidget {
           const SizedBox(height: 5),
           _Legend(
             color: Pal.mint,
-            text: '${project <= 0 ? 'Project' : '1 project'}: '
-                '${project <= 0 ? 'outside rootfs' : humanBytes(project)}',
+            text: projectCount == 0
+                ? 'Projects: outside rootfs'
+                : '$projectCount project${projectCount == 1 ? '' : 's'}: '
+                    '${humanBytes(project)}',
           ),
           const SizedBox(height: 5),
           _Legend(

@@ -33,6 +33,7 @@ class _PushSheetState extends State<PushSheet> {
   bool _loading = true;
   bool _commitBusy = false;
   bool _pushBusy = false;
+  bool _pushed = false;
   bool _loadingBranches = false;
   bool _loadingRepos = false;
   bool _creatingBranch = false;
@@ -584,6 +585,7 @@ class _PushSheetState extends State<PushSheet> {
       if (!mounted) return;
       setState(() {
         _push = next;
+        _pushed = true;
         _changes = const [];
         _selected.clear();
         _status = 'Pushed to github.com/$_ownerText/$_repoText/$_branchText';
@@ -634,7 +636,7 @@ class _PushSheetState extends State<PushSheet> {
                   IconAction(
                     icon: Icons.close_rounded,
                     tooltip: 'Close',
-                    onTap: () => Navigator.of(context).pop(false),
+                    onTap: () => Navigator.of(context).pop(_pushed),
                   ),
                 ],
               ),

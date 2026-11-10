@@ -28,13 +28,25 @@ class FilesTab extends StatefulWidget {
 
 class _FilesTabState extends State<FilesTab> {
   Future<_FilesData>? _future;
+  _FilesData? _lastData;
   final Set<String> _expanded = {};
   bool _importing = false;
+  bool _refreshing = false;
+  int _loadToken = 0;
 
   void _refresh() {
     final state = AppScope.of(context);
+    final token = ++_loadToken;
+    final future = _load(state);
     setState(() {
-      _future = _load(state);
+      _future = future;
+      _refreshing = true;
+    });
+    future
+        .then<void>((_) {}, onError: (Object _, StackTrace __) {})
+        .whenComplete(() {
+      if (!mounted || token != _loadToken) return;
+      setState(() => _refreshing = false);
     });
   }
 
@@ -574,7 +586,8 @@ class _FilesTabState extends State<FilesTab> {
           project: project,
           onChanged: _refresh,
         ),
-        if (_importing) LinearProgressIndicator(minHeight: 2, color: Pal.mint),
+        if (_importing || _refreshing)
+          LinearProgressIndicator(minHeight: 2, color: Pal.mint),
         Container(
           padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
           decoration: BoxDecoration(
@@ -617,7 +630,10 @@ class _FilesTabState extends State<FilesTab> {
           child: FutureBuilder<_FilesData>(
             future: _future ??= _load(state),
             builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
+              if (snapshot.hasData) _lastData = snapshot.data;
+              final data = snapshot.data ?? _lastData;
+              if (data == null &&
+                  snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(
                   child: SizedBox(
                     width: 18,
@@ -626,7 +642,7 @@ class _FilesTabState extends State<FilesTab> {
                   ),
                 );
               }
-              if (snapshot.hasError) {
+              if (snapshot.hasError && data == null) {
                 return Padding(
                   padding: const EdgeInsets.all(Sp.page),
                   child: Text(
@@ -635,8 +651,8 @@ class _FilesTabState extends State<FilesTab> {
                   ),
                 );
               }
-              final data = snapshot.data ?? const _FilesData([], {}, 0);
-              if (data.files.isEmpty) {
+              final rowsData = data ?? const _FilesData([], {}, 0);
+              if (rowsData.files.isEmpty) {
                 return const Padding(
                   padding: EdgeInsets.all(Sp.page),
                   child: EmptyState(
@@ -647,16 +663,16 @@ class _FilesTabState extends State<FilesTab> {
                   ),
                 );
               }
-              final rows = _treeRows(data);
+              final rows = _treeRows(rowsData);
               return ListView.builder(
                 padding: const EdgeInsets.symmetric(vertical: Sp.x2),
                 itemCount: rows.length,
                 itemBuilder: (context, index) {
                   final row = rows[index];
                   final entry = row.entry;
-                  final change = data.changes[entry.path];
+                  final change = rowsData.changes[entry.path];
                   final folderChanges = entry.isDir
-                      ? data.changes.keys
+                      ? rowsData.changes.keys
                           .where((path) => path.startsWith('${entry.path}/'))
                           .length
                       : 0;
@@ -751,7 +767,7 @@ class _FilesTabState extends State<FilesTab> {
           child: FutureBuilder<_FilesData>(
             future: _future,
             builder: (context, snapshot) {
-              final pending = snapshot.data?.pending ?? 0;
+              final pending = snapshot.data?.pending ?? _lastData?.pending ?? 0;
               return Text(
                 pending > 0
                     ? '$pending unpushed commit${pending == 1 ? '' : 's'} · tap to open · long-press for actions'

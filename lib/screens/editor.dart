@@ -153,118 +153,161 @@ class _EditorScreenState extends State<EditorScreen> {
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
     final language = languageForPath(widget.path);
+    final name = widget.path.split('/').last;
+    final slash = widget.path.lastIndexOf('/');
+    final parent = slash < 0 ? 'project root' : widget.path.substring(0, slash);
     return Scaffold(
       backgroundColor: _preview ? Pal.canvas : Pal.ghBg,
       body: SafeArea(
         child: Column(
           children: [
             Container(
-              color: Pal.ghPanel,
-              padding: const EdgeInsets.all(Sp.x2),
-              child: Row(
+              padding: const EdgeInsets.fromLTRB(Sp.x1, Sp.x1, Sp.x2, Sp.x2),
+              decoration: BoxDecoration(
+                color: Pal.ghPanel,
+                border: Border(bottom: BorderSide(color: Pal.ghLine)),
+              ),
+              child: Column(
                 children: [
-                  IconAction(
-                    icon: Icons.arrow_back_rounded,
-                    tooltip: 'Back',
-                    onTap: _confirmLeave,
-                  ),
-                  const SizedBox(width: 2),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
+                  Row(
+                    children: [
+                      IconAction(
+                        icon: Icons.arrow_back_rounded,
+                        tooltip: 'Back',
+                        onTap: _confirmLeave,
+                      ),
+                      const SizedBox(width: 2),
+                      FileGlyph(name: name, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            FileGlyph(
-                              name: widget.path.split('/').last,
-                              size: 15,
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Txt.code.copyWith(
+                                      fontSize: 13.5,
+                                      height: 1.2,
+                                      fontWeight: FontWeight.w600,
+                                      color: Pal.ghText,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 7),
+                                MonoChip(_typeLabel),
+                              ],
                             ),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                widget.path.split('/').last,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Txt.title.copyWith(fontSize: 14),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            MonoChip(_typeLabel),
-                          ],
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          _loading
-                              ? 'reading file…'
-                              : _binary || _image
-                                  ? '${humanFileSize(_bytes?.length ?? 0)} · saved on device'
-                                  : _dirty
-                                      ? 'unsaved changes · $_lineCount lines'
-                                      : 'saved on device · $_lineCount lines',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Txt.meta.copyWith(
-                            fontSize: 10,
-                            color: _dirty ? Pal.amber : Pal.textDim,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (_hasPreview)
-                    GestureDetector(
-                      onTap: _togglePreview,
-                      behavior: HitTestBehavior.opaque,
-                      child: Container(
-                        margin: const EdgeInsets.only(right: 6),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 9, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Pal.raised,
-                          borderRadius: Rd.pill,
-                          border: Border.all(color: Pal.lineStrong),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              _preview
-                                  ? Icons.code_rounded
-                                  : Icons.article_outlined,
-                              size: 14,
-                              color: Pal.textMuted,
-                            ),
-                            const SizedBox(width: 5),
+                            const SizedBox(height: 4),
                             Text(
-                              _preview ? 'Code' : 'Preview',
+                              _loading
+                                  ? 'reading file…'
+                                  : _binary || _image
+                                      ? '${humanFileSize(_bytes?.length ?? 0)} · saved on device'
+                                      : '$parent · $_lineCount lines',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: Txt.meta.copyWith(
-                                fontSize: 10,
-                                color: Pal.text,
-                                fontWeight: FontWeight.w600,
+                                fontSize: 9.5,
+                                color: Pal.ghMuted,
                               ),
                             ),
                           ],
                         ),
                       ),
-                    ),
-                  if (!_preview && _canEdit) _fontSizeControl(state),
-                  if (!_preview && _canEdit)
-                    IconAction(
-                      icon: state.wordWrap
-                          ? Icons.wrap_text_rounded
-                          : Icons.notes_rounded,
-                      tooltip:
-                          state.wordWrap ? 'Disable wrapping' : 'Wrap lines',
-                      size: 18,
-                      onTap: () => state.setWordWrap(!state.wordWrap),
-                    ),
-                  const SizedBox(width: 2),
-                  if (_canEdit)
-                    EmberButton(
-                      label: _saving ? 'Saving' : 'Save',
-                      compact: true,
-                      loading: _saving,
-                      onTap: _save,
-                    ),
+                      if (_canEdit) ...[
+                        const SizedBox(width: 8),
+                        EmberButton(
+                          label: _saving ? 'Saving' : 'Save',
+                          compact: true,
+                          loading: _saving,
+                          onTap: _save,
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 5,
+                              height: 5,
+                              decoration: BoxDecoration(
+                                color: _dirty ? Pal.amber : Pal.mint,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Flexible(
+                              child: Text(
+                                _dirty ? 'Unsaved changes' : 'Saved on device',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Txt.meta.copyWith(
+                                  fontSize: 9.5,
+                                  color: _dirty ? Pal.amber : Pal.textDim,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_hasPreview)
+                        GestureDetector(
+                          onTap: _togglePreview,
+                          behavior: HitTestBehavior.opaque,
+                          child: Container(
+                            margin: const EdgeInsets.only(right: 6),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 9, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: Pal.raised,
+                              borderRadius: Rd.pill,
+                              border: Border.all(color: Pal.lineStrong),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  _preview
+                                      ? Icons.code_rounded
+                                      : Icons.article_outlined,
+                                  size: 13,
+                                  color: _preview ? Pal.ember : Pal.textMuted,
+                                ),
+                                const SizedBox(width: 5),
+                                Text(
+                                  _preview ? 'Code' : 'Preview',
+                                  style: Txt.meta.copyWith(
+                                    fontSize: 9.5,
+                                    color: Pal.text,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      if (!_preview && _canEdit) _fontSizeControl(state),
+                      if (!_preview && _canEdit)
+                        IconAction(
+                          icon: state.wordWrap
+                              ? Icons.wrap_text_rounded
+                              : Icons.notes_rounded,
+                          tooltip: state.wordWrap
+                              ? 'Disable wrapping'
+                              : 'Wrap lines',
+                          size: 18,
+                          onTap: () => state.setWordWrap(!state.wordWrap),
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -285,8 +328,8 @@ class _EditorScreenState extends State<EditorScreen> {
           onTap: enabled ? () => state.setEditorFontSize(value + delta) : null,
           behavior: HitTestBehavior.opaque,
           child: Container(
-            width: 32,
-            height: 28,
+            width: 28,
+            height: 26,
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: enabled ? Pal.raised : Pal.raised.withOpacity(0.45),
@@ -309,7 +352,7 @@ class _EditorScreenState extends State<EditorScreen> {
     }
 
     return Container(
-      margin: const EdgeInsets.only(right: 6),
+      margin: const EdgeInsets.only(right: 4),
       padding: const EdgeInsets.all(2),
       decoration: BoxDecoration(
         color: Pal.raised,
@@ -319,9 +362,9 @@ class _EditorScreenState extends State<EditorScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          step('A-', -1, value > 8),
+          step('A−', -1, value > 8),
           SizedBox(
-            width: 24,
+            width: 22,
             child: Text(
               '$value',
               textAlign: TextAlign.center,
@@ -387,18 +430,20 @@ class _EditorScreenState extends State<EditorScreen> {
     return Container(
       color: Pal.canvas,
       padding: const EdgeInsets.all(Sp.x4),
-      child: Center(
-        child: InteractiveViewer(
-          minScale: 0.5,
-          maxScale: 5,
+      child: InteractiveViewer(
+        minScale: 0.5,
+        maxScale: 5,
+        child: SizedBox.expand(
           child: Image.memory(
             bytes,
             fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => Text(
-              'This image format cannot be rendered on this device.\n'
-              'The file is intact and will still be committed byte for byte.',
-              textAlign: TextAlign.center,
-              style: Txt.bodySoft,
+            errorBuilder: (_, __, ___) => Center(
+              child: Text(
+                'This image format cannot be rendered on this device.\n'
+                'The file is intact and will still be committed byte for byte.',
+                textAlign: TextAlign.center,
+                style: Txt.bodySoft,
+              ),
             ),
           ),
         ),
@@ -411,10 +456,10 @@ class _EditorScreenState extends State<EditorScreen> {
       return Container(
         color: Pal.canvas,
         padding: const EdgeInsets.all(Sp.x4),
-        child: Center(
-          child: InteractiveViewer(
-            minScale: 0.5,
-            maxScale: 6,
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 6,
+          child: SizedBox.expand(
             child: SvgPicture.string(
               _controller.text,
               fit: BoxFit.contain,

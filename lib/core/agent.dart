@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../models.dart';
 import 'ai.dart';
+import 'context_compaction.dart';
 import 'context_prefetch.dart';
 import 'diff.dart';
 import 'file_types.dart';
@@ -16,7 +17,7 @@ import 'system_shell.dart';
 import 'tool_validation.dart';
 import 'vfs.dart';
 
-enum AgentEventKind { text, tool, error }
+enum AgentEventKind { text, tool, activity, error }
 
 class AgentEvent {
   const AgentEvent({
@@ -50,6 +51,17 @@ class AgentEvent {
     this.removed = 0,
   })  : kind = AgentEventKind.tool,
         thinking = '',
+        ok = true;
+
+  const AgentEvent.activity({
+    required this.tool,
+    required this.text,
+    this.detail = '',
+  })  : kind = AgentEventKind.activity,
+        thinking = '',
+        patch = '',
+        added = 0,
+        removed = 0,
         ok = true;
 
   const AgentEvent.error(String value)
@@ -413,6 +425,7 @@ class Agent {
     this.toolApproval,
     this.repeatLimit = Phase1Flags.repeatLimit,
     this.maxRounds = 40,
+    this.contextLimit = 128000,
   });
 
   final AiClient client;
@@ -455,11 +468,17 @@ class Agent {
   final int repeatLimit;
   final int maxRounds;
 
+  /// The provider model's context window. Compaction is only attempted when
+  /// the host knows a real limit.
+  final int contextLimit;
+
   final Map<String, int> _readCache = {};
   final Map<String, int> _signatureCounts = {};
   final Map<String, int> _argumentFailureCounts = {};
   final Map<String, int> _editFailureCounts = {};
   String? _verificationCommand;
+  int _lastPromptTokens = 0;
+  bool _toolPending = false;
 
   List<AiToolSpec> get _tools => [
         ..._baseAgentTools,
@@ -504,6 +523,16 @@ class Agent {
         ? '${prefetched!.text}\n\nUSER REQUEST\n$prompt'
         : prompt;
     final turns = <AiTurn>[...history, AiTurn.user(initialPrompt)];
+    if (prefetched?.included == true) {
+      final scanned = prefetched!.filesScanned;
+      onEvent(AgentEvent.activity(
+        tool: 'context',
+        text: 'Read context',
+        detail: scanned > 0
+            ? '$scanned file${scanned == 1 ? '' : 's'} scanned'
+            : 'project tree',
+      ));
+    }
     if (flags.compoundTools) await _detectVerificationCommand();
     var current = provider;
     var mutated = false;
@@ -522,6 +551,8 @@ class Agent {
           outcome = AgentOutcome.userCancelled;
           return;
         }
+
+        await _compactIfNeeded(turns, system, current);
 
         AiReply reply;
         var switches = 0;
@@ -584,6 +615,7 @@ class Agent {
             switches++;
             continue;
           }
+          _lastPromptTokens = reply.usage?.promptTokens ?? 0;
           onReply?.call(reply, current);
 
           final signatures = reply.calls
@@ -740,23 +772,28 @@ class Agent {
         }
 
         final results = List<_ToolOutcome?>.filled(calls.length, null);
-        if (canRunReadsInParallel) {
-          final futures = <Future<_ToolOutcome>>[];
-          for (var index = 0; index < calls.length; index++) {
-            futures
-                .add(_executeAfterValidation(calls[index], validations[index]));
+        _toolPending = true;
+        try {
+          if (canRunReadsInParallel) {
+            final futures = <Future<_ToolOutcome>>[];
+            for (var index = 0; index < calls.length; index++) {
+              futures.add(
+                  _executeAfterValidation(calls[index], validations[index]));
+            }
+            final completed = await Future.wait(futures);
+            for (var index = 0; index < completed.length; index++) {
+              results[index] = completed[index];
+            }
+          } else {
+            for (var index = 0; index < calls.length; index++) {
+              final result = await _executeAfterValidation(
+                  calls[index], validations[index]);
+              results[index] = result;
+              if (result.failed && calls[index].name != 'run_commands') break;
+            }
           }
-          final completed = await Future.wait(futures);
-          for (var index = 0; index < completed.length; index++) {
-            results[index] = completed[index];
-          }
-        } else {
-          for (var index = 0; index < calls.length; index++) {
-            final result =
-                await _executeAfterValidation(calls[index], validations[index]);
-            results[index] = result;
-            if (result.failed && calls[index].name != 'run_commands') break;
-          }
+        } finally {
+          _toolPending = false;
         }
 
         var roundFailed = false;
@@ -833,6 +870,111 @@ class Agent {
     }
   }
 
+  Future<void> _compactIfNeeded(
+    List<AiTurn> turns,
+    String system,
+    ProviderConfig current,
+  ) async {
+    // Compaction only runs at the top of a model round. At this point no tool
+    // call or approval can be in flight; the guard is kept explicit so future
+    // call sites cannot compact a half-resolved tool pair.
+    if (_toolPending || contextLimit <= 0) return;
+
+    final estimate = ContextCompactor.estimateTokens(
+      system: system,
+      turns: turns,
+    );
+    final used = _lastPromptTokens > 0 ? _lastPromptTokens : estimate;
+    final level = ContextCompactor.levelFor(
+      usedTokens: used,
+      limitTokens: contextLimit,
+    );
+    if (level == ContextCompactionLevel.none) return;
+
+    var announced = false;
+    final cheap = ContextCompactor.compactToolResults(turns);
+    if (cheap.changed) {
+      turns
+        ..clear()
+        ..addAll(cheap.turns);
+      _lastPromptTokens = ContextCompactor.estimateTokens(
+        system: system,
+        turns: turns,
+      );
+      announced = true;
+    }
+
+    if (_lastPromptTokens / contextLimit < ContextCompactor.summarizeAt) {
+      if (announced) {
+        onEvent(const AgentEvent.activity(
+          tool: 'compact',
+          text: 'Compacted context',
+        ));
+      }
+      return;
+    }
+
+    final split = ContextCompactor.split(turns);
+    final middle = split.canCompact
+        ? turns.sublist(split.headEnd, split.tailStart)
+        : const <AiTurn>[];
+    if (middle.isEmpty) {
+      if (announced) {
+        onEvent(const AgentEvent.activity(
+          tool: 'compact',
+          text: 'Compacted context',
+        ));
+      }
+      return;
+    }
+    try {
+      final reply = await client.complete(
+        provider: current,
+        system: 'You compact an older coding-agent transcript into a dense, '
+            'faithful working summary. Preserve file paths, decisions, '
+            'constraints, failed attempts, verified results and unfinished '
+            'work. Do not add new facts, do not call tools, and return only '
+            'the summary.',
+        turns: [
+          AiTurn.user(
+            'Condense this earlier conversation. Keep details a developer '
+            'would need to continue the task safely.\n\n'
+            '${ContextCompactor.summaryInput(middle)}',
+          ),
+        ],
+        tools: const [],
+        maxTokens: 1200,
+      );
+      final summary = reply.text.trim();
+      if (summary.isNotEmpty) {
+        final replacement = <AiTurn>[
+          ...turns.take(split.headEnd),
+          AiTurn.user('CONTEXT SUMMARY (older messages compacted)\n$summary'),
+          ...turns.skip(split.tailStart),
+        ];
+        turns
+          ..clear()
+          ..addAll(replacement);
+        _lastPromptTokens = ContextCompactor.estimateTokens(
+          system: system,
+          turns: turns,
+        );
+        if (reply.usage != null) onReply?.call(reply, current);
+        announced = true;
+      }
+    } catch (_) {
+      // Compaction must never break the task. Keep the cheap result and let
+      // the provider report a real context overflow if one still occurs.
+    }
+
+    if (announced) {
+      onEvent(const AgentEvent.activity(
+        tool: 'compact',
+        text: 'Compacted context',
+      ));
+    }
+  }
+
   Future<void> _recordRound(RoundLogStore? log, AgentRound round) async {
     if (log == null) return;
     try {
@@ -865,11 +1007,19 @@ class Agent {
   Future<String> _systemPrompt() async {
     final files = await _fileTree();
     final installed = await _installedSkills();
-    final skillText = [
+    final activeSkills = [
       ...skills.where(
           (skill) => skill.enabled && skill.instructions.trim().isNotEmpty),
       ...installed,
-    ]
+    ];
+    for (final skill in activeSkills) {
+      onEvent(AgentEvent.activity(
+        tool: 'skill',
+        text: 'Read skill',
+        detail: skill.name,
+      ));
+    }
+    final skillText = activeSkills
         .map((skill) => '- ${skill.name}: ${skill.instructions.trim()}')
         .join('\n');
     final fullShell = deviceShell != null;
@@ -926,6 +1076,16 @@ Environment:
 - A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
 - Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
+
+Context policy (the host enforces this automatically):
+- Below about 60% of the model window: do nothing.
+- At 60–75%: compact cheaply without a model call. Replace old, large tool
+  results with one-line stubs such as `read src/auth.ts, 412 lines, see file`,
+  and drop duplicate reads and old directory listings.
+- Above 75%, or when cheap compaction is not enough: summarize older context.
+- Always keep the system prompt, the first user request and the last 4–6
+  messages verbatim. Tool calls and their results always stay paired.
+- Never compact while a tool call or approval is pending.
 ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
 ''';
   }

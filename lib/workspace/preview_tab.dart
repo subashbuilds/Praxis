@@ -24,7 +24,13 @@ class _PreviewTabState extends State<PreviewTab> {
   String? _root;
   int? _port;
   bool _loading = true;
+  bool _desktop = false;
+  bool _switching = false;
   String? _error;
+
+  static const _desktopUserAgent =
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
   @override
   void initState() {
@@ -75,9 +81,13 @@ class _PreviewTabState extends State<PreviewTab> {
       } catch (_) {
         server = null;
       }
-      final controller = WebViewController()
-        ..setJavaScriptMode(JavaScriptMode.unrestricted)
-        ..setBackgroundColor(Pal.terminal);
+      final controller = WebViewController();
+      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await controller.setBackgroundColor(Pal.terminal);
+      await controller.setUserAgent(_desktop ? _desktopUserAgent : null);
+      await controller.setNavigationDelegate(NavigationDelegate(
+        onPageFinished: (_) => _applyDesktopViewport(controller),
+      ));
       if (server == null) {
         await controller.loadFile(path);
       } else {
@@ -168,6 +178,47 @@ class _PreviewTabState extends State<PreviewTab> {
     await _load();
   }
 
+  Future<void> _applyDesktopViewport(WebViewController controller) async {
+    if (!_desktop) return;
+    try {
+      await controller.runJavaScript('''
+        (() => {
+          let meta = document.querySelector('meta[name="viewport"]');
+          if (!meta) {
+            meta = document.createElement('meta');
+            meta.name = 'viewport';
+            document.head.appendChild(meta);
+          }
+          meta.setAttribute('content', 'width=1280');
+        })();
+      ''');
+    } catch (_) {
+      // A page without a writable head still keeps the desktop user agent.
+    }
+  }
+
+  Future<void> _togglePreviewMode() async {
+    final controller = _controller;
+    if (controller == null || _switching) return;
+    final desktop = !_desktop;
+    setState(() {
+      _desktop = desktop;
+      _switching = true;
+      _error = null;
+    });
+    try {
+      await controller.setUserAgent(desktop ? _desktopUserAgent : null);
+      if (desktop) await _applyDesktopViewport(controller);
+      await controller.reload();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Could not switch preview mode: $error');
+      }
+    } finally {
+      if (mounted) setState(() => _switching = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => _body();
 
@@ -234,6 +285,14 @@ class _PreviewTabState extends State<PreviewTab> {
                 ),
               ),
               IconAction(
+                icon: _desktop
+                    ? Icons.smartphone_rounded
+                    : Icons.desktop_mac_rounded,
+                tooltip: _desktop ? 'Mobile preview' : 'Desktop preview',
+                size: 18,
+                onTap: _switching ? null : _togglePreviewMode,
+              ),
+              IconAction(
                 icon: Icons.refresh_rounded,
                 tooltip: 'Reload preview',
                 size: 18,
@@ -242,6 +301,12 @@ class _PreviewTabState extends State<PreviewTab> {
             ],
           ),
         ),
+        if (_switching)
+          LinearProgressIndicator(
+            minHeight: 1.5,
+            color: Pal.ember,
+            backgroundColor: Colors.transparent,
+          ),
         Expanded(child: WebViewWidget(controller: controller)),
       ],
     );

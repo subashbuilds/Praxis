@@ -153,6 +153,7 @@ class LinuxSnapshot {
     this.diskBytes = 0,
     this.cacheBytes = 0,
     this.projectBytes = 0,
+    this.projectCount = 0,
     this.ramUsedBytes,
     this.ramTotalBytes,
     this.load1,
@@ -164,6 +165,7 @@ class LinuxSnapshot {
   final int diskBytes;
   final int cacheBytes;
   final int projectBytes;
+  final int projectCount;
 
   /// Memory currently used by guest processes, not the phone's total RAM.
   final int? ramUsedBytes;
@@ -658,6 +660,10 @@ class LinuxEnvironment extends ChangeNotifier {
     await refresh();
   }
 
+  /// Restores installed runtime badges before the environment is started, so
+  /// Home can offer the matching starter templates immediately.
+  Future<void> restoreRuntimeState() => _loadRuntimeState();
+
   Future<void> _loadRuntimeState() async {
     try {
       if (!await _runtimesFile.exists()) return;
@@ -695,15 +701,32 @@ class LinuxEnvironment extends ChangeNotifier {
   }
 
   String? _lastProjectRoot;
+  List<String> _lastProjectRoots = const [];
+  final Map<String, int> _projectSizeCache = {};
+  final Map<String, DateTime> _projectSizeCachedAt = {};
 
-  Future<void> refresh({String? projectRoot}) async {
+  Future<void> refresh({
+    String? projectRoot,
+    List<String>? projectRoots,
+  }) async {
     if (projectRoot != null && projectRoot.isNotEmpty) {
       _lastProjectRoot = projectRoot;
+    }
+    if (projectRoots != null) {
+      _lastProjectRoots = projectRoots
+          .where((path) => path.trim().isNotEmpty)
+          .toSet()
+          .toList(growable: false);
     }
     if (!ready || _refreshing) return;
     _refreshing = true;
     try {
       final project = _lastProjectRoot ?? base.path;
+      final roots = _lastProjectRoots.isNotEmpty
+          ? _lastProjectRoots
+          : (_lastProjectRoot == null || _lastProjectRoot!.isEmpty
+              ? const <String>[]
+              : <String>[_lastProjectRoot!]);
       final ps = await run(
         'ps -o pid,user,pcpu,rss,comm 2>/dev/null || ps aux 2>/dev/null || ps',
         projectRoot: project,
@@ -722,7 +745,8 @@ class LinuxEnvironment extends ChangeNotifier {
       snapshot = LinuxSnapshot(
         diskBytes: await _directorySize(Directory(rootfsPath)),
         cacheBytes: await _cacheSize(),
-        projectBytes: await _directorySize(Directory(project)),
+        projectBytes: await _projectBytes(roots),
+        projectCount: roots.length,
         ramUsedBytes: ramBytes,
         cpuPercent: cpu,
         processes: processes,
@@ -789,6 +813,24 @@ class LinuxEnvironment extends ChangeNotifier {
       ));
     }
     return result;
+  }
+
+  Future<int> _projectBytes(List<String> roots) async {
+    var bytes = 0;
+    final now = DateTime.now();
+    for (final path in roots) {
+      final cachedAt = _projectSizeCachedAt[path];
+      if (cachedAt != null &&
+          now.difference(cachedAt) < const Duration(seconds: 20)) {
+        bytes += _projectSizeCache[path] ?? 0;
+        continue;
+      }
+      final size = await _directorySize(Directory(path));
+      _projectSizeCache[path] = size;
+      _projectSizeCachedAt[path] = now;
+      bytes += size;
+    }
+    return bytes;
   }
 
   Future<int> _cacheSize() async {

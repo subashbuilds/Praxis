@@ -116,7 +116,7 @@ class AppState extends ChangeNotifier {
   String activeProviderId = '';
   bool busy = false;
   bool wordWrap = false;
-  int editorFontSize = 13;
+  int editorFontSize = 10;
   bool autoNextKey = false;
   bool autoNextProvider = false;
   bool darkMode = true;
@@ -224,10 +224,11 @@ class AppState extends ChangeNotifier {
     _loadUsage();
     _loadQuota();
     await _loadCheckpoints();
+    await linux?.restoreRuntimeState();
     _loadDrafts();
     wordWrap = store.read(_kWordWrap) == 'true';
     editorFontSize =
-        (int.tryParse(store.read(_kEditorFontSize) ?? '') ?? 13).clamp(8, 22);
+        (int.tryParse(store.read(_kEditorFontSize) ?? '') ?? 10).clamp(8, 22);
     autoNextKey = store.read(_kAutoNextKey) == 'true';
     autoNextProvider = store.read(_kAutoNextProvider) == 'true';
     darkMode = store.read(_kDarkMode) != 'false';
@@ -772,6 +773,7 @@ class AppState extends ChangeNotifier {
       fs: fsFor(project),
       shell: shellFor(project),
       deviceShell: systemShellFor(project),
+      contextLimit: contextLimitFor(provider.model) ?? 128000,
       linuxShell: linux != null,
       activeFile: _activeFiles[projectId],
       skills: skills,
@@ -840,6 +842,13 @@ class AppState extends ChangeNotifier {
             role: ChatRole.assistant,
             text: event.text,
             thinking: event.thinking,
+          ));
+        } else if (event.kind == AgentEventKind.activity) {
+          thread.add(_entry(
+            role: ChatRole.activity,
+            text: event.text,
+            tool: event.tool,
+            detail: event.detail,
           ));
         } else if (event.kind == AgentEventKind.tool) {
           final call = pendingCalls.remove('${event.tool}|${event.detail}');

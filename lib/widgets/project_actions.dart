@@ -142,10 +142,10 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
       barrierColor: Colors.black.withOpacity(0.65),
       builder: (_) => PushSheet(project: widget.project),
     );
-    if (!mounted) return;
+    if (!mounted || result != true) return;
     await _refreshMeta();
     widget.onChanged?.call();
-    if (result == true) _snack('Branch pushed to GitHub.');
+    _snack('Branch pushed to GitHub.');
   }
 
   Future<void> _pull() async {
@@ -196,9 +196,9 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
       barrierColor: Colors.black.withOpacity(0.65),
       builder: (_) => _DeploySheet(project: widget.project),
     );
-    if (!mounted) return;
+    if (!mounted || result != true) return;
     widget.onChanged?.call();
-    if (result == true) _snack('Deployment sent.');
+    _snack('Deployment sent.');
   }
 
   void _snack(String message) {

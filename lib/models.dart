@@ -748,7 +748,7 @@ class Integrations {
   }
 }
 
-enum ChatRole { user, assistant, tool, error, note }
+enum ChatRole { user, assistant, tool, error, note, activity }
 
 /// A tool call that has been announced by the model but has not finished yet.
 /// The transcript shows it as a live pill with a status verb.

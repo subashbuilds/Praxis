@@ -393,6 +393,8 @@ class _EntryView extends StatelessWidget {
         );
       case ChatRole.tool:
         return _ToolPill(entry: entry);
+      case ChatRole.activity:
+        return _ActivityPill(entry: entry);
       case ChatRole.error:
         return Padding(
           padding: const EdgeInsets.only(bottom: Sp.x4),
@@ -455,6 +457,68 @@ class _AgentLabel extends StatelessWidget {
           style: Txt.overline.copyWith(color: Pal.textMuted),
         ),
       ],
+    );
+  }
+}
+
+class _ActivityPill extends StatelessWidget {
+  const _ActivityPill({required this.entry});
+
+  final ChatEntry entry;
+
+  IconData get _icon => switch (entry.tool) {
+        'compact' => Icons.compress_rounded,
+        'skill' => Icons.auto_stories_outlined,
+        _ => Icons.data_object_rounded,
+      };
+
+  String get _label => switch (entry.tool) {
+        'compact' => 'Compacted context',
+        'skill' => 'Read skill',
+        _ => 'Read context',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final detail = entry.detail.trim();
+    final color = entry.tool == 'compact' ? Pal.amber : Pal.textMuted;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Sp.x3),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+        decoration: BoxDecoration(
+          color: Pal.raised,
+          borderRadius: Rd.pill,
+          border: Border.all(color: Pal.line),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(_icon, size: 13, color: color),
+            const SizedBox(width: 6),
+            Text(
+              _label,
+              style: Txt.meta.copyWith(
+                fontSize: 10,
+                color: Pal.textMuted,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (detail.isNotEmpty) ...[
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 190),
+                child: Text(
+                  detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Txt.meta.copyWith(fontSize: 9.5, color: Pal.textDim),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
