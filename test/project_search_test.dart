@@ -28,7 +28,10 @@ void main() {
 
     final result = await ProjectSearch.run(ProjectFs(dir), 'target');
 
-    expect(result.files.map((file) => file.name), contains('notes.txt'));
+    expect(
+      result.files.map((file) => file.path.split('/').last),
+      contains('notes.txt'),
+    );
     expect(result.fileMatches, 0);
     expect(result.codeMatches, 1);
   });
