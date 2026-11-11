@@ -811,39 +811,61 @@ class CloudflarePagesClient {
 
   Future<List<CloudflarePagesProject>> projects() async {
     final (accountId, _) = await _account();
-    final projects = <CloudflarePagesProject>[];
-    // Cloudflare accepts page/per_page here; values above 50 are rejected as
-    // invalid list options, which is what made the original list fail.
-    for (var page = 1; page <= 20; page++) {
+    final projects = <String, CloudflarePagesProject>{};
+    final base = 'https://api.cloudflare.com/client/v4/accounts/'
+        '$accountId/pages/projects';
+    var page = 1;
+    var totalPages = 1;
+    var paginated = true;
+    while (page <= totalPages && page <= 20) {
       final response = await _client
           .get(
-            Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
-                '$accountId/pages/projects?page=$page&per_page=50'),
+            Uri.parse(paginated ? '$base?page=$page' : base),
             headers: _headers,
           )
           .timeout(const Duration(seconds: 45));
+      // Some account setups reject list options on Pages with a 400. The plain
+      // endpoint still returns the projects, so fall back instead of showing an
+      // empty list.
+      if (response.statusCode == 400 && paginated) {
+        paginated = false;
+        page = 1;
+        continue;
+      }
       if (response.statusCode != 200) {
         throw IntegrationException(
             _error(response, 'Could not list Pages projects'));
       }
       final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['success'] == false) {
+        if (paginated) {
+          paginated = false;
+          page = 1;
+          continue;
+        }
+        throw IntegrationException(
+            _error(response, 'Could not list Pages projects'));
+      }
       final list = body['result'];
       if (list is! List || list.isEmpty) break;
-      projects.addAll([
-        for (final item in list)
-          if (item is Map)
-            CloudflarePagesProject(
-              name: item['name'] as String? ?? '',
-              productionBranch: item['production_branch'] as String? ?? 'main',
-              url: item['subdomain'] is String
-                  ? 'https://${item['subdomain']}'
-                  : '',
-            ),
-      ]);
-      if (list.length < 50) break;
+      for (final item in list) {
+        if (item is! Map) continue;
+        final name = item['name'] as String? ?? '';
+        if (name.isEmpty) continue;
+        projects[name] = CloudflarePagesProject(
+          name: name,
+          productionBranch: item['production_branch'] as String? ?? 'main',
+          url:
+              item['subdomain'] is String ? 'https://${item['subdomain']}' : '',
+        );
+      }
+      if (!paginated) break;
+      final info = body['result_info'];
+      totalPages =
+          info is Map ? (info['total_pages'] as num?)?.toInt() ?? 1 : 1;
+      page++;
     }
-    return projects.where((project) => project.name.isNotEmpty).toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
+    return projects.values.toList()..sort((a, b) => a.name.compareTo(b.name));
   }
 
   Future<CloudflarePagesProject> createProject(
@@ -903,15 +925,18 @@ class CloudflarePagesClient {
       throw IntegrationException('Cloudflare returned no upload token.');
     }
 
+    // Pages only serves an asset at a request path when the manifest key is an
+    // absolute path. Keys without the leading slash upload cleanly and then
+    // every URL 404s, which is what made new deployments look empty.
     final hashes = <String, String>{};
     for (final file in files) {
-      hashes[file.path] = digestForPagesBytes(file.bytes);
+      hashes['/${file.path}'] = digestForPagesBytes(file.bytes);
     }
     final uploads = [
       for (final file in files)
         {
           'base64': true,
-          'key': hashes[file.path],
+          'key': hashes['/${file.path}'],
           'value': base64Encode(file.bytes),
           'metadata': {'contentType': _contentType(file.path, file.mime)},
         },

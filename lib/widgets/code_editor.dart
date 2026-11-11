@@ -190,6 +190,9 @@ const _keywords = <CodeLanguage, Set<String>>{
 };
 
 List<InlineSpan> _highlight(String text, CodeLanguage language) {
+  // Highlighting a very large file means thousands of spans on every frame.
+  // Plain text stays editable and scrolls smoothly instead.
+  if (text.length > 160000) return [TextSpan(text: text)];
   if (text.isEmpty || language == CodeLanguage.text) {
     return [TextSpan(text: text)];
   }
@@ -385,13 +388,18 @@ class _CodeEditorState extends State<CodeEditor> {
 
   void _onChanged() {
     if (!mounted) return;
+    // A programmatic selection (find, or jumping to a search result) must
+    // scroll even though the text field does not own focus.
+    final jumped = !widget.controller.selection.isCollapsed;
+    if (!_focus.hasFocus && !jumped) return;
     _lineHeights = const [];
     setState(() {});
-    WidgetsBinding.instance.addPostFrameCallback((_) => _revealCaret());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _revealCaret(force: jumped));
   }
 
-  void _revealCaret() {
-    if (!mounted || !_focus.hasFocus) return;
+  void _revealCaret({bool force = false}) {
+    if (!mounted || (!force && !_focus.hasFocus)) return;
     final selection = widget.controller.selection;
     if (!selection.isValid) return;
     final text = widget.controller.text;

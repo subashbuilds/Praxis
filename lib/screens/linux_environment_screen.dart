@@ -66,6 +66,40 @@ class _LinuxEnvironmentScreenState extends State<LinuxEnvironmentScreen> {
     }
   }
 
+  Future<void> _remove(LinuxEnvironment linux, LinuxRuntime runtime) async {
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Uninstall ${runtime.label}?',
+      body: 'The runtime packages are removed from Alpine. Project files, the '
+          'rootfs and the other runtimes stay in place, and this runtime can be '
+          'installed again at any time.',
+      confirmLabel: 'Uninstall',
+      cancelLabel: 'Keep it',
+      destructive: true,
+      icon: Icons.delete_outline_rounded,
+    );
+    if (!confirmed) return;
+    await linux.remove(runtime);
+    if (!mounted) return;
+    final status = linux.runtimes[runtime]!;
+    if (status.error.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${runtime.label}: ${status.error}')),
+      );
+    }
+  }
+
+  Future<void> _reinstall(LinuxEnvironment linux, LinuxRuntime runtime) async {
+    await linux.reinstall(runtime);
+    if (!mounted) return;
+    final status = linux.runtimes[runtime]!;
+    if (status.error.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${runtime.label}: ${status.error}')),
+      );
+    }
+  }
+
   Future<void> _reset(LinuxEnvironment linux) async {
     final confirmed = await showPraxisConfirm(
       context,
@@ -129,6 +163,8 @@ class _LinuxEnvironmentScreenState extends State<LinuxEnvironmentScreen> {
                           linux: linux,
                           onRefresh: () => _refresh(linux),
                           onInstall: (runtime) => _install(linux, runtime),
+                          onRemove: (runtime) => _remove(linux, runtime),
+                          onReinstall: (runtime) => _reinstall(linux, runtime),
                           onClearCache: () => _confirmClearCache(linux),
                           onReset: () => _reset(linux),
                         );
@@ -266,6 +302,8 @@ class _EnvironmentBody extends StatelessWidget {
     required this.linux,
     required this.onRefresh,
     required this.onInstall,
+    required this.onRemove,
+    required this.onReinstall,
     required this.onClearCache,
     required this.onReset,
   });
@@ -273,6 +311,8 @@ class _EnvironmentBody extends StatelessWidget {
   final LinuxEnvironment linux;
   final VoidCallback onRefresh;
   final ValueChanged<LinuxRuntime> onInstall;
+  final ValueChanged<LinuxRuntime> onRemove;
+  final ValueChanged<LinuxRuntime> onReinstall;
   final VoidCallback onClearCache;
   final VoidCallback onReset;
 
@@ -295,6 +335,8 @@ class _EnvironmentBody extends StatelessWidget {
                 linux: linux,
                 runtime: runtime,
                 onInstall: () => onInstall(runtime),
+                onRemove: () => onRemove(runtime),
+                onReinstall: () => onReinstall(runtime),
               ),
             ),
           const SectionLabel('MAINTENANCE'),
@@ -772,11 +814,15 @@ class _RuntimeRow extends StatelessWidget {
     required this.linux,
     required this.runtime,
     required this.onInstall,
+    required this.onRemove,
+    required this.onReinstall,
   });
 
   final LinuxEnvironment linux;
   final LinuxRuntime runtime;
   final VoidCallback onInstall;
+  final VoidCallback onRemove;
+  final VoidCallback onReinstall;
 
   IconData get _icon => switch (runtime) {
         LinuxRuntime.node => Icons.hexagon_outlined,
@@ -829,7 +875,11 @@ class _RuntimeRow extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           else if (status.installed)
-            StatusPill('Installed', color: Pal.mint)
+            GestureDetector(
+              onTap: () => _showRuntime(context, runtime, status),
+              behavior: HitTestBehavior.opaque,
+              child: StatusPill('Installed', color: Pal.mint),
+            )
           else
             GestureDetector(
               onTap: onInstall,
@@ -882,6 +932,14 @@ class _RuntimeRow extends StatelessWidget {
           Navigator.of(context).pop();
           onInstall();
         },
+        onRemove: () {
+          Navigator.of(context).pop();
+          onRemove();
+        },
+        onReinstall: () {
+          Navigator.of(context).pop();
+          onReinstall();
+        },
       ),
     );
   }
@@ -892,11 +950,15 @@ class _RuntimeSheet extends StatelessWidget {
     required this.runtime,
     required this.status,
     required this.onInstall,
+    required this.onRemove,
+    required this.onReinstall,
   });
 
   final LinuxRuntime runtime;
   final LinuxRuntimeStatus status;
   final VoidCallback onInstall;
+  final VoidCallback onRemove;
+  final VoidCallback onReinstall;
 
   @override
   Widget build(BuildContext context) {
@@ -988,20 +1050,41 @@ class _RuntimeSheet extends StatelessWidget {
                   ),
                 ),
               ),
-              if (!status.installed)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    Sp.x4,
-                    Sp.x2,
-                    Sp.x4,
-                    Sp.x4,
-                  ),
-                  child: EmberButton(
-                    label: 'Install',
-                    icon: Icons.download_rounded,
-                    onTap: status.busy ? null : onInstall,
-                  ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Sp.x4,
+                  Sp.x2,
+                  Sp.x4,
+                  Sp.x4,
                 ),
+                child: !status.installed
+                    ? EmberButton(
+                        label: 'Install',
+                        icon: Icons.download_rounded,
+                        onTap: status.busy ? null : onInstall,
+                      )
+                    : Row(
+                        children: [
+                          Expanded(
+                            child: EmberButton(
+                              label: 'Reinstall',
+                              icon: Icons.restart_alt_rounded,
+                              onTap: status.busy ? null : onReinstall,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton.icon(
+                            onPressed: status.busy ? null : onRemove,
+                            icon: const Icon(Icons.delete_outline_rounded,
+                                size: 16),
+                            label: const Text('Uninstall'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: Pal.rose,
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
             ],
           ),
         ),

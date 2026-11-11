@@ -402,7 +402,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   TemplateRuntime? _templateRuntime(LinuxRuntime runtime) => switch (runtime) {
         LinuxRuntime.node => TemplateRuntime.node,
         LinuxRuntime.python => TemplateRuntime.python,
-        _ => null,
+        LinuxRuntime.php => TemplateRuntime.php,
+        LinuxRuntime.go => TemplateRuntime.go,
       };
 
   Future<void> _create() async {
@@ -636,9 +637,12 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                   if (_templateRuntime(runtime) != null)
                     _RuntimeTemplateGroup(
                       runtime: _templateRuntime(runtime)!.label,
-                      icon: runtime == LinuxRuntime.python
-                          ? Icons.code_rounded
-                          : Icons.hexagon_outlined,
+                      icon: switch (runtime) {
+                        LinuxRuntime.python => Icons.code_rounded,
+                        LinuxRuntime.php => Icons.web_rounded,
+                        LinuxRuntime.go => Icons.bolt_rounded,
+                        LinuxRuntime.node => Icons.hexagon_outlined,
+                      },
                       templates: templatesFor(_templateRuntime(runtime)!),
                       expanded: _expandedRuntime == _templateRuntime(runtime),
                       selectedId: _template?.id,

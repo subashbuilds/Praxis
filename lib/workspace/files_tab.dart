@@ -43,6 +43,7 @@ class _FilesTabState extends State<FilesTab> {
   bool _importing = false;
   bool _refreshing = false;
   int _loadToken = 0;
+  DateTime? _changesLoadedAt;
 
   @override
   void dispose() {
@@ -108,9 +109,18 @@ class _FilesTabState extends State<FilesTab> {
   }
 
   Future<void> _loadChanges(AppState state, int token) async {
+    // Change badges walk the whole project. Re-reading a large tree every time
+    // the editor closes made tab switches and file opens stutter, so badges
+    // refresh at most once every eight seconds.
+    final last = _changesLoadedAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 8)) {
+      return;
+    }
     try {
       final changes = await state.changesFor(widget.project);
       if (!mounted || token != _loadToken || _lastData == null) return;
+      _changesLoadedAt = DateTime.now();
       setState(() {
         _lastData = _FilesData(
           _lastData!.files,
@@ -605,7 +615,11 @@ class _FilesTabState extends State<FilesTab> {
     }
   }
 
-  Future<void> _open(FileEntry entry) async {
+  Future<void> _open(
+    FileEntry entry, {
+    int? line,
+    String? highlight,
+  }) async {
     if (entry.isDir) {
       if (_expanded.remove(entry.path)) {
         setState(() {});
@@ -639,7 +653,12 @@ class _FilesTabState extends State<FilesTab> {
     }
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => EditorScreen(project: widget.project, path: entry.path),
+        builder: (_) => EditorScreen(
+          project: widget.project,
+          path: entry.path,
+          initialLine: line,
+          highlight: highlight,
+        ),
       ),
     );
     if (mounted) _refresh();
@@ -684,14 +703,14 @@ class _FilesTabState extends State<FilesTab> {
     setState(() {
       _searchQuery = query;
       _searchError = null;
-      if (query.length < 4) {
+      if (query.length < 3) {
         _searchResult = null;
         _searching = false;
       } else {
         _searching = true;
       }
     });
-    if (query.length < 4) return;
+    if (query.length < 3) return;
     _searchDebounce = Timer(const Duration(milliseconds: 280), () async {
       final token = ++_loadToken;
       try {
@@ -781,7 +800,7 @@ class _FilesTabState extends State<FilesTab> {
               cursorColor: Pal.ember,
               onChanged: _onSearchChanged,
               decoration: appField(
-                'Search filenames and code (min. 4 characters)',
+                'Search filenames and code (min. 3 characters)',
                 suffix: _searching
                     ? const SizedBox(
                         width: 16,
@@ -947,12 +966,12 @@ class _FilesTabState extends State<FilesTab> {
   }
 
   Widget _searchBody(AppState state) {
-    if (_searchQuery.length < 4) {
+    if (_searchQuery.length < 3) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(Sp.page),
           child: Text(
-            'Type at least 4 characters to search file names and file contents.',
+            'Type at least 3 characters to search file names and file contents.',
             textAlign: TextAlign.center,
             style: Txt.bodySoft,
           ),
@@ -1016,6 +1035,8 @@ class _FilesTabState extends State<FilesTab> {
                   isDir: false,
                   size: 0,
                 ),
+                line: file.matches.isEmpty ? null : file.matches.first.line,
+                highlight: result.query,
               ),
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(Sp.x4, 7, Sp.x4, 6),
@@ -1027,8 +1048,9 @@ class _FilesTabState extends State<FilesTab> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            file.path.split('/').last,
+                          _MatchText(
+                            text: file.path.split('/').last,
+                            query: result.query,
                             style: Txt.code.copyWith(fontSize: 11.5),
                           ),
                           Text(
@@ -1059,6 +1081,8 @@ class _FilesTabState extends State<FilesTab> {
                     isDir: false,
                     size: 0,
                   ),
+                  line: match.line,
+                  highlight: result.query,
                 ),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(Sp.x4 + 23, 4, Sp.x4, 4),
@@ -1078,10 +1102,10 @@ class _FilesTabState extends State<FilesTab> {
                       ),
                       const SizedBox(width: 8),
                       Expanded(
-                        child: Text(
-                          searchLinePreview(match.text),
+                        child: _MatchText(
+                          text: searchLinePreview(match.text),
+                          query: result.query,
                           maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
                           style: Txt.code.copyWith(
                             fontSize: 9.5,
                             color: Pal.textMuted,
@@ -1150,6 +1174,59 @@ class _FilesData {
   final List<FileEntry> files;
   final Map<String, RepoChange> changes;
   final int pending;
+}
+
+/// Renders text with every case-insensitive occurrence of the query marked,
+/// so a search result shows why it matched.
+class _MatchText extends StatelessWidget {
+  const _MatchText({
+    required this.text,
+    required this.query,
+    required this.style,
+    this.maxLines = 1,
+  });
+
+  final String text;
+  final String query;
+  final TextStyle style;
+  final int maxLines;
+
+  @override
+  Widget build(BuildContext context) {
+    final needle = query.trim();
+    final lower = text.toLowerCase();
+    final target = needle.toLowerCase();
+    if (needle.isEmpty || !lower.contains(target)) {
+      return Text(
+        text,
+        maxLines: maxLines,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      );
+    }
+    final spans = <TextSpan>[];
+    var from = 0;
+    while (true) {
+      final at = lower.indexOf(target, from);
+      if (at < 0) break;
+      if (at > from) spans.add(TextSpan(text: text.substring(from, at)));
+      spans.add(TextSpan(
+        text: text.substring(at, at + needle.length),
+        style: style.copyWith(
+          backgroundColor: Pal.amber.withOpacity(0.3),
+          color: Pal.text,
+          fontWeight: FontWeight.w700,
+        ),
+      ));
+      from = at + needle.length;
+    }
+    if (from < text.length) spans.add(TextSpan(text: text.substring(from)));
+    return Text.rich(
+      TextSpan(style: style, children: spans),
+      maxLines: maxLines,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
 }
 
 class _ChangeBadge extends StatelessWidget {

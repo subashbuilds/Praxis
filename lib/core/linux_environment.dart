@@ -660,6 +660,37 @@ class LinuxEnvironment extends ChangeNotifier {
     await refresh();
   }
 
+  /// Removes a runtime's packages. Project files and the rootfs stay in place,
+  /// so a runtime can be installed again later without re-downloading Alpine.
+  Future<void> remove(LinuxRuntime runtime) async {
+    if (!ready || runtimes[runtime]!.busy) return;
+    runtimes[runtime] = runtimes[runtime]!.copyWith(busy: true, error: '');
+    notifyListeners();
+    final result = await run(
+      'apk del ${runtime.packages.join(' ')}',
+      projectRoot: _lastProjectRoot ?? base.path,
+      timeout: const Duration(minutes: 5),
+    );
+    final removed = result.exitCode == 0;
+    final status = runtimes[runtime]!;
+    runtimes[runtime] = status.copyWith(
+      busy: false,
+      installed: removed ? false : status.installed,
+      version: removed ? '' : status.version,
+      error: removed ? '' : _lastLine(result.output),
+    );
+    await _saveRuntimeState();
+    notifyListeners();
+    await refresh();
+  }
+
+  /// Removes and installs a runtime again, refreshing its version check.
+  Future<void> reinstall(LinuxRuntime runtime) async {
+    if (runtimes[runtime]!.busy) return;
+    if (runtimes[runtime]!.installed) await remove(runtime);
+    await install(runtime);
+  }
+
   /// Restores installed runtime badges before the environment is started, so
   /// Home can offer the matching starter templates immediately.
   Future<void> restoreRuntimeState() => _loadRuntimeState();

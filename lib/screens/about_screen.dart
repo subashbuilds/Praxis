@@ -1,9 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/app_version.dart';
 import '../theme/tokens.dart';
 import '../widgets/ui.dart';
+
+Future<void> _openRepository(BuildContext context) async {
+  final messenger = ScaffoldMessenger.of(context);
+  var opened = false;
+  try {
+    opened = await launchUrl(
+      Uri.parse(kGitHubRepository),
+      mode: LaunchMode.externalApplication,
+    );
+  } catch (_) {
+    // A device without a browser still gets a copyable link below.
+  }
+  if (opened) return;
+  await Clipboard.setData(const ClipboardData(text: kGitHubRepository));
+  messenger.showSnackBar(
+    const SnackBar(content: Text('No browser available. Link copied.')),
+  );
+}
 
 const kTermsText = '''PRAXIS TERMS OF SERVICE
 
@@ -131,17 +150,7 @@ class AboutScreen extends StatelessWidget {
                     title: 'Praxis on GitHub',
                     body:
                         '$kGitHubRepositoryLabel · source, issues and releases',
-                    onTap: () async {
-                      await Clipboard.setData(
-                        const ClipboardData(text: kGitHubRepository),
-                      );
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('GitHub repository copied'),
-                        ),
-                      );
-                    },
+                    onTap: () => _openRepository(context),
                   ),
                   const SizedBox(height: 8),
                   _AboutLink(
@@ -150,17 +159,7 @@ class AboutScreen extends StatelessWidget {
                     body:
                         'Praxis is developed in public. Contributions and bug '
                         'reports are welcome.',
-                    onTap: () async {
-                      await Clipboard.setData(
-                        const ClipboardData(text: kGitHubRepository),
-                      );
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('GitHub repository copied'),
-                        ),
-                      );
-                    },
+                    onTap: () => _openRepository(context),
                   ),
                   const SectionLabel('LEGAL'),
                   _AboutLink(

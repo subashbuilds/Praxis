@@ -243,6 +243,16 @@ class _TerminalTabState extends State<TerminalTab> {
     pending.clear();
     pending.write(parts.removeLast());
     if (parts.isEmpty) return;
+    for (final part in parts) {
+      final match = RegExp(
+        r'(?:localhost|127\.0\.0\.1|0\.0\.0\.0)[:\s]+(\d{2,5})',
+        caseSensitive: false,
+      ).firstMatch(part);
+      final port = int.tryParse(match?.group(1) ?? '');
+      if (port != null && port > 80 && port < 65536 && mounted) {
+        unawaited(AppScope.of(context).setDevPort(widget.project, port));
+      }
+    }
     setState(() {
       _lines.addAll(parts.map((line) => ShellLine(line, tone)));
     });
@@ -577,29 +587,34 @@ class _TerminalTabState extends State<TerminalTab> {
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _focus.requestFocus,
-              child: ListView.builder(
-                controller: _scroll,
-                padding: const EdgeInsets.only(bottom: Sp.x2),
-                itemCount: _lines.length + 1,
-                itemBuilder: (context, index) {
-                  if (index == _lines.length) return _promptRow();
-                  final line = _lines[index];
-                  return Padding(
-                    padding: const EdgeInsets.fromLTRB(Sp.x4, 1.5, Sp.x4, 1.5),
-                    child: SelectableText(
-                      line.text.isEmpty ? ' ' : line.text,
-                      onTap: _focus.requestFocus,
-                      style: Txt.code.copyWith(
-                        fontSize: 11.5,
-                        height: 1.55,
-                        color: _tone(line.tone),
-                        fontWeight: line.tone == ShellTone.command
-                            ? FontWeight.w500
-                            : FontWeight.w400,
+              // One selection surface for the whole transcript. With a
+              // SelectableText per line, a drag stopped at the end of the line
+              // it started on.
+              child: SelectionArea(
+                child: ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.only(bottom: Sp.x2),
+                  itemCount: _lines.length + 1,
+                  itemBuilder: (context, index) {
+                    if (index == _lines.length) return _promptRow();
+                    final line = _lines[index];
+                    return Padding(
+                      padding:
+                          const EdgeInsets.fromLTRB(Sp.x4, 1.5, Sp.x4, 1.5),
+                      child: Text(
+                        line.text.isEmpty ? ' ' : line.text,
+                        style: Txt.code.copyWith(
+                          fontSize: 11.5,
+                          height: 1.55,
+                          color: _tone(line.tone),
+                          fontWeight: line.tone == ShellTone.command
+                              ? FontWeight.w500
+                              : FontWeight.w400,
+                        ),
                       ),
-                    ),
-                  );
-                },
+                    );
+                  },
+                ),
               ),
             ),
           ),

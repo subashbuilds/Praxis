@@ -13,10 +13,22 @@ import '../widgets/github_markdown.dart';
 import '../widgets/ui.dart';
 
 class EditorScreen extends StatefulWidget {
-  const EditorScreen({super.key, required this.project, required this.path});
+  const EditorScreen({
+    super.key,
+    required this.project,
+    required this.path,
+    this.initialLine,
+    this.highlight,
+  });
 
   final Project project;
   final String path;
+
+  /// Opens the file scrolled to this 1-based line, used by project search.
+  final int? initialLine;
+
+  /// Selects the first occurrence of this text on [initialLine].
+  final String? highlight;
 
   @override
   State<EditorScreen> createState() => _EditorScreenState();
@@ -161,10 +173,16 @@ class _EditorScreenState extends State<EditorScreen> {
         _image = image;
         _svg = svg;
         _binary = binary;
-        _preview = image || svg || (_isMarkdown && !binary);
+        _preview = widget.initialLine == null &&
+            (image || svg || (_isMarkdown && !binary));
         if (!binary && text != null) _controller.text = text;
         _loading = false;
       });
+      if (widget.initialLine != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _jumpToLine(widget.initialLine!, widget.highlight);
+        });
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -172,6 +190,34 @@ class _EditorScreenState extends State<EditorScreen> {
         _error = '$error';
       });
     }
+  }
+
+  void _jumpToLine(int line, String? query) {
+    final text = _controller.text;
+    final lines = text.split('\n');
+    if (lines.isEmpty) return;
+    final index = (line - 1).clamp(0, lines.length - 1);
+    var start = 0;
+    for (var i = 0; i < index; i++) {
+      start += lines[i].length + 1;
+    }
+    final lineText = lines[index];
+    var from = 0;
+    var to = lineText.length;
+    final needle = (query ?? '').trim();
+    if (needle.isNotEmpty) {
+      final found = lineText.toLowerCase().indexOf(needle.toLowerCase());
+      if (found >= 0) {
+        from = found;
+        to = found + needle.length;
+      }
+    }
+    // Selecting the range makes the match visible and tells the editor to
+    // scroll it into view, which a collapsed caret would not do.
+    _controller.selection = TextSelection(
+      baseOffset: start + from,
+      extentOffset: start + to,
+    );
   }
 
   Future<void> _save() async {

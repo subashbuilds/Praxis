@@ -262,7 +262,8 @@ class _AgentTabState extends State<AgentTab> {
             limit: state.activeQuota.limit,
             exhausted: state.activeQuota.exhausted,
           ),
-        if (state.checkpointFor(widget.project.id)?.resumable ?? false)
+        if (!state.busy &&
+            (state.checkpointFor(widget.project.id)?.resumable ?? false))
           _ResumeCard(
             checkpoint: state.checkpointFor(widget.project.id)!,
             onResume: () => state.resumeTask(widget.project.id),
@@ -1389,13 +1390,23 @@ class _ComposerState extends State<_Composer> {
     final selection = widget.controller.selection;
     if (!selection.isValid) return;
     final text = widget.controller.text;
-    final end = selection.baseOffset.clamp(_tokenStart, text.length);
-    final updated = text.replaceRange(_tokenStart, end, suggestion.insert);
+    final caret = selection.baseOffset.clamp(0, text.length);
+    final before = text.substring(0, caret);
+    final match =
+        RegExp(r'(?:^|\s)([/@])([A-Za-z0-9._/-]*)$').firstMatch(before);
+    // Work out the token from the text that is on screen now. A suggestion can
+    // arrive after the caret moved, and replacing a stale range deleted part of
+    // the command the user had already typed.
+    final start = match == null
+        ? _tokenStart.clamp(0, caret)
+        : caret - match.group(2)!.length - 1;
+    final updated = text.replaceRange(start, caret, suggestion.insert);
     widget.controller.value = TextEditingValue(
       text: updated,
-      selection: TextSelection(
-        baseOffset: _tokenStart,
-        extentOffset: _tokenStart + suggestion.insert.trimRight().length,
+      // A collapsed caret keeps the completion. Selecting it meant the next key
+      // press replaced the whole skill name with that letter.
+      selection: TextSelection.collapsed(
+        offset: start + suggestion.insert.length,
       ),
     );
     setState(() {

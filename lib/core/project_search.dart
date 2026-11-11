@@ -54,7 +54,7 @@ class ProjectSearch {
     int maxMatches = 500,
   }) async {
     final query = raw.trim();
-    if (query.length < 4) {
+    if (query.length < 3) {
       return ProjectSearchResult(
         query: query,
         files: const [],
@@ -67,8 +67,12 @@ class ProjectSearch {
     var matches = 0;
     var truncated = false;
     for (final entry in entries) {
-      if (entry.isDir || files.length >= maxFiles || matches >= maxMatches) {
-        if (files.length >= maxFiles || matches >= maxMatches) truncated = true;
+      // Directories are walked by list(), not searched. Breaking here skipped
+      // every file in a project whose first entry was a folder, which is why
+      // cloned repositories always looked empty.
+      if (entry.isDir) continue;
+      if (files.length >= maxFiles || matches >= maxMatches) {
+        truncated = true;
         break;
       }
       if (entry.path.startsWith('.praxis/') || entry.path == '.praxis') {

@@ -384,6 +384,8 @@ class _DeploySheetState extends State<_DeploySheet> {
   bool _loaded = false;
   bool _busy = false;
   String? _error;
+  String? _cfError;
+  String? _vercelError;
   IntegrationResult? _result;
   List<IntegrationAccount> _accounts = const [];
   IntegrationAccount? _account;
@@ -454,9 +456,10 @@ class _DeploySheetState extends State<_DeploySheet> {
         _vercelProjects = projects;
         _vercelProject = null;
         _createVercelProject = true;
+        _vercelError = null;
       });
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      if (mounted) setState(() => _vercelError = '$error');
     } finally {
       if (mounted) setState(() => _loadingVercel = false);
     }
@@ -508,6 +511,7 @@ class _DeploySheetState extends State<_DeploySheet> {
       setState(() {
         _projects = [..._projects, created];
         _project = created;
+        _cfError = null;
       });
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -527,9 +531,12 @@ class _DeploySheetState extends State<_DeploySheet> {
       setState(() {
         _projects = projects;
         _project = projects.isEmpty ? null : projects.first;
+        _cfError = null;
       });
     } catch (error) {
-      if (mounted) setState(() => _error = '$error');
+      // Keep provider errors apart. A Cloudflare failure used to appear under
+      // the Vercel tab and looked like the Vercel account was broken.
+      if (mounted) setState(() => _cfError = '$error');
     }
   }
 
@@ -602,6 +609,9 @@ class _DeploySheetState extends State<_DeploySheet> {
   @override
   Widget build(BuildContext context) {
     final insets = MediaQuery.viewInsetsOf(context).bottom;
+    final platformError =
+        _platform == IntegrationKind.cloudflare ? _cfError : _vercelError;
+    final activeError = _error ?? platformError;
     return AnimatedPadding(
       duration: Motion.fast,
       padding: EdgeInsets.only(bottom: insets),
@@ -813,9 +823,9 @@ class _DeploySheetState extends State<_DeploySheet> {
                           ),
                       ],
                     ),
-                    if (_error != null) ...[
+                    if (activeError != null) ...[
                       const SizedBox(height: 12),
-                      _ErrorNote(text: _error!),
+                      _ErrorNote(text: activeError),
                     ],
                     if (_result != null) ...[
                       const SizedBox(height: 12),

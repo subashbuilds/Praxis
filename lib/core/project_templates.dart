@@ -3,17 +3,21 @@ import '../models.dart';
 /// A starter project that can be created without a network request. Each
 /// runtime keeps its templates together so Home can reveal them only after the
 /// runtime itself is expanded.
-enum TemplateRuntime { node, python }
+enum TemplateRuntime { node, python, php, go }
 
 extension TemplateRuntimeX on TemplateRuntime {
   String get label => switch (this) {
         TemplateRuntime.node => 'Node.js',
         TemplateRuntime.python => 'Python',
+        TemplateRuntime.php => 'PHP',
+        TemplateRuntime.go => 'Go',
       };
 
   ProjectKind get kind => switch (this) {
         TemplateRuntime.node => ProjectKind.node,
         TemplateRuntime.python => ProjectKind.python,
+        TemplateRuntime.php => ProjectKind.php,
+        TemplateRuntime.go => ProjectKind.go,
       };
 }
 
@@ -932,6 +936,195 @@ Copy `.env.example` to `.env`, add the token from BotFather, then:
 ```sh
 pip install -r requirements.txt
 python bot.py
+```
+''',
+    },
+  ),
+  ProjectTemplate(
+    id: 'php-site',
+    name: 'PHP site',
+    runtime: TemplateRuntime.php,
+    description: 'Single-file PHP page with a form and a shared stylesheet.',
+    files: {
+      'index.php': r'''<?php
+$name = trim($_GET['name'] ?? '');
+?>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PHP on Praxis</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">PRAXIS · PHP</p>
+      <h1><?= $name === '' ? 'Hello from PHP.' : 'Hello, ' . htmlspecialchars($name) . '.' ?></h1>
+      <form method="get">
+        <input name="name" placeholder="Your name" value="<?= htmlspecialchars($name) ?>" />
+        <button type="submit">Say hello</button>
+      </form>
+      <p class="meta">PHP <?= PHP_VERSION ?></p>
+    </main>
+  </body>
+</html>
+''',
+      'style.css':
+          '''body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f1210; color: #eef3ee; font-family: system-ui, sans-serif; }
+main { width: min(88vw, 460px); }
+.eyebrow { color: #7c9a86; letter-spacing: 2px; font-size: 11px; font-weight: 700; }
+h1 { font-size: clamp(30px, 8vw, 46px); line-height: 1.05; }
+form { display: flex; gap: 8px; margin: 22px 0; }
+input { flex: 1; padding: 11px 12px; border-radius: 8px; border: 1px solid #2b332d; background: #151a16; color: inherit; }
+button { padding: 11px 16px; border-radius: 8px; border: 0; background: #7c9a86; color: #0f1210; font-weight: 700; }
+.meta { color: #7c9a86; font-size: 12px; }
+''',
+      'README.md': '''# PHP on Praxis
+
+```sh
+php -S 0.0.0.0:8080
+```
+
+Open the preview and set the port to 8080.
+''',
+    },
+  ),
+  ProjectTemplate(
+    id: 'php-api',
+    name: 'PHP JSON API',
+    runtime: TemplateRuntime.php,
+    description: 'A small JSON endpoint with routing and error handling.',
+    files: {
+      'index.php': r'''<?php
+declare(strict_types=1);
+
+header('Content-Type: application/json; charset=utf-8');
+
+$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
+
+if ($path === '/api/health') {
+    echo json_encode(['ok' => true, 'time' => date(DATE_ATOM)]);
+    exit;
+}
+
+if ($path === '/' || $path === '/api') {
+    echo json_encode([
+        'name' => 'Praxis PHP API',
+        'routes' => ['/api/health'],
+    ], JSON_PRETTY_PRINT);
+    exit;
+}
+
+http_response_code(404);
+echo json_encode(['error' => 'Not found', 'path' => $path]);
+''',
+      'README.md': '''# PHP JSON API on Praxis
+
+```sh
+php -S 0.0.0.0:8080 index.php
+```
+
+`GET /api/health` returns a JSON status object.
+''',
+    },
+  ),
+  ProjectTemplate(
+    id: 'go-http',
+    name: 'Go HTTP server',
+    runtime: TemplateRuntime.go,
+    description: 'net/http server with a JSON health route and logging.',
+    files: {
+      'go.mod': 'module hello-praxis\n\ngo 1.22\n',
+      'main.go': '''package main
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"os"
+	"time"
+)
+
+func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"time": time.Now().Format(time.RFC3339),
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte("<h1>Hello from Go</h1><p>Edit main.go to begin.</p>"))
+	})
+
+	log.Printf("listening on http://localhost:%s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Fatal(err)
+	}
+}
+''',
+      'README.md': '''# Go on Praxis
+
+```sh
+go run .
+```
+
+The server listens on port 8080 and logs the address on start.
+''',
+    },
+  ),
+  ProjectTemplate(
+    id: 'go-cli',
+    name: 'Go CLI',
+    runtime: TemplateRuntime.go,
+    description: 'Command-line starter with flags and a small test.',
+    files: {
+      'go.mod': 'module hello-cli\n\ngo 1.22\n',
+      'main.go': '''package main
+
+import (
+	"flag"
+	"fmt"
+)
+
+func greet(name string, shout bool) string {
+	message := fmt.Sprintf("Hello, %s", name)
+	if shout {
+		message += "!"
+	}
+	return message
+}
+
+func main() {
+	name := flag.String("name", "Praxis", "who to greet")
+	shout := flag.Bool("shout", false, "add an exclamation mark")
+	flag.Parse()
+	fmt.Println(greet(*name, *shout))
+}
+''',
+      'main_test.go': '''package main
+
+import "testing"
+
+func TestGreet(t *testing.T) {
+	if got := greet("Praxis", true); got != "Hello, Praxis!" {
+		t.Fatalf("unexpected greeting: %s", got)
+	}
+}
+''',
+      'README.md': '''# Go CLI on Praxis
+
+```sh
+go run . --name Praxis --shout
+go test ./...
 ```
 ''',
     },

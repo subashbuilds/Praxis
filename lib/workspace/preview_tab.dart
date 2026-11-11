@@ -23,6 +23,7 @@ class _PreviewTabState extends State<PreviewTab> {
   String? _path;
   String? _root;
   int? _port;
+  int? _devPort;
   bool _loading = true;
   bool _desktop = false;
   bool _switching = false;
@@ -56,26 +57,34 @@ class _PreviewTabState extends State<PreviewTab> {
     final state = AppScope.of(context);
     try {
       await _stopServer();
-      final path = await state.previewFile(widget.project);
+      // A dev server, when one has been seen in the shell, is what the user
+      // actually wants to preview. Otherwise the exported files are served.
+      final devPort = state.devPortFor(widget.project);
+      final path =
+          devPort == null ? await state.previewFile(widget.project) : null;
       if (!mounted) return;
-      if (path == null) {
+      if (path == null && devPort == null) {
         setState(() {
           _loading = false;
           _path = null;
           _controller = null;
+          _devPort = null;
+          _port = null;
           _error = null;
         });
         return;
       }
-      final normalized = path.replaceAll('\\', '/');
+      final normalized = (path ?? '').replaceAll('\\', '/');
       final entry = normalized.split('/').last;
-      final root = _rootFor(path);
+      final root = path == null ? '' : _rootFor(path);
       HttpServer? server;
-      try {
-        server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-        server.listen((request) => _serve(request, root, entry));
-      } catch (_) {
-        server = null;
+      if (path != null) {
+        try {
+          server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          server.listen((request) => _serve(request, root, entry));
+        } catch (_) {
+          server = null;
+        }
       }
       final controller = WebViewController();
       await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
@@ -83,8 +92,12 @@ class _PreviewTabState extends State<PreviewTab> {
       await controller.setNavigationDelegate(NavigationDelegate(
         onPageFinished: (_) => _applyDesktopViewport(controller),
       ));
-      if (server == null) {
-        await controller.loadFile(path);
+      if (devPort != null) {
+        await controller.loadRequest(
+          Uri.parse('http://127.0.0.1:$devPort/'),
+        );
+      } else if (server == null) {
+        await controller.loadFile(path!);
       } else {
         await controller.loadRequest(
           Uri.parse('http://127.0.0.1:${server.port}/'),
@@ -99,7 +112,8 @@ class _PreviewTabState extends State<PreviewTab> {
         _controller = controller;
         _path = path;
         _root = root;
-        _port = server?.port;
+        _devPort = devPort;
+        _port = devPort ?? server?.port;
         _loading = false;
         _error = null;
       });
@@ -111,6 +125,74 @@ class _PreviewTabState extends State<PreviewTab> {
         _error = '$error';
       });
     }
+  }
+
+  Future<void> _editPort() async {
+    final state = AppScope.of(context);
+    final current = state.devPortFor(widget.project);
+    final controller =
+        TextEditingController(text: current?.toString() ?? '3000');
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: const Text('Preview a running server'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Start the dev server in the shell, then use the port it prints. '
+              'Leave the port empty to preview the exported project files.',
+              style: Txt.meta.copyWith(height: 1.45),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              style: Txt.code.copyWith(fontSize: 13),
+              cursorColor: Pal.ember,
+              decoration: appField('3000', label: 'Port'),
+              onSubmitted: (value) =>
+                  Navigator.of(dialogContext).pop(value.trim()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop('auto'),
+            child: const Text('Use project files'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Use port'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (choice == null || !mounted) return;
+    if (choice == 'auto' || choice.isEmpty) {
+      await state.setDevPort(widget.project, null);
+    } else {
+      final port = int.tryParse(choice);
+      if (port == null || port < 1 || port > 65535) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Enter a port between 1 and 65535.')),
+          );
+        }
+        return;
+      }
+      await state.setDevPort(widget.project, port);
+    }
+    if (mounted) await _load();
   }
 
   Future<void> _serve(HttpRequest request, String root, String entry) async {
@@ -175,8 +257,10 @@ class _PreviewTabState extends State<PreviewTab> {
 
   Future<void> _applyDesktopViewport(WebViewController controller) async {
     if (!mounted) return;
-    final screenWidth = MediaQuery.sizeOf(context).width;
     try {
+      // A viewport of 1280 CSS pixels lets the WebView fit the whole desktop
+      // layout to the screen. Setting the document width and zoom on top of
+      // that produced fixed-width elements spilling off the page.
       await controller.runJavaScript('''
         (() => {
           let meta = document.querySelector('meta[name="viewport"]');
@@ -185,16 +269,18 @@ class _PreviewTabState extends State<PreviewTab> {
             meta.name = 'viewport';
             document.head.appendChild(meta);
           }
+          if (meta.dataset.praxisOriginal === undefined) {
+            meta.dataset.praxisOriginal = meta.getAttribute('content') || '';
+          }
           const desktop = ${_desktop ? 'true' : 'false'};
           if (desktop) {
             meta.setAttribute('content', 'width=1280');
-            document.documentElement.style.width = '1280px';
-            document.documentElement.style.zoom = '${(screenWidth / 1280).clamp(0.22, 1.0)}';
           } else {
-            meta.setAttribute('content', 'width=device-width, initial-scale=1');
-            document.documentElement.style.width = '';
-            document.documentElement.style.zoom = '';
+            meta.setAttribute('content', meta.dataset.praxisOriginal ||
+              'width=device-width, initial-scale=1');
           }
+          document.documentElement.style.width = '';
+          document.documentElement.style.zoom = '';
           window.dispatchEvent(new Event('resize'));
         })();
       ''');
@@ -282,12 +368,48 @@ class _PreviewTabState extends State<PreviewTab> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  _port == null
-                      ? _path ?? ''
-                      : 'localhost:$_port  ·  ${_shortRoot(folder)}',
+                  _devPort != null
+                      ? 'localhost:$_devPort  ·  dev server'
+                      : _port == null
+                          ? _path ?? ''
+                          : 'localhost:$_port  ·  ${_shortRoot(folder)}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Txt.meta.copyWith(fontSize: 10.5),
+                ),
+              ),
+              GestureDetector(
+                onTap: _editPort,
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  margin: const EdgeInsets.only(right: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _devPort == null
+                        ? Pal.raised
+                        : Pal.mint.withOpacity(0.12),
+                    borderRadius: Rd.pill,
+                    border: Border.all(
+                      color: _devPort == null
+                          ? Pal.lineStrong
+                          : Pal.mint.withOpacity(0.4),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.lan_outlined,
+                        size: 12,
+                        color: _devPort == null ? Pal.textDim : Pal.mint,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _devPort == null ? 'Port' : ':$_devPort',
+                        style: Txt.meta.copyWith(fontSize: 9.5),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               IconAction(

@@ -543,6 +543,42 @@ class AppState extends ChangeNotifier {
     return html.isEmpty ? null : fs.absolute(html.first.path);
   }
 
+  static const _kDevPorts = 'praxis.devPorts';
+  Map<String, int>? _devPortCache;
+
+  Map<String, int> get _devPorts {
+    final cached = _devPortCache;
+    if (cached != null) return cached;
+    final ports = <String, int>{};
+    final raw = store.read(_kDevPorts);
+    if (raw != null) {
+      try {
+        (jsonDecode(raw) as Map).forEach((key, value) {
+          if (value is int) ports['$key'] = value;
+        });
+      } catch (_) {
+        // A corrupt entry just means no remembered port.
+      }
+    }
+    return _devPortCache = ports;
+  }
+
+  /// The port a project's dev server was last seen on. Preview uses it to load
+  /// the running app instead of the exported files.
+  int? devPortFor(Project project) => _devPorts[project.id];
+
+  Future<void> setDevPort(Project project, int? port) async {
+    final ports = _devPorts;
+    if (port == null) {
+      if (ports.remove(project.id) == null) return;
+    } else {
+      if (ports[project.id] == port) return;
+      ports[project.id] = port;
+    }
+    notifyListeners();
+    await store.write(_kDevPorts, jsonEncode(ports));
+  }
+
   Future<Uint8List> exportZip(Project project) => fsFor(project).zipBytes();
 
   static String _slug(String name) {
@@ -683,9 +719,24 @@ class AppState extends ChangeNotifier {
   String? _activeProjectId;
 
   void _clearLive() {
+    _liveNotify?.cancel();
+    _liveNotify = null;
     liveText = '';
     liveThinking = '';
     liveTools.clear();
+  }
+
+  Timer? _liveNotify;
+
+  /// Streaming replies produce dozens of deltas a second. Repainting the whole
+  /// workspace for each one made large projects stutter, so live text is
+  /// coalesced into at most one frame update every 60 ms.
+  void _notifyLive() {
+    if (_liveNotify != null) return;
+    _liveNotify = Timer(const Duration(milliseconds: 60), () {
+      _liveNotify = null;
+      notifyListeners();
+    });
   }
 
   Future<void> send(
@@ -816,11 +867,11 @@ class AppState extends ChangeNotifier {
       skipActionFingerprints: skipActionFingerprints,
       onTextDelta: (delta) {
         liveText += delta;
-        notifyListeners();
+        _notifyLive();
       },
       onThinkingDelta: (delta) {
         liveThinking += delta;
-        notifyListeners();
+        _notifyLive();
       },
       onToolStart: (call) {
         final detail = _toolDetail(call);
@@ -959,6 +1010,11 @@ class AppState extends ChangeNotifier {
         ok: false,
       ));
     } finally {
+      // Keep whatever the model had already streamed. Stopping cleared the live
+      // reply and left the thread showing only the user's prompt.
+      final partialText = liveText.trim();
+      final partialThinking = liveThinking.trim();
+      final partialTools = List<ToolDraft>.from(liveTools);
       _clearLive();
       final elapsed = DateTime.now().difference(started);
       final interrupted = _cancelled || checkpointError.isNotEmpty;
@@ -1006,6 +1062,21 @@ class AppState extends ChangeNotifier {
           updatedAt: DateTime.now(),
         );
         _queueCheckpoint(checkpoint);
+      }
+      if (_cancelled && partialText.isNotEmpty) {
+        for (final tool in partialTools) {
+          thread.add(_entry(
+            role: ChatRole.tool,
+            text: tool.detail,
+            tool: tool.tool,
+            detail: tool.detail,
+          ));
+        }
+        thread.add(_entry(
+          role: ChatRole.assistant,
+          text: partialText,
+          thinking: partialThinking,
+        ));
       }
       thread.add(_entry(
         role: ChatRole.note,
@@ -1696,11 +1767,12 @@ Continue the task. Do not repeat a write or destructive action that already comp
       throw IntegrationException(
           'Paste the Cloudflare Account ID for these Pages projects.');
     }
+    // No list options here: some accounts reject page/per_page on the Pages
+    // endpoint with a 400 even though the token itself is valid.
     final response = await httpClient.get(
-      Uri.https(
-        'api.cloudflare.com',
-        '/client/v4/accounts/$accountId/pages/projects',
-        {'per_page': '1'},
+      Uri.parse(
+        'https://api.cloudflare.com/client/v4/accounts/'
+        '$accountId/pages/projects',
       ),
       headers: {
         'Authorization': 'Bearer $token',
@@ -2316,8 +2388,11 @@ Continue the task. Do not repeat a write or destructive action that already comp
       GitHubClient(account.token, client: httpClient)
           .ensureRepo(owner, repo, private: private);
 
+  // Records are versioned so the first deployment made with an older manifest
+  // format can be retried without being treated as "nothing changed".
   String _deployRecordKey(Project project, String platform) =>
-      'praxis.deploy.${project.id}.$platform';
+      'praxis.deploy.${project.id}.'
+      '${platform == 'cloudflare' ? 'cloudflare.v2' : platform}';
 
   String _deploymentSignature(List<DeploymentFile> files) {
     final sorted = [...files]..sort((a, b) => a.path.compareTo(b.path));
