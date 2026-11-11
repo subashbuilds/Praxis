@@ -565,8 +565,13 @@ class AppState extends ChangeNotifier {
 
   /// The port a project's dev server was last seen on. Preview uses it to load
   /// the running app instead of the exported files.
-  int? devPortFor(Project project) =>
-      _devPorts[project.id] ?? (project.kind == ProjectKind.node ? 3000 : null);
+  int? devPortFor(Project project) {
+    final stored = _devPorts[project.id];
+    // Zero is the explicit "preview project files" choice, so clearing the
+    // default must not fall back to 3000 again.
+    if (stored != null) return stored == 0 ? null : stored;
+    return project.kind == ProjectKind.node ? 3000 : null;
+  }
 
   /// The deploy target last chosen for this project and platform, so the
   /// deploy sheet can preselect it instead of starting from scratch.
@@ -583,12 +588,9 @@ class AppState extends ChangeNotifier {
 
   Future<void> setDevPort(Project project, int? port) async {
     final ports = _devPorts;
-    if (port == null) {
-      if (ports.remove(project.id) == null) return;
-    } else {
-      if (ports[project.id] == port) return;
-      ports[project.id] = port;
-    }
+    final value = port ?? 0;
+    if (ports[project.id] == value) return;
+    ports[project.id] = value;
     notifyListeners();
     await store.write(_kDevPorts, jsonEncode(ports));
   }
