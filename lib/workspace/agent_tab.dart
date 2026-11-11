@@ -1218,6 +1218,8 @@ class _ComposerState extends State<_Composer> {
   int _tokenStart = 0;
   bool _loadedContext = false;
   bool _loadingFiles = false;
+  bool _loadingSkills = false;
+  String _query = '';
 
   @override
   void initState() {
@@ -1242,9 +1244,15 @@ class _ComposerState extends State<_Composer> {
   }
 
   Future<void> _loadSkills() async {
+    if (_loadingSkills) return;
+    _loadingSkills = true;
     final state = AppScope.of(context);
     final projectSkills = await state.installedSkillsFor(widget.project);
-    if (!mounted) return;
+    if (!mounted) {
+      _loadingSkills = false;
+      return;
+    }
+    _skills.clear();
     final seen = <String>{};
     void add(String label, String command, String detail) {
       if (!seen.add(command)) return;
@@ -1265,6 +1273,7 @@ class _ComposerState extends State<_Composer> {
       add(skill.name, skill.slug, 'Project skill');
     }
     _skills.sort((a, b) => a.label.compareTo(b.label));
+    _loadingSkills = false;
     if (mounted) _refreshSuggestions();
   }
 
@@ -1345,11 +1354,46 @@ class _ComposerState extends State<_Composer> {
         .toList();
     setState(() {
       _trigger = trigger;
+      _query = query;
       _tokenStart = tokenStart < 0 ? 0 : tokenStart;
       _suggestions
         ..clear()
         ..addAll(filtered);
     });
+  }
+
+  /// Marks the typed part of a skill or file name inside the suggestion so the
+  /// match is visible instead of being one undifferentiated row.
+  Widget _highlightSuggestion(String label) {
+    final style = Txt.code.copyWith(fontSize: 11);
+    final index =
+        _query.isEmpty ? -1 : label.toLowerCase().indexOf(_query.toLowerCase());
+    if (index < 0 || index + _query.length > label.length) {
+      return Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      );
+    }
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: label.substring(0, index)),
+          TextSpan(
+            text: label.substring(index, index + _query.length),
+            style: style.copyWith(
+              color: Pal.ember,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          TextSpan(text: label.substring(index + _query.length)),
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: style,
+    );
   }
 
   void _choose(_ComposerSuggestion suggestion) {
@@ -1416,12 +1460,22 @@ class _ComposerState extends State<_Composer> {
                         color: Pal.ember,
                       ),
                       const SizedBox(width: 5),
-                      Text(
-                        _trigger == '/'
-                            ? 'Skills · click to complete'
-                            : 'Project files · click to tag',
-                        style: Txt.meta.copyWith(fontSize: 8.5),
+                      Expanded(
+                        child: Text(
+                          _trigger == '/'
+                              ? 'Skills · click to complete'
+                              : 'Project files · click to tag',
+                          style: Txt.meta.copyWith(fontSize: 8.5),
+                        ),
                       ),
+                      if (_trigger == '/')
+                        IconAction(
+                          icon: Icons.refresh_rounded,
+                          tooltip: 'Refresh skills',
+                          size: 14,
+                          padding: const EdgeInsets.all(3),
+                          onTap: _loadingSkills ? null : _loadSkills,
+                        ),
                     ],
                   ),
                 ),
@@ -1438,10 +1492,7 @@ class _ComposerState extends State<_Composer> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(suggestion.label,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Txt.code.copyWith(fontSize: 11)),
+                                _highlightSuggestion(suggestion.label),
                                 if (suggestion.detail.isNotEmpty)
                                   Text(
                                     suggestion.detail,

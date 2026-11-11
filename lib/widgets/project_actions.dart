@@ -403,6 +403,7 @@ class _DeploySheetState extends State<_DeploySheet> {
   IntegrationKind _platform = IntegrationKind.vercel;
   String _environment = 'production';
   int _fileCount = 0;
+  DeployProgress? _progress;
 
   @override
   void didChangeDependencies() {
@@ -608,6 +609,10 @@ class _DeploySheetState extends State<_DeploySheet> {
     );
   }
 
+  void _onDeployProgress(DeployProgress progress) {
+    if (mounted) setState(() => _progress = progress);
+  }
+
   Future<void> _deploy() async {
     final selectedVercel = _createVercelProject ? null : _vercelProject;
     final name = selectedVercel?.name ?? _name.text.trim();
@@ -625,6 +630,8 @@ class _DeploySheetState extends State<_DeploySheet> {
     setState(() {
       _busy = true;
       _error = null;
+      _result = null;
+      _progress = null;
     });
     try {
       final result = _platform == IntegrationKind.vercel
@@ -634,6 +641,7 @@ class _DeploySheetState extends State<_DeploySheet> {
               name: name,
               projectId: selectedVercel?.id,
               environment: _environment,
+              onProgress: _onDeployProgress,
             )
           : await _state.deployToCloudflare(
               _state.projectById(widget.project.id),
@@ -641,6 +649,7 @@ class _DeploySheetState extends State<_DeploySheet> {
               projectName: _project!.name,
               environment: _environment,
               branch: widget.project.branch,
+              onProgress: _onDeployProgress,
             );
       if (mounted) {
         setState(() => _result = result);
@@ -892,6 +901,13 @@ class _DeploySheetState extends State<_DeploySheet> {
                       const SizedBox(height: 12),
                       _ErrorNote(text: activeError),
                     ],
+                    if (_busy) ...[
+                      const SizedBox(height: 12),
+                      _DeployProgressView(
+                        platform: _platform,
+                        progress: _progress,
+                      ),
+                    ],
                     if (_result != null) ...[
                       const SizedBox(height: 12),
                       _DeploymentSuccess(result: _result!),
@@ -972,6 +988,108 @@ class _DeploymentSuccess extends StatelessWidget {
                   label: const Text('Open'),
                 ),
               ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _DeployProgressView extends StatelessWidget {
+  const _DeployProgressView({required this.platform, required this.progress});
+
+  final IntegrationKind platform;
+  final DeployProgress? progress;
+
+  List<String> get _stages => platform == IntegrationKind.vercel
+      ? const ['Preparing', 'Uploading', 'Building', 'Live']
+      : const ['Preparing', 'Uploading', 'Deploying', 'Live'];
+
+  @override
+  Widget build(BuildContext context) {
+    final stages = _stages;
+    final found = progress == null ? 0 : stages.indexOf(progress!.stage);
+    final active = found < 0 ? 0 : found;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(11, 9, 11, 10),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var index = 0; index < stages.length; index++)
+            Padding(
+              padding: EdgeInsets.only(
+                bottom: index == stages.length - 1 ? 0 : 6,
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: Center(
+                      child: active > index
+                          ? Icon(Icons.check_rounded, size: 12, color: Pal.mint)
+                          : active == index
+                              ? const SizedBox(
+                                  width: 9,
+                                  height: 9,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 1.4),
+                                )
+                              : Container(
+                                  width: 5,
+                                  height: 5,
+                                  decoration: BoxDecoration(
+                                    color: Pal.textDim.withOpacity(0.45),
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                    ),
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      stages[index],
+                      style: Txt.meta.copyWith(
+                        fontSize: 10.5,
+                        color: active >= index ? Pal.text : Pal.textMuted,
+                        fontWeight:
+                            active == index ? FontWeight.w600 : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                  if (active == index && (progress?.detail ?? '').isNotEmpty)
+                    Flexible(
+                      child: Text(
+                        progress!.detail,
+                        textAlign: TextAlign.right,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Txt.meta.copyWith(
+                          fontSize: 9,
+                          color: Pal.textMuted,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          if (progress?.value != null) ...[
+            const SizedBox(height: 9),
+            ClipRRect(
+              borderRadius: Rd.pill,
+              child: LinearProgressIndicator(
+                value: progress!.value!.clamp(0.0, 1.0).toDouble(),
+                minHeight: 2.5,
+                backgroundColor: Pal.line,
+                color: Pal.ember,
+              ),
             ),
           ],
         ],

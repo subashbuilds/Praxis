@@ -697,6 +697,7 @@ class VercelClient {
     String? projectId,
     required List<DeploymentFile> files,
     String environment = 'production',
+    void Function(DeployProgress)? onProgress,
   }) async {
     if (token.trim().isEmpty) {
       throw IntegrationException('Add a Vercel account first.');
@@ -704,6 +705,10 @@ class VercelClient {
     if (files.isEmpty) {
       throw IntegrationException('This project has no files to deploy.');
     }
+    onProgress?.call(DeployProgress(
+      'Uploading',
+      detail: '${files.length} files',
+    ));
     final account = await login();
     final payload = <String, dynamic>{
       'name': name,
@@ -729,6 +734,10 @@ class VercelClient {
     if (response.statusCode != 200 && response.statusCode != 201) {
       throw IntegrationException(_error(response, 'Deployment failed'));
     }
+    onProgress?.call(const DeployProgress(
+      'Building',
+      detail: 'Vercel is compiling the deployment',
+    ));
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     final url = body['url'] as String?;
     if (url == null || url.isEmpty) {
@@ -754,6 +763,16 @@ class VercelClient {
     }
     return '$fallback (HTTP ${response.statusCode}).';
   }
+}
+
+/// One step of a deployment, surfaced to the deploy sheet so a long upload
+/// shows what is happening instead of an indefinite spinner.
+class DeployProgress {
+  const DeployProgress(this.stage, {this.detail = '', this.value});
+
+  final String stage;
+  final String detail;
+  final double? value;
 }
 
 /// Cloudflare Pages Direct Upload. Assets are uploaded to the Pages asset
@@ -903,9 +922,22 @@ class CloudflarePagesClient {
     required List<DeploymentFile> files,
     String environment = 'production',
     String branch = 'main',
+    void Function(DeployProgress)? onProgress,
   }) async {
     if (files.isEmpty) {
       throw IntegrationException('This project has no files to deploy.');
+    }
+    if (files.length > 20000) {
+      throw IntegrationException(
+          'Pages accepts at most 20,000 files. This project has '
+          '${files.length}.');
+    }
+    for (final file in files) {
+      if (file.bytes.length > 24 * 1024 * 1024) {
+        throw IntegrationException(
+            '${file.path} is ${(file.bytes.length / (1024 * 1024)).toStringAsFixed(1)} '
+            'MB. Pages accepts files up to 24 MB.');
+      }
     }
     final (accountId, accountName) = await _account();
     final tokenResponse = await _client
@@ -932,7 +964,7 @@ class CloudflarePagesClient {
     for (final file in files) {
       hashes['/${file.path}'] = digestForPagesBytes(file.bytes);
     }
-    final uploads = [
+    final uploads = <Map<String, dynamic>>[
       for (final file in files)
         {
           'base64': true,
@@ -941,28 +973,71 @@ class CloudflarePagesClient {
           'metadata': {'contentType': _contentType(file.path, file.mime)},
         },
     ];
-    for (var start = 0; start < uploads.length; start += 50) {
-      final chunk = uploads.sublist(
-        start,
-        math.min(start + 50, uploads.length),
-      );
-      final upload = await _client
-          .post(
-            Uri.parse(
-                'https://api.cloudflare.com/client/v4/pages/assets/upload'),
-            headers: {
-              'Authorization': 'Bearer $jwt',
-              'Content-Type': 'application/json',
-            },
-            body: jsonEncode(chunk),
-          )
-          .timeout(const Duration(seconds: 90));
-      if (upload.statusCode < 200 || upload.statusCode >= 300) {
-        throw IntegrationException(
-            _error(upload, 'Could not upload Pages assets'));
+    // A Node build can contain thousands of files and hundreds of megabytes.
+    // Fixed 50-file batches produced request bodies large enough for Cloudflare
+    // to answer with a 500. Batch by encoded size and retry a transient 429/5xx.
+    var chunk = <Map<String, dynamic>>[];
+    var chunkBytes = 0;
+    var sent = 0;
+    Future<void> sendChunk() async {
+      if (chunk.isEmpty) return;
+      final payload = chunk;
+      chunk = <Map<String, dynamic>>[];
+      chunkBytes = 0;
+      http.Response? response;
+      var failure = 'Could not upload Pages assets.';
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        try {
+          response = await _client
+              .post(
+                Uri.parse(
+                    'https://api.cloudflare.com/client/v4/pages/assets/upload'),
+                headers: {
+                  'Authorization': 'Bearer $jwt',
+                  'Content-Type': 'application/json',
+                },
+                body: jsonEncode(payload),
+              )
+              .timeout(const Duration(seconds: 90));
+          if (response.statusCode != 429 && response.statusCode < 500) break;
+          failure = _error(response, 'Could not upload Pages assets');
+          response = null;
+        } catch (error) {
+          failure = '$error';
+          response = null;
+        }
+        if (attempt < 3) {
+          await Future<void>.delayed(Duration(milliseconds: 600 * attempt));
+        }
       }
+      final result = response;
+      if (result == null) throw IntegrationException(failure);
+      if (result.statusCode < 200 || result.statusCode >= 300) {
+        throw IntegrationException(
+            _error(result, 'Could not upload Pages assets'));
+      }
+      sent += payload.length;
+      onProgress?.call(DeployProgress(
+        'Uploading',
+        detail: '$sent of ${uploads.length} files',
+        value: uploads.isEmpty ? null : sent / uploads.length,
+      ));
     }
 
+    for (final upload in uploads) {
+      final size = (upload['value'] as String).length;
+      if (chunk.isNotEmpty && chunkBytes + size > 3 * 1024 * 1024) {
+        await sendChunk();
+      }
+      chunk.add(upload);
+      chunkBytes += size;
+    }
+    await sendChunk();
+
+    onProgress?.call(const DeployProgress(
+      'Deploying',
+      detail: 'Publishing the Pages deployment',
+    ));
     final request = http.MultipartRequest(
       'POST',
       Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
@@ -989,6 +1064,7 @@ class CloudflarePagesClient {
     final url = firstAlias.startsWith('http')
         ? firstAlias
         : 'https://$project.pages.dev';
+    onProgress?.call(DeployProgress('Live', detail: url));
     return IntegrationResult(
       message: 'Deployed ${files.length} files to $accountName · '
           '$project ${environment == 'preview' ? 'preview' : 'production'}.',

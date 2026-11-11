@@ -667,7 +667,10 @@ class Agent {
 
         if (reply.calls.isEmpty) {
           final text = reply.text.trim();
-          final wantsChange = _looksLikeChangeRequest(prompt);
+          // Plan mode is expected to end without a mutation. Treating it like a
+          // build request sent a "you have not changed a file" nudge that made
+          // the model try to write, fail, and stop without ever showing a plan.
+          final wantsChange = !_planMode && _looksLikeChangeRequest(prompt);
 
           // A reasoning model can spend the entire output budget before it emits
           // its tool call. That is not a completed answer, so never print the
@@ -678,11 +681,17 @@ class Agent {
             if (text.isNotEmpty) {
               turns.add(AiTurn.assistant(reply.text, const []));
             }
-            turns.add(const AiTurn.user(
-              'Your previous response was cut off by the model output limit '
-              'before you acted. Continue from the work already done. Do not '
-              'repeat the plan or keep reasoning: use edit_file for the existing '
-              'file or write_file for a new file now. Keep the tool call compact.',
+            turns.add(AiTurn.user(
+              _planMode
+                  ? 'Your plan was cut off by the model output limit. Continue '
+                      'from where it stopped and finish with the complete plan, '
+                      'using the required headings. Do not call a file-changing '
+                      'tool.'
+                  : 'Your previous response was cut off by the model output '
+                      'limit before you acted. Continue from the work already '
+                      'done. Do not repeat the plan or keep reasoning: use '
+                      'edit_file for the existing file or write_file for a new '
+                      'file now. Keep the tool call compact.',
             ));
             continue;
           }
@@ -1070,7 +1079,7 @@ your reasoning behind a collapsed pill, and every tool call with its diff in a
 chat next to the code, a terminal and a live preview.
 
 Mode: ${mode.label}.
-${_planMode ? 'Plan mode is active. You may inspect files, search, read skills and run read-only commands. Never write, edit, delete, download, install, commit or push. Produce a concrete implementation plan with exact files, edits and verification steps. Do not claim a change was made.' : 'Build mode is active. Read, edit, run commands and verify the project normally.'}
+${_planMode ? 'Plan mode is active. This turn is read-only: inspect the project and return a plan. Never call write_file, edit_file, apply_patch, install_skill, download_file, commit_and_push or a command that changes files. Your final answer must be a complete Markdown plan with these headings: "## Goal", "## Steps" (numbered, naming the exact files and the change for each), "## Verification" and "## Risks". Do not claim any change was made and do not ask to switch modes.' : 'Build mode is active. Read, edit, run commands and verify the project normally.'}
 
 How to work:
 - Finish the request with the fewest model rounds. Do not narrate a plan before

@@ -104,18 +104,17 @@ class _PreviewTabState extends State<PreviewTab> {
         // The default user agent is still usable.
       }
       await controller.setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (_) {
-          if (!_desktop) _applyDesktopViewport(controller);
-        },
+        onPageFinished: (_) => _applyDesktopViewport(controller),
       ));
       final target = devPort != null
           ? 'http://127.0.0.1:$devPort/'
           : (server != null ? 'http://127.0.0.1:${server.port}/' : null);
-      if (_desktop && target != null) {
-        // A 1280 CSS-pixel iframe gives the page a real desktop layout viewport,
-        // including pages that choose their layout in JavaScript at load time.
-        await controller.loadHtmlString(_desktopFrame(target));
-      } else if (target != null) {
+      // Load the page directly. Framing it inside a generated wrapper made
+      // servers that send X-Frame-Options or a frame-ancestors policy fail with
+      // ERR_BLOCKED_BY_RESPONSE, and Next's dev server saw a foreign origin for
+      // its own HMR socket. The desktop layout comes from the user agent and a
+      // 1280px viewport instead.
+      if (target != null) {
         await controller.loadRequest(Uri.parse(target));
       } else {
         await controller.loadFile(path!);
@@ -272,43 +271,12 @@ class _PreviewTabState extends State<PreviewTab> {
     await _load();
   }
 
-  String _desktopFrame(String url) => '''
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  html, body { margin: 0; padding: 0; height: 100%; background: #0b0d0c; overflow: hidden; }
-  #fit { position: absolute; top: 0; left: 0; width: 1280px; transform-origin: top left; }
-  iframe { width: 1280px; height: 100vh; border: 0; background: #fff; display: block; }
-</style>
-</head>
-<body>
-<div id="fit"><iframe src="$url"></iframe></div>
-<script>
-  function fit() {
-    var scale = window.innerWidth / 1280;
-    var frame = document.querySelector('iframe');
-    var box = document.getElementById('fit');
-    box.style.transform = 'scale(' + scale + ')';
-    var height = window.innerHeight / scale;
-    box.style.height = height + 'px';
-    frame.style.height = height + 'px';
-  }
-  fit();
-  window.addEventListener('resize', fit);
-</script>
-</body>
-</html>
-''';
-
   Future<void> _applyDesktopViewport(WebViewController controller) async {
     if (!mounted) return;
     try {
-      // A viewport of 1280 CSS pixels lets the WebView fit the whole desktop
-      // layout to the screen. Setting the document width and zoom on top of
-      // that produced fixed-width elements spilling off the page.
+      // A viewport of 1280 CSS pixels gives the page a desktop layout width,
+      // so media queries and width-dependent scripts choose desktop styles. The
+      // WebView shrinks the wide page to fit the screen like a desktop site.
       await controller.runJavaScript('''
         (() => {
           let meta = document.querySelector('meta[name="viewport"]');
@@ -322,7 +290,16 @@ class _PreviewTabState extends State<PreviewTab> {
           }
           const desktop = ${_desktop ? 'true' : 'false'};
           if (desktop) {
-            meta.setAttribute('content', 'width=1280');
+            const width = 1280;
+            const screenWidth = window.screen && window.screen.width
+              ? window.screen.width
+              : width;
+            const scale = Math.min(1, screenWidth / width);
+            meta.setAttribute(
+              'content',
+              'width=' + width + ', initial-scale=' + scale +
+                ', minimum-scale=' + scale,
+            );
           } else {
             meta.setAttribute('content', meta.dataset.praxisOriginal ||
               'width=device-width, initial-scale=1');
@@ -330,6 +307,11 @@ class _PreviewTabState extends State<PreviewTab> {
           document.documentElement.style.width = '';
           document.documentElement.style.zoom = '';
           window.dispatchEvent(new Event('resize'));
+          // Some frameworks only read the viewport once during hydration.
+          window.setTimeout(
+            () => window.dispatchEvent(new Event('resize')),
+            120,
+          );
         })();
       ''');
     } catch (_) {

@@ -328,6 +328,17 @@ class ProjectFs {
     final result = <DeploymentFile>[];
     for (final entry in entries) {
       if (entry.isDir) continue;
+      final lower = entry.path.toLowerCase();
+      // `.next` is generated output, not source. Uploading it bloats a Pages
+      // deployment and was the main source of failed asset uploads.
+      if (lower == '.next' ||
+          lower.startsWith('.next/') ||
+          lower == 'node_modules' ||
+          lower.startsWith('node_modules/') ||
+          lower.startsWith('.dart_tool/') ||
+          lower.startsWith('.gradle/')) {
+        continue;
+      }
       try {
         final bytes = await readBytes(entry.path);
         result.add(DeploymentFile(

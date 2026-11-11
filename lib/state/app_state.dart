@@ -87,6 +87,7 @@ class AppState extends ChangeNotifier {
 
   static const _kProviders = 'praxis.providers';
   static const _kSkills = 'praxis.skills';
+  static const _kLiveDraft = 'praxis.liveDraft';
   static const _kIntegrations = 'praxis.integrations';
   static const _kActiveProvider = 'praxis.activeProvider';
   static const _kWordWrap = 'praxis.wrap';
@@ -231,6 +232,7 @@ class AppState extends ChangeNotifier {
     await _loadCheckpoints();
     await linux?.restoreRuntimeState();
     _loadDrafts();
+    await _restoreLiveDraft();
     wordWrap = store.read(_kWordWrap) == 'true';
     editorFontSize =
         (int.tryParse(store.read(_kEditorFontSize) ?? '') ?? 10).clamp(8, 22);
@@ -737,22 +739,106 @@ class AppState extends ChangeNotifier {
   void _clearLive() {
     _liveNotify?.cancel();
     _liveNotify = null;
+    _liveDraftTimer?.cancel();
+    _liveDraftTimer = null;
     liveText = '';
     liveThinking = '';
     liveTools.clear();
+    unawaited(store.write(_kLiveDraft, ''));
   }
 
   Timer? _liveNotify;
+  Timer? _liveDraftTimer;
+  DateTime _lastLiveDraft = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _restoringLiveDraft = false;
 
   /// Streaming replies produce dozens of deltas a second. Repainting the whole
   /// workspace for each one made large projects stutter, so live text is
   /// coalesced into at most one frame update every 60 ms.
   void _notifyLive() {
+    _queueLiveDraft();
     if (_liveNotify != null) return;
     _liveNotify = Timer(const Duration(milliseconds: 60), () {
       _liveNotify = null;
       notifyListeners();
     });
+  }
+
+  /// The app can be killed while a reply is streaming. Keep a small draft of
+  /// the text received so far, at most once a second, so reopening shows the
+  /// answer instead of only the prompt.
+  void _queueLiveDraft() {
+    final projectId = _activeProjectId;
+    if (projectId == null || _restoringLiveDraft || liveText.trim().isEmpty) {
+      return;
+    }
+    final wait = DateTime.now().difference(_lastLiveDraft);
+    const interval = Duration(milliseconds: 800);
+    if (wait >= interval) {
+      _lastLiveDraft = DateTime.now();
+      unawaited(_writeLiveDraft(projectId));
+      return;
+    }
+    _liveDraftTimer ??= Timer(interval - wait, () {
+      _liveDraftTimer = null;
+      _queueLiveDraft();
+    });
+  }
+
+  Future<void> _writeLiveDraft(String projectId) async {
+    if (_activeProjectId != projectId) return;
+    final text = liveText;
+    if (text.trim().isEmpty) return;
+    await store.write(
+      _kLiveDraft,
+      jsonEncode({
+        'projectId': projectId,
+        'text': text,
+        'thinking': liveThinking,
+        'at': DateTime.now().toIso8601String(),
+      }),
+    );
+  }
+
+  Future<void> _restoreLiveDraft() async {
+    final raw = store.read(_kLiveDraft);
+    if (raw == null || raw.isEmpty) return;
+    await store.write(_kLiveDraft, '');
+    Map<String, dynamic> data;
+    try {
+      data = (jsonDecode(raw) as Map).cast<String, dynamic>();
+    } catch (_) {
+      return;
+    }
+    final projectId = data['projectId'] as String? ?? '';
+    final text = (data['text'] as String? ?? '').trim();
+    final thinking = data['thinking'] as String? ?? '';
+    if (projectId.isEmpty ||
+        text.isEmpty ||
+        !projects.any((project) => project.id == projectId)) {
+      return;
+    }
+    _restoringLiveDraft = true;
+    try {
+      final thread = threadOf(projectId);
+      if (thread.isNotEmpty &&
+          thread.last.role == ChatRole.assistant &&
+          thread.last.text.trim() == text) {
+        return;
+      }
+      thread.add(_entry(
+        role: ChatRole.assistant,
+        text: text,
+        thinking: thinking,
+      ));
+      thread.add(_entry(
+        role: ChatRole.note,
+        text: 'Reply saved before the app closed.',
+      ));
+      await _persistChat(projectId);
+    } finally {
+      _restoringLiveDraft = false;
+    }
   }
 
   Future<void> send(
@@ -990,6 +1076,10 @@ class AppState extends ChangeNotifier {
           ));
         }
         notifyListeners();
+        // Committed text and tool rows are real transcript entries, so write
+        // them during the run. If the app is killed before the task ends, the
+        // next launch still has everything received up to that point.
+        unawaited(_persistChat(projectId));
       },
     );
 
@@ -2472,7 +2562,10 @@ Continue the task. Do not repeat a write or destructive action that already comp
     required String name,
     String? projectId,
     String environment = 'production',
+    void Function(DeployProgress)? onProgress,
   }) async {
+    onProgress?.call(
+        const DeployProgress('Preparing', detail: 'Collecting project files'));
     final files = await fsFor(project).deploymentFiles();
     if (files.isEmpty) {
       throw IntegrationException('This project has no files to deploy.');
@@ -2490,6 +2583,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
       projectId: projectId,
       files: files,
       environment: environment,
+      onProgress: onProgress,
     );
     await _rememberDeployment(project, 'vercel', target, signature);
     return result;
@@ -2501,7 +2595,10 @@ Continue the task. Do not repeat a write or destructive action that already comp
     required String projectName,
     String environment = 'production',
     String branch = 'main',
+    void Function(DeployProgress)? onProgress,
   }) async {
+    onProgress?.call(
+        const DeployProgress('Preparing', detail: 'Collecting project files'));
     final files = await fsFor(project).deploymentFiles();
     if (files.isEmpty) {
       throw IntegrationException('This project has no files to deploy.');
@@ -2523,6 +2620,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
       files: files,
       environment: environment,
       branch: branch,
+      onProgress: onProgress,
     );
     await _rememberDeployment(
       project,
