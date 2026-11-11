@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/diff.dart';
@@ -104,7 +106,6 @@ class _PushSheetState extends State<PushSheet> {
     final state = _state;
     if (state == null) return;
     final push = await state.pushStateFor(widget.project);
-    final changes = await state.changesFor(widget.project);
     if (!mounted) return;
     final accounts = state.integrations.ofKind(IntegrationKind.github);
     final account =
@@ -123,22 +124,37 @@ class _PushSheetState extends State<PushSheet> {
                 ? ''
                 : widget.project.name;
     _branch.text = widget.project.branch;
+    // Show the sheet before hashing a large project. The file list fills in
+    // after the first frame instead of holding the sheet behind a spinner.
     setState(() {
       _push = push;
-      _changes = changes;
       _accounts = accounts;
       _account = account;
-      _selected
-        ..clear()
-        ..addAll(changes.map((change) => change.path));
       _loading = false;
     });
     if (_targetReady) {
       await _loadBranches();
       if (widget.project.repo.isNotEmpty || push.owner.isNotEmpty) {
         await _syncBaseline();
+      } else {
+        unawaited(_refreshChanges());
       }
+    } else {
+      unawaited(_refreshChanges());
     }
+  }
+
+  Future<void> _refreshChanges() async {
+    final state = _state;
+    if (state == null) return;
+    final changes = await state.changesFor(widget.project);
+    if (!mounted) return;
+    setState(() {
+      _changes = changes;
+      _selected
+        ..clear()
+        ..addAll(changes.map((change) => change.path));
+    });
   }
 
   Future<void> _loadBranches() async {
@@ -275,11 +291,6 @@ class _PushSheetState extends State<PushSheet> {
     if (state == null || account == null) return;
     if (_repos.isEmpty) await _loadRepos(quiet: false);
     if (!mounted) return;
-    if (_repos.isEmpty) {
-      setState(() => _compareNote =
-          'No repositories could be loaded. Check the account token, or type a name directly.');
-      return;
-    }
     final chosen = await showModalBottomSheet<GitHubRepo>(
       context: context,
       isScrollControlled: true,
@@ -288,9 +299,14 @@ class _PushSheetState extends State<PushSheet> {
       builder: (_) => _RepoPickerSheet(
         repos: _repos,
         current: _repoText,
+        owner: _ownerText.isEmpty ? account.username : _ownerText,
       ),
     );
     if (chosen == null || !mounted) return;
+    if (chosen.name == _RepoPickerSheet.createValue) {
+      await _createRepository(chosen.owner);
+      return;
+    }
     setState(() {
       _owner.text = chosen.owner;
       _repo.text = chosen.name;
@@ -300,6 +316,122 @@ class _PushSheetState extends State<PushSheet> {
     });
     await _loadBranches();
     await _syncBaseline();
+  }
+
+  Future<void> _createRepository(String owner) async {
+    final state = _state;
+    final account = _account;
+    if (state == null || account == null) return;
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: const Text('Create a repository'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Praxis creates a private repository under @${account.username}.',
+              style: Txt.meta.copyWith(height: 1.45),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              style: Txt.code.copyWith(fontSize: 13),
+              cursorColor: Pal.ember,
+              decoration: appField('my-project', label: 'Repository name'),
+              onSubmitted: (value) =>
+                  Navigator.of(dialogContext).pop(value.trim()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Create repository'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+    final repoName = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '-');
+    setState(() {
+      _error = null;
+      _status = 'Creating $owner/$repoName…';
+    });
+    try {
+      await state.ensureGithubRepository(
+        account,
+        owner: owner,
+        repo: repoName,
+      );
+      if (!mounted) return;
+      setState(() {
+        _owner.text = owner;
+        _repo.text = repoName;
+        _branch.text = 'main';
+        _status = 'Created $owner/$repoName.';
+        _changes = const [];
+        _selected.clear();
+      });
+      await _loadBranches();
+      await _syncBaseline();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _status = null;
+          _error = '$error';
+        });
+      }
+    }
+  }
+
+  Future<void> _revertLatestCommit() async {
+    final state = _state;
+    final latest = _push.lastPendingFor(_ownerText, _repoText, _branchText);
+    if (state == null || latest == null) return;
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Remove this commit from the queue?',
+      body: 'The commit has not been pushed. Removing it keeps every file on '
+          'disk and puts the changes back in the uncommitted list.',
+      confirmLabel: 'Remove commit',
+      destructive: true,
+      icon: Icons.undo_rounded,
+      details: [
+        ConfirmDetail('Commit', latest.sha.substring(0, 7)),
+        ConfirmDetail('Message', latest.message),
+      ],
+    );
+    if (!confirmed || !mounted) return;
+    try {
+      final next = await state.revertLatestPending(
+        widget.project,
+        owner: _ownerText,
+        repo: _repoText,
+        branch: _branchText,
+      );
+      if (!mounted) return;
+      setState(() {
+        _push = next;
+        _status =
+            'Removed the waiting commit. Its files are uncommitted again.';
+      });
+      await _refreshChanges();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
   }
 
   Future<void> _pickBranch() async {
@@ -688,10 +820,10 @@ class _PushSheetState extends State<PushSheet> {
                     const SizedBox(height: 10),
                     _PushField(
                       controller: _repo,
-                      focusNode: _repoFocus,
+                      readOnly: true,
+                      onTap: _pickRepo,
                       label: 'Repository',
-                      hint: 'my-project',
-                      onSubmitted: (_) => _syncBaseline(),
+                      hint: 'Choose or create a repository',
                       suffix: _loadingRepos
                           ? const SizedBox(
                               width: 18,
@@ -863,6 +995,65 @@ class _PushSheetState extends State<PushSheet> {
                           ],
                         ),
                       ),
+                      const SizedBox(height: 6),
+                      for (final commit in _push.pending
+                          .where((commit) => commit.matches(
+                              _ownerText, _repoText, _branchText))
+                          .toList()
+                          .reversed)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 5),
+                          padding: const EdgeInsets.fromLTRB(10, 7, 6, 7),
+                          decoration: BoxDecoration(
+                            color: Pal.raised,
+                            borderRadius: Rd.sm,
+                            border: Border.all(color: Pal.line),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.commit_rounded,
+                                  size: 13, color: Pal.textDim),
+                              const SizedBox(width: 7),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      commit.message,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Txt.meta.copyWith(
+                                        fontSize: 10.5,
+                                        color: Pal.text,
+                                      ),
+                                    ),
+                                    Text(
+                                      '${commit.sha.substring(0, 7)} · '
+                                      '${commit.hashes.length} files',
+                                      style: Txt.meta.copyWith(fontSize: 8.5),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (commit.sha ==
+                                  _push
+                                      .lastPendingFor(
+                                          _ownerText, _repoText, _branchText)
+                                      ?.sha)
+                                TextButton(
+                                  onPressed:
+                                      _pushBusy ? null : _revertLatestCommit,
+                                  child: Text(
+                                    'Revert',
+                                    style: Txt.meta.copyWith(
+                                      color: Pal.rose,
+                                      fontSize: 9.5,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
                     ],
                     if (_error != null) ...[
                       const SizedBox(height: 10),
@@ -956,8 +1147,8 @@ class _PushField extends StatelessWidget {
     this.lines = 1,
     this.suffix,
     this.errorText,
-    this.onSubmitted,
-    this.focusNode,
+    this.readOnly = false,
+    this.onTap,
   });
 
   final TextEditingController controller;
@@ -966,17 +1157,18 @@ class _PushField extends StatelessWidget {
   final int lines;
   final Widget? suffix;
   final String? errorText;
-  final ValueChanged<String>? onSubmitted;
-  final FocusNode? focusNode;
+  final bool readOnly;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
       controller: controller,
-      focusNode: focusNode,
+      readOnly: readOnly,
+      showCursor: !readOnly,
+      onTap: onTap,
       style: Txt.body.copyWith(fontSize: 13),
       cursorColor: Pal.ember,
-      onSubmitted: onSubmitted,
       minLines: lines,
       maxLines: lines == 1 ? 1 : lines,
       autocorrect: false,
@@ -1432,10 +1624,17 @@ class _TextChoiceSheet extends StatelessWidget {
 }
 
 class _RepoPickerSheet extends StatefulWidget {
-  const _RepoPickerSheet({required this.repos, required this.current});
+  const _RepoPickerSheet({
+    required this.repos,
+    required this.current,
+    required this.owner,
+  });
+
+  static const createValue = '__create_repository__';
 
   final List<GitHubRepo> repos;
   final String current;
+  final String owner;
 
   @override
   State<_RepoPickerSheet> createState() => _RepoPickerSheetState();
@@ -1492,8 +1691,7 @@ class _RepoPickerSheetState extends State<_RepoPickerSheet> {
           Expanded(
             child: repos.isEmpty
                 ? Center(
-                    child:
-                        Text('No matching repositories.', style: Txt.bodySoft),
+                    child: Text('No repositories found.', style: Txt.bodySoft),
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 6),
@@ -1522,6 +1720,23 @@ class _RepoPickerSheetState extends State<_RepoPickerSheet> {
                       );
                     },
                   ),
+          ),
+          const Hairline(),
+          ListTile(
+            dense: true,
+            leading: Icon(Icons.add_rounded, size: 18, color: Pal.ember),
+            title: Text('Create a new repository',
+                style: Txt.body.copyWith(fontSize: 13)),
+            subtitle: Text('Private · under @${widget.owner}',
+                style: Txt.meta.copyWith(fontSize: 9.5)),
+            onTap: () => Navigator.of(context).pop(
+              GitHubRepo(
+                owner: widget.owner,
+                name: _RepoPickerSheet.createValue,
+                private: true,
+                defaultBranch: 'main',
+              ),
+            ),
           ),
         ],
       ),

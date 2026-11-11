@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'file_types.dart';
+import 'vfs.dart';
 
 class IntegrationException implements Exception {
   IntegrationException(this.message);
@@ -693,35 +694,38 @@ class VercelClient {
 
   Future<IntegrationResult> deploy({
     required String name,
-    required Map<String, String> files,
+    String? projectId,
+    required List<DeploymentFile> files,
     String environment = 'production',
   }) async {
     if (token.trim().isEmpty) {
       throw IntegrationException('Add a Vercel account first.');
     }
     if (files.isEmpty) {
-      throw IntegrationException('This project has no text files to deploy.');
+      throw IntegrationException('This project has no files to deploy.');
     }
     final account = await login();
+    final payload = <String, dynamic>{
+      'name': name,
+      if (projectId != null && projectId.isNotEmpty) 'project': projectId,
+      'target': environment == 'preview' ? 'preview' : 'production',
+      'files': [
+        for (final file in files)
+          {
+            'file': file.path,
+            'data': file.isText ? file.text : base64Encode(file.bytes),
+            'encoding': file.isText ? 'utf-8' : 'base64',
+          },
+      ],
+      'projectSettings': {'framework': null},
+    };
     final response = await _client
         .post(
           Uri.parse('https://api.vercel.com/v13/deployments'),
           headers: _headers,
-          body: jsonEncode({
-            'name': name,
-            'target': environment == 'preview' ? 'preview' : 'production',
-            'files': [
-              for (final entry in files.entries)
-                {
-                  'file': entry.key,
-                  'data': entry.value,
-                  'encoding': 'utf-8',
-                },
-            ],
-            'projectSettings': {'framework': null},
-          }),
+          body: jsonEncode(payload),
         )
-        .timeout(const Duration(seconds: 60));
+        .timeout(const Duration(seconds: 120));
     if (response.statusCode != 200 && response.statusCode != 201) {
       throw IntegrationException(_error(response, 'Deployment failed'));
     }
@@ -807,42 +811,79 @@ class CloudflarePagesClient {
 
   Future<List<CloudflarePagesProject>> projects() async {
     final (accountId, _) = await _account();
+    final projects = <CloudflarePagesProject>[];
+    // Cloudflare accepts page/per_page here; values above 50 are rejected as
+    // invalid list options, which is what made the original list fail.
+    for (var page = 1; page <= 20; page++) {
+      final response = await _client
+          .get(
+            Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
+                '$accountId/pages/projects?page=$page&per_page=50'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 45));
+      if (response.statusCode != 200) {
+        throw IntegrationException(
+            _error(response, 'Could not list Pages projects'));
+      }
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final list = body['result'];
+      if (list is! List || list.isEmpty) break;
+      projects.addAll([
+        for (final item in list)
+          if (item is Map)
+            CloudflarePagesProject(
+              name: item['name'] as String? ?? '',
+              productionBranch: item['production_branch'] as String? ?? 'main',
+              url: item['subdomain'] is String
+                  ? 'https://${item['subdomain']}'
+                  : '',
+            ),
+      ]);
+      if (list.length < 50) break;
+    }
+    return projects.where((project) => project.name.isNotEmpty).toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+  }
+
+  Future<CloudflarePagesProject> createProject(
+    String name, {
+    String branch = 'main',
+  }) async {
+    final (accountId, _) = await _account();
     final response = await _client
-        .get(
+        .post(
           Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
-              '$accountId/pages/projects?per_page=100'),
+              '$accountId/pages/projects'),
           headers: _headers,
+          body: jsonEncode({
+            'name': name,
+            'production_branch': branch,
+          }),
         )
         .timeout(const Duration(seconds: 45));
-    if (response.statusCode != 200) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
       throw IntegrationException(
-          _error(response, 'Could not list Pages projects'));
+          _error(response, 'Could not create the Pages project'));
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
-    final list = body['result'];
-    if (list is! List) return const [];
-    return [
-      for (final item in list)
-        if (item is Map)
-          CloudflarePagesProject(
-            name: item['name'] as String? ?? '',
-            productionBranch: item['production_branch'] as String? ?? 'main',
-            url: item['subdomain'] is String
-                ? 'https://${item['subdomain']}'
-                : '',
-          ),
-    ].where((project) => project.name.isNotEmpty).toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
+    final result = body['result'] as Map<String, dynamic>?;
+    final subdomain = result?['subdomain'] as String? ?? '';
+    return CloudflarePagesProject(
+      name: result?['name'] as String? ?? name,
+      productionBranch: result?['production_branch'] as String? ?? branch,
+      url: subdomain.isEmpty ? '' : 'https://$subdomain',
+    );
   }
 
   Future<IntegrationResult> deploy({
     required String project,
-    required Map<String, String> files,
+    required List<DeploymentFile> files,
     String environment = 'production',
     String branch = 'main',
   }) async {
     if (files.isEmpty) {
-      throw IntegrationException('This project has no text files to deploy.');
+      throw IntegrationException('This project has no files to deploy.');
     }
     final (accountId, accountName) = await _account();
     final tokenResponse = await _client
@@ -863,16 +904,16 @@ class CloudflarePagesClient {
     }
 
     final hashes = <String, String>{};
-    for (final entry in files.entries) {
-      hashes[entry.key] = digestForPages(entry.value);
+    for (final file in files) {
+      hashes[file.path] = digestForPagesBytes(file.bytes);
     }
     final uploads = [
-      for (final entry in files.entries)
+      for (final file in files)
         {
           'base64': true,
-          'key': hashes[entry.key],
-          'value': base64Encode(utf8.encode(entry.value)),
-          'metadata': {'contentType': _contentType(entry.key)},
+          'key': hashes[file.path],
+          'value': base64Encode(file.bytes),
+          'metadata': {'contentType': _contentType(file.path, file.mime)},
         },
     ];
     for (var start = 0; start < uploads.length; start += 50) {
@@ -944,7 +985,7 @@ class CloudflarePagesClient {
     return '$fallback (HTTP ${response.statusCode}).';
   }
 
-  static String _contentType(String path) {
+  static String _contentType(String path, String fallback) {
     final lower = path.toLowerCase();
     if (lower.endsWith('.html')) return 'text/html; charset=utf-8';
     if (lower.endsWith('.css')) return 'text/css; charset=utf-8';
@@ -953,9 +994,12 @@ class CloudflarePagesClient {
     }
     if (lower.endsWith('.json')) return 'application/json';
     if (lower.endsWith('.svg')) return 'image/svg+xml';
-    return 'text/plain; charset=utf-8';
+    return fallback.trim().isEmpty ? 'application/octet-stream' : fallback;
   }
 }
 
 String digestForPages(String content) =>
     sha256.convert(utf8.encode(content)).toString().substring(0, 32);
+
+String digestForPagesBytes(List<int> bytes) =>
+    sha256.convert(bytes).toString().substring(0, 32);

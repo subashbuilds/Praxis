@@ -1,7 +1,7 @@
-import 'dart:typed_data';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/integrations.dart';
 import '../models.dart';
@@ -29,7 +29,6 @@ class ProjectActionsBar extends StatefulWidget {
 
 class _ProjectActionsBarState extends State<ProjectActionsBar> {
   bool _metaLoaded = false;
-  int _changes = 0;
   int _pending = 0;
   bool _exporting = false;
   bool _branchBusy = false;
@@ -48,13 +47,11 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
     final state = AppScope.of(context);
     final project = state.projectById(widget.project.id);
     try {
-      final changes = await state.changesFor(project);
+      // The explorer owns change detection so a big project is hashed once,
+      // not again every time this action bar rebuilds.
       final pending = await state.pendingCommitsFor(project);
       if (!mounted) return;
-      setState(() {
-        _changes = changes.length;
-        _pending = pending;
-      });
+      setState(() => _pending = pending);
     } catch (_) {
       // A read error leaves the counts at their last known values.
     }
@@ -214,7 +211,7 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
     final repoLabel =
         project.repo.isEmpty ? project.name : project.repo.split('/').last;
     return Container(
-      padding: const EdgeInsets.fromLTRB(Sp.x3, Sp.x2, Sp.x2, Sp.x2),
+      padding: const EdgeInsets.fromLTRB(9, 5, 5, 5),
       decoration: BoxDecoration(
         color: Pal.surface,
         border: Border(bottom: BorderSide(color: Pal.line)),
@@ -226,8 +223,8 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
               onTap: _selectBranch,
               behavior: HitTestBehavior.opaque,
               child: Container(
-                height: 32,
-                padding: const EdgeInsets.symmetric(horizontal: 9),
+                height: 30,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 decoration: BoxDecoration(
                   color: Pal.raised,
                   borderRadius: Rd.sm,
@@ -274,13 +271,6 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
               ),
             ),
           ),
-          if (_changes > 0) ...[
-            const SizedBox(width: 7),
-            Text(
-              '$_changes changed',
-              style: Txt.meta.copyWith(fontSize: 8.5, color: Pal.amber),
-            ),
-          ],
           const SizedBox(width: 2),
           if (_exporting)
             const SizedBox(
@@ -350,8 +340,8 @@ class _BarButton extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        height: 32,
-        padding: const EdgeInsets.symmetric(horizontal: 9),
+        height: 30,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
         decoration: BoxDecoration(
           color: accent ? Pal.ember.withOpacity(0.12) : Colors.transparent,
           borderRadius: Rd.sm,
@@ -401,6 +391,11 @@ class _DeploySheetState extends State<_DeploySheet> {
   IntegrationAccount? _cfAccount;
   List<CloudflarePagesProject> _projects = const [];
   CloudflarePagesProject? _project;
+  List<VercelProject> _vercelProjects = const [];
+  VercelProject? _vercelProject;
+  bool _createVercelProject = true;
+  bool _loadingVercel = false;
+  bool _creatingProject = false;
   IntegrationKind _platform = IntegrationKind.vercel;
   String _environment = 'production';
   int _fileCount = 0;
@@ -429,7 +424,8 @@ class _DeploySheetState extends State<_DeploySheet> {
   Future<void> _load() async {
     final accounts = _state.integrations.ofKind(IntegrationKind.vercel);
     final cfAccounts = _state.integrations.ofKind(IntegrationKind.cloudflare);
-    final files = await _state.fsFor(widget.project).textFiles();
+    final entries =
+        await _state.fsFor(widget.project).list(includeHidden: true);
     if (!mounted) return;
     setState(() {
       _accounts = accounts;
@@ -437,12 +433,87 @@ class _DeploySheetState extends State<_DeploySheet> {
       _account =
           _state.activeVercel ?? (accounts.isEmpty ? null : accounts.first);
       _cfAccount = _state.integrations.activeFor(IntegrationKind.cloudflare);
-      _fileCount = files.length;
+      _fileCount = entries.where((entry) => !entry.isDir).length;
       if (accounts.isEmpty && cfAccounts.isNotEmpty) {
         _platform = IntegrationKind.cloudflare;
       }
     });
+    if (_account != null) await _loadVercelProjects(_account!);
     if (_cfAccount != null) await _loadProjects(_cfAccount!);
+  }
+
+  Future<void> _loadVercelProjects(IntegrationAccount account) async {
+    setState(() => _loadingVercel = true);
+    try {
+      final projects = await VercelClient(
+        account.token,
+        client: _state.httpClient,
+      ).projects();
+      if (!mounted || _account?.id != account.id) return;
+      setState(() {
+        _vercelProjects = projects;
+        _vercelProject = null;
+        _createVercelProject = true;
+      });
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _loadingVercel = false);
+    }
+  }
+
+  Future<void> _createPagesProject() async {
+    final account = _cfAccount;
+    if (account == null || _creatingProject) return;
+    final controller = TextEditingController(text: _name.text.trim());
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: const Text('Create a Pages project'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: Txt.body,
+          cursorColor: Pal.ember,
+          decoration: appField('my-project', label: 'Project name'),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+    setState(() {
+      _creatingProject = true;
+      _error = null;
+    });
+    try {
+      final created = await _state.createCloudflareProject(
+        account,
+        name: name,
+        branch: widget.project.branch,
+      );
+      if (!mounted) return;
+      setState(() {
+        _projects = [..._projects, created];
+        _project = created;
+      });
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _creatingProject = false);
+    }
   }
 
   Future<void> _loadProjects(IntegrationAccount account) async {
@@ -468,6 +539,11 @@ class _DeploySheetState extends State<_DeploySheet> {
       _result = null;
       _error = null;
     });
+    if (value == IntegrationKind.vercel &&
+        _account != null &&
+        _vercelProjects.isEmpty) {
+      _loadVercelProjects(_account!);
+    }
     if (value == IntegrationKind.cloudflare &&
         _cfAccount != null &&
         _projects.isEmpty) {
@@ -482,11 +558,16 @@ class _DeploySheetState extends State<_DeploySheet> {
   }
 
   Future<void> _deploy() async {
-    final name = _name.text.trim();
-    if (name.isEmpty) return;
+    final selectedVercel = _createVercelProject ? null : _vercelProject;
+    final name = selectedVercel?.name ?? _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = 'Choose a project or enter a new project name.');
+      return;
+    }
     if (_platform == IntegrationKind.vercel && _account == null) return;
     if (_platform == IntegrationKind.cloudflare &&
         (_cfAccount == null || _project == null)) {
+      setState(() => _error = 'Choose or create a Pages project first.');
       return;
     }
     FocusScope.of(context).unfocus();
@@ -500,6 +581,7 @@ class _DeploySheetState extends State<_DeploySheet> {
               _state.projectById(widget.project.id),
               _account!,
               name: name,
+              projectId: selectedVercel?.id,
               environment: _environment,
             )
           : await _state.deployToCloudflare(
@@ -604,15 +686,22 @@ class _DeploySheetState extends State<_DeploySheet> {
                           setState(() {
                             if (_platform == IntegrationKind.vercel) {
                               _account = value;
+                              _vercelProjects = const [];
+                              _vercelProject = null;
+                              _createVercelProject = true;
                             } else {
                               _cfAccount = value;
                               _projects = const [];
                               _project = null;
                             }
+                            _result = null;
                           });
-                          if (_platform == IntegrationKind.cloudflare &&
-                              value != null) {
-                            _loadProjects(value);
+                          if (value != null) {
+                            if (_platform == IntegrationKind.vercel) {
+                              _loadVercelProjects(value);
+                            } else {
+                              _loadProjects(value);
+                            }
                           }
                         },
                       ),
@@ -632,29 +721,79 @@ class _DeploySheetState extends State<_DeploySheet> {
                       ),
                     _DetailRow(
                       label: 'Files',
-                      value: '$_fileCount text files',
+                      value: '$_fileCount project files',
                     ),
                     if (_platform == IntegrationKind.cloudflare) ...[
                       const _Label('PAGES PROJECT'),
                       if (_projects.isEmpty)
                         Text(
-                          'No Pages projects found. Create one in Cloudflare, '
-                          'then reopen this sheet.',
+                          'No Pages projects found. Create one here or in the '
+                          'Cloudflare dashboard.',
                           style: Txt.meta.copyWith(fontSize: 10),
                         )
                       else
                         _ProjectDropdown(
                           projects: _projects,
                           value: _project,
-                          onChanged: (value) =>
-                              setState(() => _project = value),
+                          onChanged: (value) {
+                            setState(() {
+                              _project = value;
+                              _result = null;
+                            });
+                          },
                         ),
-                    ] else ...[
-                      _Field(
-                        controller: _name,
-                        label: 'Deployment name',
-                        hint: 'my-project',
+                      const SizedBox(height: 2),
+                      TextButton.icon(
+                        onPressed:
+                            _creatingProject ? null : _createPagesProject,
+                        icon: const Icon(Icons.add_rounded, size: 16),
+                        label: Text(_creatingProject
+                            ? 'Creating…'
+                            : 'Create new Pages project'),
                       ),
+                    ] else ...[
+                      const _Label('VERCEL PROJECT'),
+                      if (_vercelProjects.isNotEmpty) ...[
+                        if (!_createVercelProject)
+                          _VercelProjectDropdown(
+                            projects: _vercelProjects,
+                            value: _vercelProject,
+                            onChanged: (value) => setState(() {
+                              _vercelProject = value;
+                              _createVercelProject = value == null;
+                              if (value != null) {
+                                _name.text = value.name;
+                              }
+                              _result = null;
+                            }),
+                          ),
+                        TextButton.icon(
+                          onPressed: _loadingVercel
+                              ? null
+                              : () => setState(() {
+                                    _createVercelProject =
+                                        !_createVercelProject;
+                                    _result = null;
+                                  }),
+                          icon: Icon(
+                            _createVercelProject
+                                ? Icons.list_alt_rounded
+                                : Icons.add_rounded,
+                            size: 16,
+                          ),
+                          label: Text(
+                            _createVercelProject
+                                ? 'Select an existing project'
+                                : 'Create a new project instead',
+                          ),
+                        ),
+                      ],
+                      if (_createVercelProject)
+                        _Field(
+                          controller: _name,
+                          label: 'New project name',
+                          hint: 'my-project',
+                        ),
                     ],
                     const SizedBox(height: Sp.x3),
                     const _Label('ENVIRONMENT'),
@@ -667,7 +806,10 @@ class _DeploySheetState extends State<_DeploySheet> {
                                 ? 'Production'
                                 : 'Preview',
                             active: _environment == value,
-                            onTap: () => setState(() => _environment = value),
+                            onTap: () => setState(() {
+                              _environment = value;
+                              _result = null;
+                            }),
                           ),
                       ],
                     ),
@@ -677,24 +819,127 @@ class _DeploySheetState extends State<_DeploySheet> {
                     ],
                     if (_result != null) ...[
                       const SizedBox(height: 12),
-                      _SuccessNote(
-                        text: _result!.url == null
-                            ? _result!.message
-                            : '${_result!.message}\n${_result!.url}',
-                      ),
+                      _DeploymentSuccess(result: _result!),
                     ],
                     const SizedBox(height: Sp.x4),
                     EmberButton(
-                      label: _result == null ? 'Deploy' : 'Deploy again',
+                      label: _result == null ? 'Deploy' : 'Deployed',
                       icon: Icons.rocket_launch_outlined,
                       loading: _busy,
-                      onTap: _busy ? null : _deploy,
+                      onTap: _busy || _result != null ? null : _deploy,
                     ),
                   ],
                 ],
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DeploymentSuccess extends StatelessWidget {
+  const _DeploymentSuccess({required this.result});
+
+  final IntegrationResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = result.url;
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: Pal.mint.withOpacity(0.08),
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.mint.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.check_circle_outline_rounded,
+                  size: 16, color: Pal.mint),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(result.message,
+                    style: Txt.meta.copyWith(color: Pal.mint, height: 1.4)),
+              ),
+            ],
+          ),
+          if (url != null && url.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            SelectableText(
+              url,
+              style: Txt.code.copyWith(fontSize: 10.5, color: Pal.text),
+            ),
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: url));
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Deployment URL copied')),
+                    );
+                  },
+                  icon: const Icon(Icons.copy_rounded, size: 15),
+                  label: const Text('Copy'),
+                ),
+                TextButton.icon(
+                  onPressed: () => launchUrl(
+                    Uri.parse(url),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                  icon: const Icon(Icons.open_in_new_rounded, size: 15),
+                  label: const Text('Open'),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _VercelProjectDropdown extends StatelessWidget {
+  const _VercelProjectDropdown({
+    required this.projects,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final List<VercelProject> projects;
+  final VercelProject? value;
+  final ValueChanged<VercelProject?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.line),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<VercelProject>(
+          value: value,
+          isExpanded: true,
+          dropdownColor: Pal.raised,
+          icon: Icon(Icons.unfold_more_rounded, size: 17, color: Pal.textDim),
+          style: Txt.body.copyWith(fontSize: 13),
+          items: [
+            for (final project in projects)
+              DropdownMenuItem(
+                value: project,
+                child: Text(project.name, overflow: TextOverflow.ellipsis),
+              ),
+          ],
+          onChanged: onChanged,
         ),
       ),
     );
@@ -974,26 +1219,6 @@ class _ErrorNote extends StatelessWidget {
         child: Text(
           text,
           style: Txt.bodySoft.copyWith(fontSize: 11, color: Pal.rose),
-        ),
-      );
-}
-
-class _SuccessNote extends StatelessWidget {
-  const _SuccessNote({required this.text});
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: Pal.mint.withOpacity(0.07),
-          borderRadius: Rd.sm,
-          border: Border.all(color: Pal.mint.withOpacity(0.3)),
-        ),
-        child: Text(
-          text,
-          style: Txt.bodySoft.copyWith(fontSize: 11, color: Pal.mint),
         ),
       );
 }

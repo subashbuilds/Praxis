@@ -172,7 +172,8 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
         _models
           ..clear()
           ..addAll(models);
-        _selected.removeWhere((model) => !models.contains(model));
+        // Keep older selections even when the provider no longer lists them;
+        // the removable chip above is the only way a model leaves this list.
         _status =
             '${models.length} models fetched. Tick the ones you want to keep.';
         _statusError = false;
@@ -439,11 +440,55 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
                   for (final model in (_selected.toList()..sort()))
                     GestureDetector(
                       onTap: () => _useModel(model),
-                      child: StatusPill(
-                        model,
-                        color: _model.text.trim() == model
-                            ? Pal.ember
-                            : Pal.textDim,
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(9, 5, 5, 5),
+                        decoration: BoxDecoration(
+                          color: (_model.text.trim() == model
+                                  ? Pal.ember
+                                  : Pal.textDim)
+                              .withOpacity(0.1),
+                          borderRadius: Rd.pill,
+                          border: Border.all(
+                            color: (_model.text.trim() == model
+                                    ? Pal.ember
+                                    : Pal.textDim)
+                                .withOpacity(0.35),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              model,
+                              style: Txt.meta.copyWith(
+                                fontSize: 10.5,
+                                color: _model.text.trim() == model
+                                    ? Pal.ember
+                                    : Pal.textMuted,
+                              ),
+                            ),
+                            const SizedBox(width: 3),
+                            GestureDetector(
+                              onTap: () => setState(() {
+                                _selected.remove(model);
+                                if (_model.text.trim() == model) {
+                                  _model.text = _selected.isEmpty
+                                      ? ''
+                                      : (_selected.toList()..sort()).first;
+                                }
+                              }),
+                              behavior: HitTestBehavior.opaque,
+                              child: Padding(
+                                padding: const EdgeInsets.all(2),
+                                child: Icon(
+                                  Icons.close_rounded,
+                                  size: 13,
+                                  color: Pal.textDim,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                 ],

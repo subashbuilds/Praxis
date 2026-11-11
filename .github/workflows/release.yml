@@ -4,14 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (for example v2.2.0)"
+        description: "Release tag — leave empty to use v(version)"
         required: false
-        default: "v2.2.0"
+        default: ""
       prerelease:
         description: "Mark this release as a pre-release"
         required: false
         type: boolean
         default: false
+      changelog:
+        description: "Release notes in Markdown — leave empty for the default release note"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -30,7 +35,7 @@ jobs:
   release:
     name: Build, sign and publish
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,7 +70,6 @@ jobs:
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
-          echo "Signing secrets are present."
 
       - name: Decode release keystore
         env:
@@ -88,43 +92,104 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Read version
+      - name: Read version and compute versionCode
         id: version
         run: |
           set -euo pipefail
-          VERSION="$(awk '/^version:/{print $2}' pubspec.yaml | cut -d+ -f1)"
+          RAW="$(awk '/^version:/{print $2}' pubspec.yaml)"
+          VERSION="${RAW%%+*}"
+          BASE_CODE=0
+          if [[ "$RAW" == *"+"* ]]; then
+            BASE_CODE="${RAW##*+}"
+          fi
           if [ -z "$VERSION" ]; then
             echo "::error::Could not read version from pubspec.yaml"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building Praxis $VERSION"
+          if ! [[ "$BASE_CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::The build number in pubspec.yaml must be an integer."
+            exit 1
+          fi
+          # Every release run gets a higher versionCode than the pubspec base,
+          # so Android can update an installed Praxis build in place.
+          VERSION_CODE=$((BASE_CODE + GITHUB_RUN_NUMBER))
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v$VERSION"
+          elif [[ "$TAG" != v* ]]; then
+            TAG="v$TAG"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "version_code=$VERSION_CODE"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Praxis $VERSION · versionCode $VERSION_CODE · tag $TAG" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build signed release APK
+      - name: Build split APKs
         env:
+          VERSION: ${{ steps.version.outputs.version }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
           KEYSTORE_PATH: ${{ runner.temp }}/praxis-release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release --split-per-abi \
+            --build-name "$VERSION" --build-number "$VERSION_CODE" \
+            --dart-define=APP_VERSION="$VERSION" \
+            --dart-define=APP_BUILD="$VERSION_CODE"
 
-      - name: Verify signature and package APK
+      - name: Build universal APK
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          KEYSTORE_PATH: ${{ runner.temp }}/praxis-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          flutter build apk --release \
+            --build-name "$VERSION" --build-number "$VERSION_CODE" \
+            --dart-define=APP_VERSION="$VERSION" \
+            --dart-define=APP_BUILD="$VERSION_CODE"
+
+      - name: Verify and package APKs
+        id: package
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-          test -f "$APK"
+          OUT=build/app/outputs/flutter-apk
           APKSIGNER="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner -type f | sort -V | tail -1)"
-          "$APKSIGNER" verify --print-certs "$APK"
-          cp "$APK" "praxis-${VERSION}.apk"
-          ls -lh "praxis-${VERSION}.apk"
-          sha256sum "praxis-${VERSION}.apk"
+          declare -A SOURCES=(
+            ["arm64-v8a"]="$OUT/app-arm64-v8a-release.apk"
+            ["armeabi-v7a"]="$OUT/app-armeabi-v7a-release.apk"
+            ["universal"]="$OUT/app-release.apk"
+          )
+          {
+            echo "### Praxis $VERSION"
+            echo ""
+            echo "| APK | Size | SHA-256 |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for arch in arm64-v8a armeabi-v7a universal; do
+            SRC="${SOURCES[$arch]}"
+            NAME="Praxis-${VERSION}-${arch}.apk"
+            test -f "$SRC"
+            cp "$SRC" "$NAME"
+            "$APKSIGNER" verify --print-certs "$NAME" > /dev/null
+            SHA="$(sha256sum "$NAME" | cut -d' ' -f1)"
+            echo "| $NAME | $(du -h "$NAME" | cut -f1) | \`$SHA\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
 
-      - name: Upload signed APK
+      - name: Upload signed APKs
         uses: actions/upload-artifact@v4
         with:
-          name: praxis-${{ steps.version.outputs.version }}-apk
-          path: praxis-${{ steps.version.outputs.version }}.apk
+          name: Praxis-${{ steps.version.outputs.version }}-apks
+          path: |
+            Praxis-${{ steps.version.outputs.version }}-arm64-v8a.apk
+            Praxis-${{ steps.version.outputs.version }}-armeabi-v7a.apk
+            Praxis-${{ steps.version.outputs.version }}-universal.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -132,20 +197,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ steps.version.outputs.tag }}
           PRERELEASE: ${{ inputs.prerelease }}
+          CHANGELOG: ${{ inputs.changelog }}
         run: |
           set -euo pipefail
-          if [ -z "$TAG" ]; then
-            TAG="v$VERSION"
-          fi
-          ASSET="praxis-${VERSION}.apk"
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" "$ASSET" --clobber
+          NAME="Praxis $VERSION"
+          ASSETS=(
+            "Praxis-${VERSION}-arm64-v8a.apk"
+            "Praxis-${VERSION}-armeabi-v7a.apk"
+            "Praxis-${VERSION}-universal.apk"
+          )
+          if [ -n "$CHANGELOG" ]; then
+            printf '%s\n' "$CHANGELOG" > "$RUNNER_TEMP/release-notes.md"
           else
-            ARGS=(--title "Praxis $VERSION" --notes "Signed release APK for Praxis $VERSION. Built from the release workflow on the dispatched commit.")
-            if [ "$PRERELEASE" = "true" ]; then
-              ARGS+=(--prerelease)
-            fi
-            gh release create "$TAG" "$ASSET" "${ARGS[@]}"
+            printf '%s\n' "Signed release builds for Praxis $VERSION. Includes arm64-v8a, armeabi-v7a and a universal APK." > "$RUNNER_TEMP/release-notes.md"
+          fi
+          ARGS=(--title "$NAME" --notes-file "$RUNNER_TEMP/release-notes.md")
+          if [ "$PRERELEASE" = "true" ]; then
+            ARGS+=(--prerelease)
+          fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" "${ARGS[@]}"
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" "${ARGS[@]}"
           fi

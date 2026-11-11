@@ -119,12 +119,28 @@ jobs:
           echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
           echo "APK_SIGNING=release keystore" >> "$GITHUB_ENV"
 
+      - name: Read version
+        id: version
+        run: |
+          set -euo pipefail
+          RAW="$(awk '/^version:/{print $2}' pubspec.yaml)"
+          VERSION="${RAW%%+*}"
+          BASE_CODE=0
+          if [[ "$RAW" == *"+"* ]]; then BASE_CODE="${RAW##*+}"; fi
+          echo "name=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$((BASE_CODE + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+
       - name: Build release APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: flutter build apk --release
+        run: |
+          flutter build apk --release \
+            --build-name "${{ steps.version.outputs.name }}" \
+            --build-number "${{ steps.version.outputs.code }}" \
+            --dart-define=APP_VERSION="${{ steps.version.outputs.name }}" \
+            --dart-define=APP_BUILD="${{ steps.version.outputs.code }}"
 
       - name: Report APK
         run: |

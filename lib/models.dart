@@ -4,6 +4,19 @@ import 'theme/tokens.dart';
 
 enum ProjectKind { web, flutter, python, node, php, go, blank }
 
+enum AgentMode { build, plan }
+
+extension AgentModeX on AgentMode {
+  String get label => this == AgentMode.build ? 'Build' : 'Plan';
+
+  String get blurb => this == AgentMode.build
+      ? 'Read, write and run commands'
+      : 'Read and plan, no file changes';
+
+  IconData get glyph =>
+      this == AgentMode.build ? Icons.bolt_rounded : Icons.route_rounded;
+}
+
 extension ProjectKindX on ProjectKind {
   String get label => switch (this) {
         ProjectKind.web => 'Web',

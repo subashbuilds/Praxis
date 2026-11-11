@@ -28,10 +28,6 @@ class _PreviewTabState extends State<PreviewTab> {
   bool _switching = false;
   String? _error;
 
-  static const _desktopUserAgent =
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
   @override
   void initState() {
     super.initState();
@@ -84,7 +80,6 @@ class _PreviewTabState extends State<PreviewTab> {
       final controller = WebViewController();
       await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
       await controller.setBackgroundColor(Pal.terminal);
-      await controller.setUserAgent(_desktop ? _desktopUserAgent : null);
       await controller.setNavigationDelegate(NavigationDelegate(
         onPageFinished: (_) => _applyDesktopViewport(controller),
       ));
@@ -179,7 +174,8 @@ class _PreviewTabState extends State<PreviewTab> {
   }
 
   Future<void> _applyDesktopViewport(WebViewController controller) async {
-    if (!_desktop) return;
+    if (!mounted) return;
+    final screenWidth = MediaQuery.sizeOf(context).width;
     try {
       await controller.runJavaScript('''
         (() => {
@@ -189,11 +185,21 @@ class _PreviewTabState extends State<PreviewTab> {
             meta.name = 'viewport';
             document.head.appendChild(meta);
           }
-          meta.setAttribute('content', 'width=1280');
+          const desktop = ${_desktop ? 'true' : 'false'};
+          if (desktop) {
+            meta.setAttribute('content', 'width=1280');
+            document.documentElement.style.width = '1280px';
+            document.documentElement.style.zoom = '${(screenWidth / 1280).clamp(0.22, 1.0)}';
+          } else {
+            meta.setAttribute('content', 'width=device-width, initial-scale=1');
+            document.documentElement.style.width = '';
+            document.documentElement.style.zoom = '';
+          }
+          window.dispatchEvent(new Event('resize'));
         })();
       ''');
     } catch (_) {
-      // A page without a writable head still keeps the desktop user agent.
+      // A page without a writable head still renders in the selected width.
     }
   }
 
@@ -207,9 +213,9 @@ class _PreviewTabState extends State<PreviewTab> {
       _error = null;
     });
     try {
-      await controller.setUserAgent(desktop ? _desktopUserAgent : null);
-      if (desktop) await _applyDesktopViewport(controller);
-      await controller.reload();
+      // Change the layout in place. Reloading after a user-agent swap made the
+      // desktop toggle visibly stutter and loaded the page twice.
+      await _applyDesktopViewport(controller);
     } catch (error) {
       if (mounted) {
         setState(() => _error = 'Could not switch preview mode: $error');
@@ -266,7 +272,7 @@ class _PreviewTabState extends State<PreviewTab> {
     return Column(
       children: [
         Container(
-          padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
+          padding: const EdgeInsets.fromLTRB(Sp.x4, 3, Sp.x2, 3),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: Pal.line)),
           ),
@@ -289,13 +295,15 @@ class _PreviewTabState extends State<PreviewTab> {
                     ? Icons.smartphone_rounded
                     : Icons.desktop_mac_rounded,
                 tooltip: _desktop ? 'Mobile preview' : 'Desktop preview',
-                size: 18,
+                size: 17,
+                padding: const EdgeInsets.all(6),
                 onTap: _switching ? null : _togglePreviewMode,
               ),
               IconAction(
                 icon: Icons.refresh_rounded,
                 tooltip: 'Reload preview',
-                size: 18,
+                size: 17,
+                padding: const EdgeInsets.all(6),
                 onTap: _load,
               ),
             ],

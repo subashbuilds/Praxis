@@ -257,7 +257,14 @@ class _TerminalTabState extends State<TerminalTab> {
   }
 
   Future<void> _submit(String raw) async {
-    final command = raw.trim();
+    // Pasted multi-line curl commands contain backslash-newline continuations.
+    // Flattening them before handing the command to sh keeps curl's arguments
+    // on one line and prevents the repeated malformed-URL errors.
+    final command = raw
+        .trim()
+        .replaceAll(RegExp(r'\\\r?\n'), ' ')
+        .replaceAll(RegExp(r'\r?\n'), ' ')
+        .replaceAll(RegExp(r'[ \t]+'), ' ');
     if (command.isEmpty || _running) return;
     _input.clear();
     _focus.requestFocus();
@@ -466,8 +473,7 @@ class _TerminalTabState extends State<TerminalTab> {
       child: Column(
         children: [
           Container(
-            padding:
-                const EdgeInsets.fromLTRB(Sp.x4, Sp.x2 + 2, Sp.x2, Sp.x2 + 2),
+            padding: const EdgeInsets.fromLTRB(Sp.x4, 3, Sp.x2, 3),
             decoration: BoxDecoration(
               border: Border(bottom: BorderSide(color: Pal.line)),
             ),
@@ -539,14 +545,16 @@ class _TerminalTabState extends State<TerminalTab> {
                 IconAction(
                   icon: Icons.copy_all_rounded,
                   tooltip: 'Copy terminal',
-                  size: 17,
+                  size: 16,
+                  padding: const EdgeInsets.all(6),
                   onTap: () => unawaited(_copyTranscript()),
                 ),
                 if (_running)
                   IconAction(
                     icon: Icons.stop_circle_outlined,
                     tooltip: 'Stop command',
-                    size: 18,
+                    size: 17,
+                    padding: const EdgeInsets.all(6),
                     color: Pal.rose,
                     onTap: shell.cancel,
                   )
@@ -554,7 +562,8 @@ class _TerminalTabState extends State<TerminalTab> {
                   IconAction(
                     icon: Icons.delete_outline_rounded,
                     tooltip: 'Clear shell',
-                    size: 17,
+                    size: 16,
+                    padding: const EdgeInsets.all(6),
                     onTap: () => setState(() {
                       _lines
                         ..clear()

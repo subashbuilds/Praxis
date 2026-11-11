@@ -29,6 +29,23 @@ class FileEntry {
   final int size;
 }
 
+/// A deployable file with its raw bytes. Static hosts need both text and
+/// binary assets, so deployments must never be built from text alone.
+class DeploymentFile {
+  const DeploymentFile({
+    required this.path,
+    required this.bytes,
+    required this.mime,
+  });
+
+  final String path;
+  final Uint8List bytes;
+  final String mime;
+
+  bool get isText => classifyFile(path, bytes: bytes).kind == FileKind.text;
+  String get text => utf8.decode(bytes, allowMalformed: true);
+}
+
 /// Text content plus a Git object id for every file. Built in one pass so
 /// cloning and pulling never decode binary files as UTF-8.
 class LocalSnapshot {
@@ -285,6 +302,29 @@ class ProjectFs {
         result[entry.path] = await read(entry.path);
       } on FsError {
         // A malformed text file is not a reason to fail a deploy or baseline.
+      }
+    }
+    return result;
+  }
+
+  /// Every project file as raw bytes, including images and other binaries.
+  /// Text files beyond the editor's inline limit are included as bytes too so
+  /// a static deployment matches the folder the user sees.
+  Future<List<DeploymentFile>> deploymentFiles() async {
+    final entries = await list(includeHidden: true);
+    final result = <DeploymentFile>[];
+    for (final entry in entries) {
+      if (entry.isDir) continue;
+      try {
+        final bytes = await readBytes(entry.path);
+        result.add(DeploymentFile(
+          path: entry.path,
+          bytes: bytes,
+          mime: classifyFile(entry.path, bytes: bytes).mime ??
+              'application/octet-stream',
+        ));
+      } on FsError {
+        // A file removed while the tree was being walked is not fatal.
       }
     }
     return result;

@@ -77,7 +77,7 @@ class FileGlyph extends StatelessWidget {
 
   Color get _folderColor {
     if (_lower == '.github') return Pal.text;
-    if (_lower == '.polydev' || _lower == '.praxis') return Pal.ember;
+    if (_lower == '.praxis') return Pal.ember;
     if (_lower == 'test' ||
         _lower == 'tests' ||
         _lower == 'spec' ||
@@ -193,7 +193,14 @@ class FileGlyph extends StatelessWidget {
     }
 
     final asset = _asset;
-    if (asset != null) return _assetTile(asset, _assetColor, size);
+    if (asset != null) {
+      return _assetTile(
+        asset,
+        _assetColor,
+        size,
+        tint: !asset.endsWith('python.svg'),
+      );
+    }
     final icon = _fallbackIcon;
     if (icon != null) {
       return Icon(icon, size: size, color: _fallbackColor);
@@ -208,19 +215,20 @@ class FileGlyph extends StatelessWidget {
         size: size, color: Pal.textDim);
   }
 
-  Widget _assetTile(String asset, Color color, double size) {
+  Widget _assetTile(String asset, Color color, double size,
+      {bool tint = true}) {
     return Container(
       width: size + 2,
       height: size + 2,
       padding: EdgeInsets.all(size * 0.10),
       decoration: BoxDecoration(
-        color: Pal.raised,
+        color: tint ? Pal.raised : Colors.transparent,
         borderRadius: BorderRadius.circular(4),
       ),
       child: SvgPicture.asset(
         asset,
         fit: BoxFit.contain,
-        colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+        colorFilter: tint ? ColorFilter.mode(color, BlendMode.srcIn) : null,
       ),
     );
   }

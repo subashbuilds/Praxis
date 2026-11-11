@@ -28,8 +28,10 @@ android {
         applicationId = "com.subash.praxis"
         minSdk = 24
         targetSdk = 36
-        versionCode = 5
-        versionName = "2.2.0"
+        // pubspec.yaml is the source of truth. Flutter passes both values to
+        // Gradle, and CI can override the build number without editing code.
+        versionCode = flutterVersionCode.toInteger()
+        versionName = flutterVersionName
     }
 
     signingConfigs {

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../core/app_version.dart';
 import '../theme/tokens.dart';
 import '../widgets/ui.dart';
 
@@ -103,7 +105,8 @@ class AboutScreen extends StatelessWidget {
                         children: [
                           Text('Praxis', style: Txt.headline),
                           const SizedBox(height: 2),
-                          Text('Version 2.2.0', style: Txt.meta),
+                          Text('Version $kAppVersion ($kAppBuild)',
+                              style: Txt.meta),
                         ],
                       ),
                     ],
@@ -112,7 +115,8 @@ class AboutScreen extends StatelessWidget {
                   Text(
                     'A local-first coding workbench for Android. Real files, a '
                     'real shell, a live preview, and an agent that edits the '
-                    'project with your own model key.',
+                    'project with your own model key. Praxis is open source and '
+                    'lives on GitHub.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x4),
@@ -120,6 +124,43 @@ class AboutScreen extends StatelessWidget {
                     'No account. No telemetry. Your projects live in the app’s '
                     'documents directory and belong to you.',
                     style: Txt.meta.copyWith(height: 1.55),
+                  ),
+                  const SectionLabel('OPEN SOURCE'),
+                  _AboutLink(
+                    icon: Icons.fork_right_rounded,
+                    title: 'Praxis on GitHub',
+                    body:
+                        '$kGitHubRepositoryLabel · source, issues and releases',
+                    onTap: () async {
+                      await Clipboard.setData(
+                        const ClipboardData(text: kGitHubRepository),
+                      );
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('GitHub repository copied'),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  _AboutLink(
+                    icon: Icons.volunteer_activism_outlined,
+                    title: 'Open-source project',
+                    body:
+                        'Praxis is developed in public. Contributions and bug '
+                        'reports are welcome.',
+                    onTap: () async {
+                      await Clipboard.setData(
+                        const ClipboardData(text: kGitHubRepository),
+                      );
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('GitHub repository copied'),
+                        ),
+                      );
+                    },
                   ),
                   const SectionLabel('LEGAL'),
                   _AboutLink(
@@ -152,7 +193,7 @@ class AboutScreen extends StatelessWidget {
                     onTap: () => showLicensePage(
                       context: context,
                       applicationName: 'Praxis',
-                      applicationVersion: '2.2.0',
+                      applicationVersion: kAppVersion,
                       applicationLegalese:
                           'Praxis is an independent local-first app. '
                           'Third-party packages retain their own licences.',
@@ -271,7 +312,7 @@ class LegalScreen extends StatelessWidget {
                     const EdgeInsets.fromLTRB(Sp.page, Sp.x4, Sp.page, Sp.x8),
                 children: [
                   Text(
-                    'Praxis 2.2.0',
+                    'Praxis $kAppVersion',
                     style: Txt.meta,
                   ),
                   const SizedBox(height: Sp.x3),

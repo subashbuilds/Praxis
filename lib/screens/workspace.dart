@@ -6,6 +6,7 @@ import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/model_sheet.dart';
+import '../widgets/project_kind_mark.dart';
 import '../widgets/ui.dart';
 import '../workspace/agent_tab.dart';
 import '../workspace/files_tab.dart';
@@ -66,6 +67,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                       onTap: _back,
                     ),
                     const SizedBox(width: 2),
+                    ProjectKindBadge(
+                        kind: project.kind, size: 32, iconSize: 18),
+                    const SizedBox(width: 9),
                     Expanded(
                       child: GestureDetector(
                         onTap: () => setState(() => _tab = 0),
@@ -186,6 +190,72 @@ class _TabIcon extends StatelessWidget {
   }
 }
 
+class _ModeSwitch extends StatelessWidget {
+  const _ModeSwitch({required this.mode, required this.onChanged});
+
+  final AgentMode mode;
+  final ValueChanged<AgentMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 24,
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.pill,
+        border: Border.all(color: Pal.line),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final value in AgentMode.values)
+            Tooltip(
+              message: value.blurb,
+              child: GestureDetector(
+                onTap: () => onChanged(value),
+                behavior: HitTestBehavior.opaque,
+                child: AnimatedContainer(
+                  duration: Motion.fast,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: mode == value
+                        ? (value == AgentMode.plan
+                            ? Pal.amber.withOpacity(0.18)
+                            : Pal.ember.withOpacity(0.16))
+                        : Colors.transparent,
+                    borderRadius: Rd.pill,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        value.glyph,
+                        size: 11,
+                        color: mode == value
+                            ? (value == AgentMode.plan ? Pal.amber : Pal.ember)
+                            : Pal.textDim,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        value.label,
+                        style: Txt.meta.copyWith(
+                          fontSize: 8.5,
+                          color: mode == value ? Pal.text : Pal.textDim,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _AgentStatusBar extends StatelessWidget {
   const _AgentStatusBar({
     required this.state,
@@ -288,7 +358,12 @@ class _AgentStatusBar extends StatelessWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 7),
+                  _ModeSwitch(
+                    mode: state.agentMode,
+                    onChanged: state.setAgentMode,
+                  ),
+                  const SizedBox(width: 7),
                   Text(
                     context,
                     style: Txt.meta.copyWith(

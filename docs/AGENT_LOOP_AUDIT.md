@@ -142,7 +142,7 @@ No prompt or file content is displayed or persisted by this view.
 
 ## 9. Tests and baseline
 
-Run from `polydev`:
+Run from the repository root:
 
 ```bash
 export PATH=/tmp/flutter/bin:$PATH

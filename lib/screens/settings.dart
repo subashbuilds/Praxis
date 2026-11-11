@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../core/app_version.dart';
 import '../core/usage.dart';
 import '../models.dart';
 import '../state/app_state.dart';
@@ -411,7 +412,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               const SizedBox(width: 9),
                               Text('Praxis', style: Txt.title),
                               const Spacer(),
-                              Text('2.2.0', style: Txt.meta),
+                              Text('$kAppVersion ($kAppBuild)',
+                                  style: Txt.meta),
                             ],
                           ),
                           const SizedBox(height: 10),

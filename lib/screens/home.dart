@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
+import '../core/project_templates.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/confirm_dialog.dart';
+import '../widgets/project_kind_mark.dart';
 import '../widgets/ui.dart';
 import 'settings.dart';
 import 'workspace.dart';
@@ -223,7 +225,7 @@ class _ProjectCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            GlyphBadge(icon: kind.glyph, color: kind.tint),
+            ProjectKindBadge(kind: kind),
             const SizedBox(width: Sp.x3),
             Expanded(
               child: Column(
@@ -274,6 +276,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   final _branch = TextEditingController(text: 'main');
   late bool _clone;
   ProjectKind _kind = ProjectKind.web;
+  ProjectTemplate? _template;
+  TemplateRuntime? _expandedRuntime;
   bool _creating = false;
   bool _loadingBranches = false;
   bool _loadingRepos = false;
@@ -395,6 +399,12 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     if (chosen != null && mounted) setState(() => _branch.text = chosen);
   }
 
+  TemplateRuntime? _templateRuntime(LinuxRuntime runtime) => switch (runtime) {
+        LinuxRuntime.node => TemplateRuntime.node,
+        LinuxRuntime.python => TemplateRuntime.python,
+        _ => null,
+      };
+
   Future<void> _create() async {
     if (_creating) return;
     if (_clone && _branches.isEmpty) {
@@ -417,7 +427,11 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                   _branch.text.trim().isEmpty ? 'main' : _branch.text.trim(),
               token: cloneAccount?.token ?? '',
             )
-          : await state.createProject(_name.text, _kind);
+          : await state.createProject(
+              _name.text,
+              _template?.kind ?? _kind,
+              template: _template,
+            );
       if (!mounted) return;
       navigator.pop(project);
     } catch (error) {
@@ -604,8 +618,12 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                   ])
                     _KindChip(
                       kind: kind,
-                      selected: kind == _kind,
-                      onTap: () => setState(() => _kind = kind),
+                      selected: _template == null && kind == _kind,
+                      onTap: () => setState(() {
+                        _kind = kind;
+                        _template = null;
+                        _expandedRuntime = null;
+                      }),
                     ),
                 ],
               ),
@@ -614,28 +632,27 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                 Text('INSTALLED RUNTIME TEMPLATES',
                     style: Txt.overline.copyWith(fontSize: 8.5)),
                 const SizedBox(height: 7),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final kind in runtimeKinds)
-                      _KindChip(
-                        kind: kind,
-                        selected: kind == _kind,
-                        onTap: () => setState(() => _kind = kind),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 7),
                 for (final runtime in installedRuntimes)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: Text(
-                      '${runtime.label} templates: '
-                      '${runtime.templates.join(' · ')}',
-                      style: Txt.meta.copyWith(fontSize: 8.5, height: 1.5),
+                  if (_templateRuntime(runtime) != null)
+                    _RuntimeTemplateGroup(
+                      runtime: _templateRuntime(runtime)!.label,
+                      icon: runtime == LinuxRuntime.python
+                          ? Icons.code_rounded
+                          : Icons.hexagon_outlined,
+                      templates: templatesFor(_templateRuntime(runtime)!),
+                      expanded: _expandedRuntime == _templateRuntime(runtime),
+                      selectedId: _template?.id,
+                      onToggle: () => setState(() {
+                        _expandedRuntime =
+                            _expandedRuntime == _templateRuntime(runtime)
+                                ? null
+                                : _templateRuntime(runtime);
+                      }),
+                      onSelect: (template) => setState(() {
+                        _template = template;
+                        _kind = template.kind;
+                      }),
                     ),
-                  ),
               ] else ...[
                 const SizedBox(height: 8),
                 Text(
@@ -645,7 +662,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                 ),
               ],
               const SizedBox(height: 10),
-              Text(_kind.blurb, style: Txt.meta),
+              Text(_template?.description ?? _kind.blurb, style: Txt.meta),
             ],
             if (_error != null) ...[
               const SizedBox(height: 12),
@@ -661,6 +678,110 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RuntimeTemplateGroup extends StatelessWidget {
+  const _RuntimeTemplateGroup({
+    required this.runtime,
+    required this.icon,
+    required this.templates,
+    required this.expanded,
+    required this.selectedId,
+    required this.onToggle,
+    required this.onSelect,
+  });
+
+  final String runtime;
+  final IconData icon;
+  final List<ProjectTemplate> templates;
+  final bool expanded;
+  final String? selectedId;
+  final VoidCallback onToggle;
+  final ValueChanged<ProjectTemplate> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = templates.where((template) => template.id == selectedId);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 7),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(
+          color: selected.isNotEmpty ? Pal.mint.withOpacity(0.45) : Pal.line,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            borderRadius: Rd.sm,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+              child: Row(
+                children: [
+                  Icon(icon, size: 15, color: Pal.mint),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      selected.isEmpty ? runtime : selected.first.name,
+                      style: Txt.label.copyWith(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Text('${templates.length}',
+                      style: Txt.meta.copyWith(fontSize: 9)),
+                  const SizedBox(width: 4),
+                  Icon(
+                    expanded
+                        ? Icons.keyboard_arrow_up_rounded
+                        : Icons.keyboard_arrow_down_rounded,
+                    size: 17,
+                    color: Pal.textDim,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expanded)
+            for (final template in templates)
+              InkWell(
+                onTap: () => onSelect(template),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(26, 7, 10, 7),
+                  child: Row(
+                    children: [
+                      Icon(
+                        template.id == selectedId
+                            ? Icons.radio_button_checked_rounded
+                            : Icons.radio_button_unchecked_rounded,
+                        size: 14,
+                        color:
+                            template.id == selectedId ? Pal.mint : Pal.textDim,
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          template.name,
+                          style: Txt.meta.copyWith(
+                            fontSize: 10.5,
+                            color: template.id == selectedId
+                                ? Pal.text
+                                : Pal.textMuted,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+        ],
       ),
     );
   }
@@ -906,8 +1027,10 @@ class _KindChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(kind.glyph,
-                size: 15, color: selected ? kind.tint : Pal.textDim),
+            ProjectKindMark(
+              kind: kind,
+              size: 15,
+            ),
             const SizedBox(width: 7),
             Text(
               kind.label,

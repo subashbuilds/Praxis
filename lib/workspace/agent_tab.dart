@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -268,6 +269,7 @@ class _AgentTabState extends State<AgentTab> {
             onDismiss: () => state.dismissCheckpoint(widget.project.id),
           ),
         _Composer(
+          project: widget.project,
           controller: _composer,
           busy: state.busy,
           attachments: _attachments,
@@ -1215,8 +1217,308 @@ class _NumberedText extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   const _Composer({
+    required this.project,
+    required this.controller,
+    required this.busy,
+    required this.attachments,
+    required this.onAttach,
+    required this.onRemove,
+    required this.onSend,
+    required this.onStop,
+  });
+
+  final Project project;
+  final TextEditingController controller;
+  final bool busy;
+  final List<String> attachments;
+  final VoidCallback onAttach;
+  final ValueChanged<String> onRemove;
+  final VoidCallback onSend;
+  final VoidCallback onStop;
+
+  @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  final List<_ComposerSuggestion> _suggestions = [];
+  final List<_ComposerSuggestion> _skills = [];
+  List<String>? _files;
+  Timer? _debounce;
+  String? _trigger;
+  int _tokenStart = 0;
+  bool _loadedContext = false;
+  bool _loadingFiles = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onTextChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_loadedContext) {
+      _loadedContext = true;
+      _loadSkills();
+    }
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    widget.controller.removeListener(_onTextChanged);
+    super.dispose();
+  }
+
+  Future<void> _loadSkills() async {
+    final state = AppScope.of(context);
+    final projectSkills = await state.installedSkillsFor(widget.project);
+    if (!mounted) return;
+    final seen = <String>{};
+    void add(String label, String command, String detail) {
+      if (!seen.add(command)) return;
+      _skills.add(_ComposerSuggestion(
+        label: label,
+        insert: '/$command ',
+        detail: detail,
+        icon: Icons.extension_outlined,
+      ));
+    }
+
+    for (final skill in state.skills.where((skill) => skill.enabled)) {
+      final command =
+          skill.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-');
+      if (command.isNotEmpty) add(skill.name, command, 'Enabled skill');
+    }
+    for (final skill in projectSkills) {
+      add(skill.name, skill.slug, 'Project skill');
+    }
+    _skills.sort((a, b) => a.label.compareTo(b.label));
+    if (mounted) _refreshSuggestions();
+  }
+
+  Future<void> _loadFiles() async {
+    if (_loadingFiles || _files != null) return;
+    _loadingFiles = true;
+    final state = AppScope.of(context);
+    try {
+      final entries =
+          await state.fsFor(widget.project).list(includeHidden: true);
+      if (!mounted) return;
+      _files = [
+        for (final entry in entries)
+          if (!entry.isDir && !entry.path.startsWith('.praxis/')) entry.path,
+      ]..sort();
+      _refreshSuggestions();
+    } catch (_) {
+      _files = const [];
+    } finally {
+      _loadingFiles = false;
+    }
+  }
+
+  void _onTextChanged() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 90), _refreshSuggestions);
+  }
+
+  void _hideSuggestions() {
+    if (_suggestions.isEmpty) return;
+    setState(() {
+      _suggestions.clear();
+      _trigger = null;
+    });
+  }
+
+  void _refreshSuggestions() {
+    if (!mounted) return;
+    final selection = widget.controller.selection;
+    if (!selection.isValid || !selection.isCollapsed) {
+      _hideSuggestions();
+      return;
+    }
+    final before = widget.controller.text.substring(0, selection.baseOffset);
+    final match =
+        RegExp(r'(?:^|\s)([/@])([A-Za-z0-9._/-]*)$').firstMatch(before);
+    if (match == null) {
+      _hideSuggestions();
+      return;
+    }
+    final trigger = match.group(1)!;
+    final query = match.group(2)!.toLowerCase();
+    if (trigger == '/' && query.isEmpty) {
+      _hideSuggestions();
+      return;
+    }
+    if (trigger == '@' && _files == null) {
+      _loadFiles();
+    }
+    final tokenStart = selection.baseOffset - query.length - 1;
+    final pool = trigger == '/'
+        ? _skills
+        : [
+            for (final path in _files ?? const <String>[])
+              _ComposerSuggestion(
+                label: path.split('/').last,
+                insert: '@$path ',
+                detail: path,
+                icon: Icons.description_outlined,
+              ),
+          ];
+    final filtered = pool
+        .where((item) =>
+            query.isEmpty ||
+            item.label.toLowerCase().contains(query) ||
+            item.detail.toLowerCase().contains(query))
+        .take(7)
+        .toList();
+    setState(() {
+      _trigger = trigger;
+      _tokenStart = tokenStart < 0 ? 0 : tokenStart;
+      _suggestions
+        ..clear()
+        ..addAll(filtered);
+    });
+  }
+
+  void _choose(_ComposerSuggestion suggestion) {
+    final selection = widget.controller.selection;
+    if (!selection.isValid) return;
+    final text = widget.controller.text;
+    final end = selection.baseOffset.clamp(_tokenStart, text.length);
+    final updated = text.replaceRange(_tokenStart, end, suggestion.insert);
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection(
+        baseOffset: _tokenStart,
+        extentOffset: _tokenStart + suggestion.insert.trimRight().length,
+      ),
+    );
+    setState(() {
+      _suggestions.clear();
+      _trigger = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_suggestions.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.fromLTRB(Sp.x3, 0, Sp.x3, 4),
+            decoration: BoxDecoration(
+              color: Pal.surface,
+              borderRadius: Rd.md,
+              border: Border.all(color: Pal.lineStrong),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(Pal.isDark ? 0.28 : 0.08),
+                  offset: const Offset(0, 4),
+                  blurRadius: 16,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 7, 10, 3),
+                  child: Row(
+                    children: [
+                      Icon(
+                        _trigger == '/'
+                            ? Icons.bolt_rounded
+                            : Icons.tag_rounded,
+                        size: 13,
+                        color: Pal.ember,
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _trigger == '/'
+                            ? 'Skills · click to complete'
+                            : 'Project files · click to tag',
+                        style: Txt.meta.copyWith(fontSize: 8.5),
+                      ),
+                    ],
+                  ),
+                ),
+                for (final suggestion in _suggestions)
+                  InkWell(
+                    onTap: () => _choose(suggestion),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+                      child: Row(
+                        children: [
+                          Icon(suggestion.icon, size: 14, color: Pal.mint),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(suggestion.label,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Txt.code.copyWith(fontSize: 11)),
+                                if (suggestion.detail.isNotEmpty)
+                                  Text(
+                                    suggestion.detail,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Txt.meta.copyWith(fontSize: 8.5),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          Text(
+                            _trigger == '/' ? suggestion.insert.trim() : '@',
+                            style: Txt.meta.copyWith(
+                              fontSize: 8.5,
+                              color: Pal.textDim,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        _ComposerBody(
+          controller: widget.controller,
+          busy: widget.busy,
+          attachments: widget.attachments,
+          onAttach: widget.onAttach,
+          onRemove: widget.onRemove,
+          onSend: widget.onSend,
+          onStop: widget.onStop,
+        ),
+      ],
+    );
+  }
+}
+
+class _ComposerSuggestion {
+  const _ComposerSuggestion({
+    required this.label,
+    required this.insert,
+    required this.detail,
+    required this.icon,
+  });
+
+  final String label;
+  final String insert;
+  final String detail;
+  final IconData icon;
+}
+
+class _ComposerBody extends StatelessWidget {
+  const _ComposerBody({
     required this.controller,
     required this.busy,
     required this.attachments,
@@ -1526,12 +1828,16 @@ class _ResumeCard extends StatelessWidget {
           const SizedBox(height: 4),
           Row(
             children: [
-              Text(
-                '${checkpoint.changedFiles.length} changed files · '
-                '${checkpoint.providerName} ${checkpoint.model}',
-                style: Txt.meta.copyWith(fontSize: 8.5),
+              Expanded(
+                child: Text(
+                  '${checkpoint.changedFiles.length} changed files · '
+                  '${checkpoint.providerName} ${checkpoint.model}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Txt.meta.copyWith(fontSize: 8.5),
+                ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               GestureDetector(
                 onTap: onResume,
                 behavior: HitTestBehavior.opaque,

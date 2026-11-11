@@ -58,6 +58,22 @@ class SystemShell {
     if (command.isEmpty) {
       return SystemShellResult(output: '', exitCode: 0, cwd: cwdDisplay);
     }
+    // A line-based terminal cannot keep a REPL's stdin open. Running bare
+    // `python` or `node` waited forever for input; run a short probe instead
+    // and tell the user how to execute a script.
+    final interactive = RegExp(r'^(python|python3|node|php|sh|bash|ash)$')
+        .firstMatch(command.toLowerCase());
+    if (interactive != null) {
+      final name = interactive.group(1)!;
+      final probe = name.startsWith('python')
+          ? 'python3 --version 2>&1; echo "Interactive Python is not available in this line-based terminal. Run: python3 path/to/file.py"'
+          : name == 'node'
+              ? 'node --version 2>&1; echo "Interactive Node is not available in this line-based terminal. Run: node path/to/file.js"'
+              : name == 'php'
+                  ? 'php --version 2>&1 | head -n 1; echo "Run: php path/to/file.php"'
+                  : 'echo "Use: $name path/to/script"';
+      return run(probe, timeout: const Duration(seconds: 20));
+    }
     final cd = _asCd(command);
     if (cd != null) return _changeDirectory(cd);
 

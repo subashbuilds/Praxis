@@ -310,6 +310,7 @@ class CodeEditor extends StatefulWidget {
     required this.onChanged,
     this.wrap = false,
     this.fontSize = 12.5,
+    this.undoController,
   });
 
   final CodeController controller;
@@ -317,6 +318,7 @@ class CodeEditor extends StatefulWidget {
   final ValueChanged<String> onChanged;
   final bool wrap;
   final double fontSize;
+  final UndoHistoryController? undoController;
 
   @override
   State<CodeEditor> createState() => _CodeEditorState();
@@ -531,6 +533,7 @@ class _CodeEditorState extends State<CodeEditor> {
 
         final field = TextField(
           controller: widget.controller,
+          undoController: widget.undoController,
           focusNode: _focus,
           maxLines: null,
           minLines: null,

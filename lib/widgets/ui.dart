@@ -62,6 +62,10 @@ class Wordmark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Pal is a global palette. A const widget only rebuilds if it depends on
+    // something that changes, so read the live theme here and let the color
+    // update with the rest of the app instead of on the next launch.
+    final color = Theme.of(context).colorScheme.onSurface;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -76,7 +80,7 @@ class Wordmark extends StatelessWidget {
             fontSize: size * 0.95,
             fontWeight: FontWeight.w500,
             letterSpacing: -0.2,
-            color: Pal.text,
+            color: color,
           ),
         ),
       ],
@@ -270,6 +274,7 @@ class IconAction extends StatelessWidget {
     this.onTap,
     this.color,
     this.size = 20,
+    this.padding = const EdgeInsets.all(9),
   });
 
   final IconData icon;
@@ -277,6 +282,7 @@ class IconAction extends StatelessWidget {
   final VoidCallback? onTap;
   final Color? color;
   final double size;
+  final EdgeInsetsGeometry padding;
 
   @override
   Widget build(BuildContext context) {
@@ -289,7 +295,7 @@ class IconAction extends StatelessWidget {
           onTap: onTap,
           behavior: HitTestBehavior.opaque,
           child: Padding(
-            padding: const EdgeInsets.all(9),
+            padding: padding,
             child: Icon(icon, size: size, color: color ?? Pal.textMuted),
           ),
         ),

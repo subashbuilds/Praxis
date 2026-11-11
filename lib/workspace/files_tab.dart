@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../core/file_import.dart';
 import '../core/file_types.dart';
 import '../core/import_picker.dart';
+import '../core/project_search.dart';
 import '../core/push_state.dart';
 import '../core/vfs.dart';
 import '../models.dart';
@@ -30,9 +32,24 @@ class _FilesTabState extends State<FilesTab> {
   Future<_FilesData>? _future;
   _FilesData? _lastData;
   final Set<String> _expanded = {};
+  final Set<String> _loadedDirs = {};
+  final _searchController = TextEditingController();
+  Timer? _searchDebounce;
+  bool _searchOpen = false;
+  bool _searching = false;
+  String _searchQuery = '';
+  ProjectSearchResult? _searchResult;
+  String? _searchError;
   bool _importing = false;
   bool _refreshing = false;
   int _loadToken = 0;
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
 
   void _refresh() {
     final state = AppScope.of(context);
@@ -42,22 +59,68 @@ class _FilesTabState extends State<FilesTab> {
       _future = future;
       _refreshing = true;
     });
-    future
-        .then<void>((_) {}, onError: (Object _, StackTrace __) {})
-        .whenComplete(() {
-      if (!mounted || token != _loadToken) return;
-      setState(() => _refreshing = false);
-    });
+    future.then<void>(
+      (data) {
+        if (!mounted || token != _loadToken) return;
+        setState(() {
+          _lastData = data;
+          _refreshing = false;
+        });
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!mounted || token != _loadToken) return;
+        setState(() => _refreshing = false);
+      },
+    );
   }
 
   Future<_FilesData> _load(AppState state) async {
-    final files = await state.filesOf(widget.project);
-    final changes = await state.changesFor(widget.project);
-    return _FilesData(
+    // Only the root is read here. Folders are listed when they are opened, so
+    // a portfolio with thousands of files never blocks the first frame.
+    final fs = state.fsFor(widget.project);
+    final files = <FileEntry>[
+      ...await fs.list(recursive: false),
+    ];
+    // A refresh should not collapse folders the user is already inside.
+    _loadedDirs
+      ..clear()
+      ..add('');
+    for (final path in _expanded) {
+      if (path.isEmpty) continue;
+      try {
+        files.addAll(await fs.list(path: path, recursive: false));
+        _loadedDirs.add(path);
+      } catch (_) {
+        // A deleted folder is dropped from the next tree.
+      }
+    }
+    final data = _FilesData(
       files,
-      {for (final change in changes) change.path: change},
+      const {},
       await state.pendingCommitsFor(widget.project),
     );
+    final token = _loadToken;
+    unawaited(Future<void>.delayed(
+      const Duration(milliseconds: 600),
+      () => _loadChanges(state, token),
+    ));
+    return data;
+  }
+
+  Future<void> _loadChanges(AppState state, int token) async {
+    try {
+      final changes = await state.changesFor(widget.project);
+      if (!mounted || token != _loadToken || _lastData == null) return;
+      setState(() {
+        _lastData = _FilesData(
+          _lastData!.files,
+          {for (final change in changes) change.path: change},
+          _lastData!.pending,
+        );
+      });
+    } catch (_) {
+      // Change badges are secondary; the tree remains usable without them.
+    }
   }
 
   Future<void> _newFile() async {
@@ -544,9 +607,34 @@ class _FilesTabState extends State<FilesTab> {
 
   Future<void> _open(FileEntry entry) async {
     if (entry.isDir) {
-      setState(() {
-        if (!_expanded.remove(entry.path)) _expanded.add(entry.path);
-      });
+      if (_expanded.remove(entry.path)) {
+        setState(() {});
+        return;
+      }
+      setState(() => _expanded.add(entry.path));
+      if (_loadedDirs.contains(entry.path)) return;
+      _loadedDirs.add(entry.path);
+      try {
+        final children = await AppScope.of(context).fsFor(widget.project).list(
+              path: entry.path,
+              recursive: false,
+            );
+        if (!mounted || _lastData == null) return;
+        final unique = <String, FileEntry>{
+          for (final item in _lastData!.files) item.path: item,
+          for (final item in children) item.path: item,
+        };
+        setState(() {
+          _lastData = _FilesData(
+            unique.values.toList(),
+            _lastData!.changes,
+            _lastData!.pending,
+          );
+        });
+      } catch (error) {
+        _loadedDirs.remove(entry.path);
+        _showMessage('Could not open ${entry.path}: $error');
+      }
       return;
     }
     await Navigator.of(context).push(
@@ -576,6 +664,54 @@ class _FilesTabState extends State<FilesTab> {
     }
   }
 
+  void _toggleSearch() {
+    setState(() {
+      _searchOpen = !_searchOpen;
+      if (!_searchOpen) {
+        _searchController.clear();
+        _searchDebounce?.cancel();
+        _searchQuery = '';
+        _searchResult = null;
+        _searchError = null;
+        _searching = false;
+      }
+    });
+  }
+
+  void _onSearchChanged(String value) {
+    final query = value.trim();
+    _searchDebounce?.cancel();
+    setState(() {
+      _searchQuery = query;
+      _searchError = null;
+      if (query.length < 4) {
+        _searchResult = null;
+        _searching = false;
+      } else {
+        _searching = true;
+      }
+    });
+    if (query.length < 4) return;
+    _searchDebounce = Timer(const Duration(milliseconds: 280), () async {
+      final token = ++_loadToken;
+      try {
+        final result =
+            await AppScope.of(context).searchProject(widget.project, query);
+        if (!mounted || token != _loadToken || _searchQuery != query) return;
+        setState(() {
+          _searchResult = result;
+          _searching = false;
+        });
+      } catch (error) {
+        if (!mounted || token != _loadToken) return;
+        setState(() {
+          _searching = false;
+          _searchError = '$error';
+        });
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
@@ -589,7 +725,7 @@ class _FilesTabState extends State<FilesTab> {
         if (_importing || _refreshing)
           LinearProgressIndicator(minHeight: 2, color: Pal.mint),
         Container(
-          padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x2, Sp.x2),
+          padding: const EdgeInsets.fromLTRB(Sp.x4, 5, Sp.x2, 5),
           decoration: BoxDecoration(
             border: Border(bottom: BorderSide(color: Pal.line)),
           ),
@@ -618,6 +754,12 @@ class _FilesTabState extends State<FilesTab> {
                 onTap: _newFolder,
               ),
               IconAction(
+                icon: _searchOpen ? Icons.close_rounded : Icons.search_rounded,
+                tooltip: _searchOpen ? 'Close search' : 'Search files',
+                size: 18,
+                onTap: _toggleSearch,
+              ),
+              IconAction(
                 icon: Icons.refresh_rounded,
                 tooltip: 'Refresh',
                 size: 18,
@@ -626,158 +768,342 @@ class _FilesTabState extends State<FilesTab> {
             ],
           ),
         ),
-        Expanded(
-          child: FutureBuilder<_FilesData>(
-            future: _future ??= _load(state),
-            builder: (context, snapshot) {
-              if (snapshot.hasData) _lastData = snapshot.data;
-              final data = snapshot.data ?? _lastData;
-              if (data == null &&
-                  snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(
-                  child: SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                );
-              }
-              if (snapshot.hasError && data == null) {
-                return Padding(
-                  padding: const EdgeInsets.all(Sp.page),
-                  child: Text(
-                    'Could not read the project: ${snapshot.error}',
-                    style: Txt.bodySoft.copyWith(color: Pal.rose),
-                  ),
-                );
-              }
-              final rowsData = data ?? const _FilesData([], {}, 0);
-              if (rowsData.files.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.all(Sp.page),
-                  child: EmptyState(
-                    icon: Icons.folder_off_outlined,
-                    title: 'Empty project',
-                    body:
-                        'Create a file to get started, or ask the agent to write one.',
-                  ),
-                );
-              }
-              final rows = _treeRows(rowsData);
-              return ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: Sp.x2),
-                itemCount: rows.length,
-                itemBuilder: (context, index) {
-                  final row = rows[index];
-                  final entry = row.entry;
-                  final change = rowsData.changes[entry.path];
-                  final folderChanges = entry.isDir
-                      ? rowsData.changes.keys
-                          .where((path) => path.startsWith('${entry.path}/'))
-                          .length
-                      : 0;
-                  return InkWell(
-                    onTap: () => _open(entry),
-                    onLongPress: () => _showActions(entry),
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(
-                        Sp.x3 + (row.depth * 15),
-                        8,
-                        Sp.x3,
-                        8,
-                      ),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 14,
-                            child: entry.isDir
-                                ? Icon(
-                                    _expanded.contains(entry.path)
-                                        ? Icons.keyboard_arrow_down_rounded
-                                        : Icons.keyboard_arrow_right_rounded,
-                                    size: 15,
-                                    color: Pal.textDim,
-                                  )
-                                : null,
-                          ),
-                          FileGlyph(
-                            name: entry.name,
-                            isDir: entry.isDir,
-                            expanded: _expanded.contains(entry.path),
-                            size: 16,
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              entry.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Txt.code.copyWith(
-                                fontSize: 11.5,
-                                color: entry.isDir ? Pal.textMuted : Pal.text,
-                                fontWeight: entry.isDir
-                                    ? FontWeight.w600
-                                    : FontWeight.w400,
-                              ),
-                            ),
-                          ),
-                          if (change != null) ...[
-                            _ChangeBadge(change: change),
-                            const SizedBox(width: 7),
-                          ] else if (folderChanges > 0) ...[
+        if (_searchOpen)
+          Container(
+            padding: const EdgeInsets.fromLTRB(Sp.x3, 6, Sp.x3, 7),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: Pal.line)),
+            ),
+            child: TextField(
+              controller: _searchController,
+              autofocus: true,
+              style: Txt.body.copyWith(fontSize: 12),
+              cursorColor: Pal.ember,
+              onChanged: _onSearchChanged,
+              decoration: appField(
+                'Search filenames and code (min. 4 characters)',
+                suffix: _searching
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 1.5),
+                      )
+                    : Icon(Icons.search_rounded, size: 17, color: Pal.textDim),
+              ),
+            ),
+          ),
+        if (_searchOpen)
+          Expanded(child: _searchBody(state))
+        else
+          Expanded(
+            child: FutureBuilder<_FilesData>(
+              future: _future ??= _load(state),
+              builder: (context, snapshot) {
+                if (_lastData == null && snapshot.hasData) {
+                  _lastData = snapshot.data;
+                }
+                final data = _lastData ?? snapshot.data;
+                if (data == null &&
+                    snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  );
+                }
+                if (snapshot.hasError && data == null) {
+                  return Padding(
+                    padding: const EdgeInsets.all(Sp.page),
+                    child: Text(
+                      'Could not read the project: ${snapshot.error}',
+                      style: Txt.bodySoft.copyWith(color: Pal.rose),
+                    ),
+                  );
+                }
+                final rowsData = data ?? const _FilesData([], {}, 0);
+                if (rowsData.files.isEmpty) {
+                  return const Padding(
+                    padding: EdgeInsets.all(Sp.page),
+                    child: EmptyState(
+                      icon: Icons.folder_off_outlined,
+                      title: 'Empty project',
+                      body:
+                          'Create a file to get started, or ask the agent to write one.',
+                    ),
+                  );
+                }
+                final rows = _treeRows(rowsData);
+                return ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: Sp.x2),
+                  itemCount: rows.length,
+                  itemBuilder: (context, index) {
+                    final row = rows[index];
+                    final entry = row.entry;
+                    final change = rowsData.changes[entry.path];
+                    final folderChanges = entry.isDir
+                        ? rowsData.changes.keys
+                            .where((path) => path.startsWith('${entry.path}/'))
+                            .length
+                        : 0;
+                    return InkWell(
+                      onTap: () => _open(entry),
+                      onLongPress: () => _showActions(entry),
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          Sp.x3 + (row.depth * 15),
+                          8,
+                          Sp.x3,
+                          8,
+                        ),
+                        child: Row(
+                          children: [
                             SizedBox(
-                              width: 19,
+                              width: 14,
+                              child: entry.isDir
+                                  ? Icon(
+                                      _expanded.contains(entry.path)
+                                          ? Icons.keyboard_arrow_down_rounded
+                                          : Icons.keyboard_arrow_right_rounded,
+                                      size: 15,
+                                      color: Pal.textDim,
+                                    )
+                                  : null,
+                            ),
+                            FileGlyph(
+                              name: entry.name,
+                              isDir: entry.isDir,
+                              expanded: _expanded.contains(entry.path),
+                              size: 16,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
                               child: Text(
-                                '$folderChanges',
-                                textAlign: TextAlign.center,
-                                style: Txt.meta.copyWith(
-                                  fontSize: 9,
-                                  height: 1,
-                                  color: Pal.amber,
-                                  fontWeight: FontWeight.w700,
+                                entry.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Txt.code.copyWith(
+                                  fontSize: 11.5,
+                                  color: entry.isDir ? Pal.textMuted : Pal.text,
+                                  fontWeight: entry.isDir
+                                      ? FontWeight.w600
+                                      : FontWeight.w400,
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 7),
-                          ],
-                          if (!entry.isDir)
-                            SizedBox(
-                              width: 38,
-                              child: Text(
-                                humanSize(entry.size),
-                                textAlign: TextAlign.right,
-                                style: Txt.meta.copyWith(fontSize: 9.5),
+                            if (change != null) ...[
+                              _ChangeBadge(change: change),
+                              const SizedBox(width: 7),
+                            ] else if (folderChanges > 0) ...[
+                              SizedBox(
+                                width: 19,
+                                child: Text(
+                                  '$folderChanges',
+                                  textAlign: TextAlign.center,
+                                  style: Txt.meta.copyWith(
+                                    fontSize: 9,
+                                    height: 1,
+                                    color: Pal.amber,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                               ),
-                            ),
-                        ],
+                              const SizedBox(width: 7),
+                            ],
+                            if (!entry.isDir)
+                              SizedBox(
+                                width: 38,
+                                child: Text(
+                                  humanSize(entry.size),
+                                  textAlign: TextAlign.right,
+                                  style: Txt.meta.copyWith(fontSize: 9.5),
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
-                    ),
-                  );
-                },
-              );
-            },
+                    );
+                  },
+                );
+              },
+            ),
           ),
-        ),
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x2),
+          padding: const EdgeInsets.fromLTRB(Sp.x4, 6, Sp.x4, 6),
           decoration: BoxDecoration(
             border: Border(top: BorderSide(color: Pal.line)),
           ),
-          child: FutureBuilder<_FilesData>(
-            future: _future,
-            builder: (context, snapshot) {
-              final pending = snapshot.data?.pending ?? _lastData?.pending ?? 0;
-              return Text(
-                pending > 0
-                    ? '$pending unpushed commit${pending == 1 ? '' : 's'} · tap to open · long-press for actions'
-                    : 'tap to edit · long-press for rename or delete · long-press a folder to import',
-                style: Txt.meta.copyWith(fontSize: 9.5),
-              );
-            },
+          child: Text(
+            _lastData != null && _lastData!.pending > 0
+                ? '${_lastData!.pending} unpushed commit${_lastData!.pending == 1 ? '' : 's'} · tap to open · long-press for actions'
+                : 'tap to edit · long-press for rename or delete · long-press a folder to import',
+            style: Txt.meta.copyWith(fontSize: 9.5),
           ),
         ),
       ],
+    );
+  }
+
+  Widget _searchBody(AppState state) {
+    if (_searchQuery.length < 4) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(Sp.page),
+          child: Text(
+            'Type at least 4 characters to search file names and file contents.',
+            textAlign: TextAlign.center,
+            style: Txt.bodySoft,
+          ),
+        ),
+      );
+    }
+    if (_searching && _searchResult == null) {
+      return const Center(
+        child: SizedBox(
+          width: 18,
+          height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (_searchError != null) {
+      return Padding(
+        padding: const EdgeInsets.all(Sp.page),
+        child:
+            Text(_searchError!, style: Txt.bodySoft.copyWith(color: Pal.rose)),
+      );
+    }
+    final result = _searchResult;
+    if (result == null) return const SizedBox.shrink();
+    if (result.files.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(Sp.page),
+          child: EmptyState(
+            icon: Icons.search_off_rounded,
+            title: 'No matches for “${result.query}”',
+            body: 'Try a shorter name or a code fragment.',
+          ),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.only(bottom: Sp.x4),
+      itemCount: result.files.length + 1,
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return Container(
+            padding: const EdgeInsets.fromLTRB(Sp.x4, 8, Sp.x4, 7),
+            child: Text(
+              '${result.totalMatches} match${result.totalMatches == 1 ? '' : 'es'} '
+              'in ${result.files.length} file${result.files.length == 1 ? '' : 's'}'
+              '${result.truncated ? ' · limited' : ''}',
+              style: Txt.meta.copyWith(fontSize: 9.5, color: Pal.mint),
+            ),
+          );
+        }
+        final file = result.files[index - 1];
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            InkWell(
+              onTap: () => _open(
+                FileEntry(
+                  path: file.path,
+                  name: file.path.split('/').last,
+                  isDir: false,
+                  size: 0,
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(Sp.x4, 7, Sp.x4, 6),
+                child: Row(
+                  children: [
+                    FileGlyph(name: file.path.split('/').last, size: 15),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            file.path.split('/').last,
+                            style: Txt.code.copyWith(fontSize: 11.5),
+                          ),
+                          Text(
+                            file.path,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Txt.meta.copyWith(fontSize: 8.5),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (file.nameMatch)
+                      MonoChip('NAME',
+                          tint: Pal.mint, icon: Icons.text_fields_rounded),
+                    const SizedBox(width: 4),
+                    Text('${file.count}',
+                        style: Txt.meta.copyWith(fontSize: 9)),
+                  ],
+                ),
+              ),
+            ),
+            for (final match in file.matches.take(8))
+              InkWell(
+                onTap: () => _open(
+                  FileEntry(
+                    path: file.path,
+                    name: file.path.split('/').last,
+                    isDir: false,
+                    size: 0,
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(Sp.x4 + 23, 4, Sp.x4, 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: 28,
+                        child: Text(
+                          '${match.line}',
+                          textAlign: TextAlign.right,
+                          style: Txt.code.copyWith(
+                            fontSize: 9,
+                            color: Pal.textDim,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          searchLinePreview(match.text),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Txt.code.copyWith(
+                            fontSize: 9.5,
+                            color: Pal.textMuted,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (file.matches.length > 8)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(Sp.x4 + 23, 2, Sp.x4, 6),
+                child: Text(
+                  '+${file.matches.length - 8} more matches',
+                  style: Txt.meta.copyWith(fontSize: 9, color: Pal.textDim),
+                ),
+              ),
+            const Hairline(),
+          ],
+        );
+      },
     );
   }
 

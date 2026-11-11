@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -16,7 +17,9 @@ import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
 import '../core/model_info.dart';
+import '../core/project_search.dart';
 import '../core/project_skills.dart';
+import '../core/project_templates.dart';
 import '../core/push_state.dart';
 import '../core/quota_tracker.dart';
 import '../core/repo_clone.dart';
@@ -91,6 +94,7 @@ class AppState extends ChangeNotifier {
   static const _kAutoNextKey = 'praxis.autoNextKey';
   static const _kAutoNextProvider = 'praxis.autoNextProvider';
   static const _kDarkMode = 'praxis.darkMode';
+  static const _kAgentMode = 'praxis.agentMode';
   static const _kUsage = 'praxis.usage';
   static const _kQuota = 'praxis.quota.requests';
   static const _kDrafts = 'praxis.drafts';
@@ -120,6 +124,7 @@ class AppState extends ChangeNotifier {
   bool autoNextKey = false;
   bool autoNextProvider = false;
   bool darkMode = true;
+  AgentMode agentMode = AgentMode.build;
 
   /// Live stream while the agent is answering. Cleared when a final transcript
   /// entry lands or the run ends.
@@ -232,6 +237,8 @@ class AppState extends ChangeNotifier {
     autoNextKey = store.read(_kAutoNextKey) == 'true';
     autoNextProvider = store.read(_kAutoNextProvider) == 'true';
     darkMode = store.read(_kDarkMode) != 'false';
+    agentMode =
+        store.read(_kAgentMode) == 'plan' ? AgentMode.plan : AgentMode.build;
 
     if (projects.isEmpty && seedWelcome) {
       await createProject('hello-praxis', ProjectKind.web, persistChat: false);
@@ -289,12 +296,20 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void setAgentMode(AgentMode mode) {
+    if (agentMode == mode) return;
+    agentMode = mode;
+    unawaited(store.write(_kAgentMode, mode.name));
+    notifyListeners();
+  }
+
   Future<Project> createProject(
     String name,
     ProjectKind kind, {
     bool persistChat = true,
     String repo = '',
     String branch = 'main',
+    ProjectTemplate? template,
   }) async {
     final slug = _slug(name);
     final id =
@@ -311,7 +326,9 @@ class AppState extends ChangeNotifier {
     );
     final fs = ProjectFs(dir);
     await fs.ensureRoot();
-    for (final file in kind.scaffold) {
+    final scaffold =
+        template?.files ?? Map<String, String>.fromEntries(kind.scaffold);
+    for (final file in scaffold.entries) {
       await fs.write(file.key, file.value);
     }
     await _writeProjectMeta(dir, project);
@@ -777,6 +794,7 @@ class AppState extends ChangeNotifier {
       linuxShell: linux != null,
       activeFile: _activeFiles[projectId],
       skills: skills,
+      mode: agentMode,
       fetchText: _fetchSkillText,
       fetchBytes: _fetchUrlBytes,
       onCommitAndPush: activeGithub == null
@@ -2283,15 +2301,105 @@ Continue the task. Do not repeat a write or destructive action that already comp
     return 'Pulled $owner/$repo · $branch: ${result.summary}.';
   }
 
+  Future<ProjectSearchResult> searchProject(
+    Project project,
+    String query,
+  ) =>
+      ProjectSearch.run(fsFor(project), query);
+
+  Future<void> ensureGithubRepository(
+    IntegrationAccount account, {
+    required String owner,
+    required String repo,
+    bool private = true,
+  }) =>
+      GitHubClient(account.token, client: httpClient)
+          .ensureRepo(owner, repo, private: private);
+
+  String _deployRecordKey(Project project, String platform) =>
+      'praxis.deploy.${project.id}.$platform';
+
+  String _deploymentSignature(List<DeploymentFile> files) {
+    final sorted = [...files]..sort((a, b) => a.path.compareTo(b.path));
+    final buffer = StringBuffer();
+    for (final file in sorted) {
+      buffer
+        ..write(file.path)
+        ..write(':')
+        ..write(gitBlobSha(file.bytes))
+        ..write(';');
+    }
+    return sha256.convert(utf8.encode(buffer.toString())).toString();
+  }
+
+  Future<bool> deploymentUnchanged(
+    Project project, {
+    required String platform,
+    required String target,
+  }) async {
+    final files = await fsFor(project).deploymentFiles();
+    final record = store.read(_deployRecordKey(project, platform));
+    return record == '$target\n${_deploymentSignature(files)}';
+  }
+
+  Future<void> _rememberDeployment(
+    Project project,
+    String platform,
+    String target,
+    String signature,
+  ) async {
+    await store.write(
+        _deployRecordKey(project, platform), '$target\n$signature');
+    notifyListeners();
+  }
+
+  Future<List<CloudflarePagesProject>> cloudflareProjects(
+    IntegrationAccount account,
+  ) =>
+      CloudflarePagesClient(
+        account.token,
+        accountId: account.accountId,
+        client: httpClient,
+      ).projects();
+
+  Future<CloudflarePagesProject> createCloudflareProject(
+    IntegrationAccount account, {
+    required String name,
+    String branch = 'main',
+  }) =>
+      CloudflarePagesClient(
+        account.token,
+        accountId: account.accountId,
+        client: httpClient,
+      ).createProject(name, branch: branch);
+
   Future<IntegrationResult> deployToVercel(
     Project project,
     IntegrationAccount account, {
     required String name,
+    String? projectId,
     String environment = 'production',
   }) async {
-    final files = await fsFor(project).textFiles();
-    return VercelClient(account.token, client: httpClient)
-        .deploy(name: name, files: files, environment: environment);
+    final files = await fsFor(project).deploymentFiles();
+    if (files.isEmpty) {
+      throw IntegrationException('This project has no files to deploy.');
+    }
+    final target = '${projectId ?? name}|$environment';
+    final signature = _deploymentSignature(files);
+    if (store.read(_deployRecordKey(project, 'vercel')) ==
+        '$target\n$signature') {
+      throw IntegrationException(
+          'No changes since the last deployment to this Vercel project. '
+          'Edit the project before deploying again.');
+    }
+    final result = await VercelClient(account.token, client: httpClient).deploy(
+      name: name,
+      projectId: projectId,
+      files: files,
+      environment: environment,
+    );
+    await _rememberDeployment(project, 'vercel', target, signature);
+    return result;
   }
 
   Future<IntegrationResult> deployToCloudflare(
@@ -2301,8 +2409,19 @@ Continue the task. Do not repeat a write or destructive action that already comp
     String environment = 'production',
     String branch = 'main',
   }) async {
-    final files = await fsFor(project).textFiles();
-    return CloudflarePagesClient(
+    final files = await fsFor(project).deploymentFiles();
+    if (files.isEmpty) {
+      throw IntegrationException('This project has no files to deploy.');
+    }
+    final target = '$projectName|$environment|$branch';
+    final signature = _deploymentSignature(files);
+    if (store.read(_deployRecordKey(project, 'cloudflare')) ==
+        '$target\n$signature') {
+      throw IntegrationException(
+          'No changes since the last deployment to this Pages project. '
+          'Edit the project before deploying again.');
+    }
+    final result = await CloudflarePagesClient(
       account.token,
       accountId: account.accountId,
       client: httpClient,
@@ -2311,6 +2430,30 @@ Continue the task. Do not repeat a write or destructive action that already comp
       files: files,
       environment: environment,
       branch: branch,
+    );
+    await _rememberDeployment(
+      project,
+      'cloudflare',
+      target,
+      signature,
+    );
+    return result;
+  }
+
+  /// Removes the newest unpushed commit record for a branch. The files on disk
+  /// stay untouched and immediately return to the changed-files list.
+  Future<PushState> revertLatestPending(
+    Project project, {
+    required String owner,
+    required String repo,
+    required String branch,
+  }) async {
+    final current = await pushStateFor(project);
+    final latest = current.lastPendingFor(owner, repo, branch);
+    if (latest == null) return current;
+    return savePushState(
+      project,
+      current.withoutPending([latest.sha]),
     );
   }
 

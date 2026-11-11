@@ -25,7 +25,14 @@ class EditorScreen extends StatefulWidget {
 class _EditorScreenState extends State<EditorScreen> {
   late final CodeController _controller =
       CodeController(language: languageForPath(widget.path));
+  late final UndoHistoryController _undo = UndoHistoryController();
+  final _find = TextEditingController();
+  final _findFocus = FocusNode();
   late FileTypeInfo _type = classifyFile(widget.path);
+  bool _searchOpen = false;
+  List<int> _findStarts = const [];
+  List<int> _findEnds = const [];
+  int _findIndex = 0;
   bool _loading = true;
   bool _dirty = false;
   bool _saving = false;
@@ -33,6 +40,7 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _image = false;
   bool _svg = false;
   bool _preview = false;
+  bool? _markdownDark;
   Uint8List? _bytes;
   String? _error;
   AppState? _appState;
@@ -54,7 +62,12 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void initState() {
     super.initState();
+    _undo.addListener(_historyChanged);
     _load();
+  }
+
+  void _historyChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -71,12 +84,64 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void dispose() {
     _appState?.setActiveFile(widget.project.id, null);
+    _undo.removeListener(_historyChanged);
+    _undo.dispose();
+    _find.dispose();
+    _findFocus.dispose();
     _controller.dispose();
     super.dispose();
   }
 
   void _togglePreview() {
     setState(() => _preview = !_preview);
+  }
+
+  void _toggleFind() {
+    setState(() => _searchOpen = !_searchOpen);
+    if (_searchOpen) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _findFocus.requestFocus());
+    } else {
+      _find.clear();
+      _findStarts = const [];
+      _findEnds = const [];
+      _findIndex = 0;
+    }
+  }
+
+  void _runFind(String query) {
+    final starts = <int>[];
+    final ends = <int>[];
+    final text = _controller.text;
+    if (query.trim().length >= 2) {
+      final lowerText = text.toLowerCase();
+      final lowerQuery = query.toLowerCase();
+      var from = 0;
+      while (true) {
+        final found = lowerText.indexOf(lowerQuery, from);
+        if (found < 0) break;
+        starts.add(found);
+        ends.add(found + query.length);
+        from = found + query.length;
+        if (starts.length >= 500) break;
+      }
+    }
+    setState(() {
+      _findStarts = starts;
+      _findEnds = ends;
+      _findIndex = 0;
+    });
+    _selectFind(0);
+  }
+
+  void _selectFind(int index) {
+    if (_findStarts.isEmpty) return;
+    final next = (index % _findStarts.length);
+    setState(() => _findIndex = next);
+    _controller.selection = TextSelection(
+      baseOffset: _findStarts[next],
+      extentOffset: _findEnds[next],
+    );
   }
 
   Future<void> _load() async {
@@ -153,6 +218,7 @@ class _EditorScreenState extends State<EditorScreen> {
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
     final language = languageForPath(widget.path);
+    final markdownDark = _markdownDark ?? state.darkMode;
     final name = widget.path.split('/').last;
     final slash = widget.path.lastIndexOf('/');
     final parent = slash < 0 ? 'project root' : widget.path.substring(0, slash);
@@ -220,12 +286,40 @@ class _EditorScreenState extends State<EditorScreen> {
                         ),
                       ),
                       if (_canEdit) ...[
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 4),
+                        Opacity(
+                          opacity: _undo.value.canUndo ? 1 : 0.32,
+                          child: IconAction(
+                            icon: Icons.undo_rounded,
+                            tooltip: 'Undo',
+                            size: 17,
+                            padding: const EdgeInsets.all(6),
+                            onTap: _undo.value.canUndo ? _undo.undo : null,
+                          ),
+                        ),
+                        Opacity(
+                          opacity: _undo.value.canRedo ? 1 : 0.32,
+                          child: IconAction(
+                            icon: Icons.redo_rounded,
+                            tooltip: 'Redo',
+                            size: 17,
+                            padding: const EdgeInsets.all(6),
+                            onTap: _undo.value.canRedo ? _undo.redo : null,
+                          ),
+                        ),
+                        IconAction(
+                          icon: Icons.search_rounded,
+                          tooltip: 'Find in file',
+                          size: 18,
+                          padding: const EdgeInsets.all(6),
+                          onTap: _toggleFind,
+                        ),
+                        const SizedBox(width: 4),
                         EmberButton(
                           label: _saving ? 'Saving' : 'Save',
                           compact: true,
                           loading: _saving,
-                          onTap: _save,
+                          onTap: _dirty && !_saving ? _save : null,
                         ),
                       ],
                     ],
@@ -259,6 +353,12 @@ class _EditorScreenState extends State<EditorScreen> {
                           ],
                         ),
                       ),
+                      if (_preview && _isMarkdown)
+                        _MarkdownThemeToggle(
+                          dark: markdownDark,
+                          onChanged: (dark) =>
+                              setState(() => _markdownDark = dark),
+                        ),
                       if (_hasPreview)
                         GestureDetector(
                           onTap: _togglePreview,
@@ -311,7 +411,80 @@ class _EditorScreenState extends State<EditorScreen> {
                 ],
               ),
             ),
-            Expanded(child: _content(language, state.wordWrap)),
+            if (_searchOpen && !_preview)
+              Container(
+                padding: const EdgeInsets.fromLTRB(Sp.x3, 4, Sp.x2, 5),
+                decoration: BoxDecoration(
+                  color: Pal.ghPanel,
+                  border: Border(bottom: BorderSide(color: Pal.ghLine)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _find,
+                        focusNode: _findFocus,
+                        style: Txt.code.copyWith(fontSize: 11.5),
+                        cursorColor: Pal.ember,
+                        onChanged: _runFind,
+                        onSubmitted: (_) => _selectFind(_findIndex + 1),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          hintText: 'Find in file',
+                          hintStyle: Txt.meta.copyWith(color: Pal.ghMuted),
+                          prefixIcon: Icon(Icons.search_rounded,
+                              size: 16, color: Pal.ghMuted),
+                          prefixIconConstraints:
+                              const BoxConstraints(minWidth: 30, minHeight: 30),
+                          filled: true,
+                          fillColor: Pal.raised,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 7),
+                          border: const OutlineInputBorder(
+                            borderRadius: Rd.sm,
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _findStarts.isEmpty
+                          ? '0/0'
+                          : '${_findIndex + 1}/${_findStarts.length}',
+                      style: Txt.meta.copyWith(fontSize: 9.5),
+                    ),
+                    IconAction(
+                      icon: Icons.keyboard_arrow_up_rounded,
+                      tooltip: 'Previous match',
+                      size: 18,
+                      padding: const EdgeInsets.all(5),
+                      onTap: _findStarts.isEmpty
+                          ? null
+                          : () => _selectFind(_findIndex - 1),
+                    ),
+                    IconAction(
+                      icon: Icons.keyboard_arrow_down_rounded,
+                      tooltip: 'Next match',
+                      size: 18,
+                      padding: const EdgeInsets.all(5),
+                      onTap: _findStarts.isEmpty
+                          ? null
+                          : () => _selectFind(_findIndex + 1),
+                    ),
+                    IconAction(
+                      icon: Icons.close_rounded,
+                      tooltip: 'Close find',
+                      size: 16,
+                      padding: const EdgeInsets.all(5),
+                      onTap: _toggleFind,
+                    ),
+                  ],
+                ),
+              ),
+            Expanded(
+              child: _content(language, state.wordWrap, markdownDark),
+            ),
           ],
         ),
       ),
@@ -381,7 +554,7 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget _content(CodeLanguage language, bool wrap) {
+  Widget _content(CodeLanguage language, bool wrap, bool markdownDark) {
     if (_loading) {
       return const Center(
         child: SizedBox(
@@ -411,6 +584,7 @@ class _EditorScreenState extends State<EditorScreen> {
         project: widget.project,
         path: widget.path,
         source: _controller.text,
+        dark: markdownDark,
       );
     }
     return CodeEditor(
@@ -418,6 +592,7 @@ class _EditorScreenState extends State<EditorScreen> {
       language: language,
       wrap: wrap,
       fontSize: AppScope.of(context).editorFontSize.toDouble(),
+      undoController: _undo,
       onChanged: (_) {
         if (!_dirty) setState(() => _dirty = true);
       },
@@ -504,6 +679,82 @@ class _EditorScreenState extends State<EditorScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _MarkdownThemeToggle extends StatelessWidget {
+  const _MarkdownThemeToggle({
+    required this.dark,
+    required this.onChanged,
+  });
+
+  final bool dark;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.pill,
+        border: Border.all(color: Pal.lineStrong),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _option(
+            icon: Icons.light_mode_outlined,
+            label: 'Light preview',
+            selected: !dark,
+            onTap: () => onChanged(false),
+          ),
+          _option(
+            icon: Icons.dark_mode_outlined,
+            label: 'Dark preview',
+            selected: dark,
+            onTap: () => onChanged(true),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _option({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: label,
+        child: GestureDetector(
+          onTap: selected ? null : onTap,
+          behavior: HitTestBehavior.opaque,
+          child: AnimatedContainer(
+            duration: Motion.fast,
+            width: 28,
+            height: 24,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color:
+                  selected ? Pal.ember.withOpacity(0.14) : Colors.transparent,
+              borderRadius: Rd.pill,
+            ),
+            child: Icon(
+              icon,
+              size: 14,
+              color: selected ? Pal.ember : Pal.textMuted,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

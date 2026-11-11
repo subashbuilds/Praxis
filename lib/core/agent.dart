@@ -404,6 +404,7 @@ class Agent {
     required this.shell,
     required this.skills,
     required this.onEvent,
+    this.mode = AgentMode.build,
     this.deviceShell,
     this.fetchText,
     this.fetchBytes,
@@ -437,6 +438,7 @@ class Agent {
   final Shell shell;
   final SystemShell? deviceShell;
   final List<Skill> skills;
+  final AgentMode mode;
   final void Function(AgentEvent event) onEvent;
   final AgentFetchText? fetchText;
   final AgentFetchBytes? fetchBytes;
@@ -480,13 +482,28 @@ class Agent {
   int _lastPromptTokens = 0;
   bool _toolPending = false;
 
+  bool get _planMode => mode == AgentMode.plan;
+
+  static const _planBannedTools = {
+    'apply_patch',
+    'write_file',
+    'write_files',
+    'edit_file',
+    'install_skill',
+    'download_file',
+    'commit_and_push',
+    'pull_latest',
+  };
+
   List<AiToolSpec> get _tools => [
         ..._baseAgentTools,
         if (flags.compoundTools) ..._compoundTools,
         if (fetchBytes != null) _downloadTool,
         if (onCommitAndPush != null) _gitPushTool,
         if (onPullLatest != null) _gitPullTool,
-      ];
+      ]
+          .where((tool) => !_planMode || !_planBannedTools.contains(tool.name))
+          .toList();
 
   static const _downloadTool = AiToolSpec(
     name: 'download_file',
@@ -511,7 +528,10 @@ class Agent {
     required String prompt,
     bool Function()? isCancelled,
   }) async {
-    final system = await _systemPrompt();
+    final system = await _systemPrompt(
+      prompt: prompt,
+      firstTurn: history.isEmpty,
+    );
     final prefetched = flags.contextPrefetch
         ? await ContextPrefetch(
             fs: fs,
@@ -1004,7 +1024,10 @@ class Agent {
     ).hasMatch(text);
   }
 
-  Future<String> _systemPrompt() async {
+  Future<String> _systemPrompt({
+    required String prompt,
+    required bool firstTurn,
+  }) async {
     final files = await _fileTree();
     final installed = await _installedSkills();
     final activeSkills = [
@@ -1012,16 +1035,32 @@ class Agent {
           (skill) => skill.enabled && skill.instructions.trim().isNotEmpty),
       ...installed,
     ];
+    final explicit = _explicitSkills(prompt, activeSkills);
+    final loaded = <Skill>[];
     for (final skill in activeSkills) {
-      onEvent(AgentEvent.activity(
-        tool: 'skill',
-        text: 'Read skill',
-        detail: skill.name,
-      ));
+      final relevant =
+          explicit.contains(skill.id) || _skillLooksRelevant(skill, prompt);
+      if (firstTurn || relevant) {
+        loaded.add(skill);
+        onEvent(AgentEvent.activity(
+          tool: 'skill',
+          text: 'Read skill',
+          detail: skill.name,
+        ));
+      }
     }
-    final skillText = activeSkills
-        .map((skill) => '- ${skill.name}: ${skill.instructions.trim()}')
-        .join('\n');
+    final skillText = loaded.isEmpty
+        ? ''
+        : loaded
+            .map((skill) => '- ${skill.name}: ${skill.instructions.trim()}')
+            .join('\n\n');
+    final skillIndex = activeSkills.map((skill) {
+      final firstLine = skill.instructions
+          .split('\n')
+          .map((line) => line.trim())
+          .firstWhere((line) => line.isNotEmpty, orElse: () => '');
+      return '- ${skill.name}${firstLine.isEmpty ? '' : ': ${firstLine.length > 120 ? '${firstLine.substring(0, 120)}…' : firstLine}'}';
+    }).join('\n');
     final fullShell = deviceShell != null;
     final parallelTools = providerSupportsParallelToolCalls(provider);
     return '''
@@ -1029,6 +1068,9 @@ You are Praxis, an AI coding agent running on the user's Android phone.
 You work on a real project folder on the device. The user sees your replies,
 your reasoning behind a collapsed pill, and every tool call with its diff in a
 chat next to the code, a terminal and a live preview.
+
+Mode: ${mode.label}.
+${_planMode ? 'Plan mode is active. You may inspect files, search, read skills and run read-only commands. Never write, edit, delete, download, install, commit or push. Produce a concrete implementation plan with exact files, edits and verification steps. Do not claim a change was made.' : 'Build mode is active. Read, edit, run commands and verify the project normally.'}
 
 How to work:
 - Finish the request with the fewest model rounds. Do not narrate a plan before
@@ -1086,8 +1128,47 @@ Context policy (the host enforces this automatically):
 - Always keep the system prompt, the first user request and the last 4–6
   messages verbatim. Tool calls and their results always stay paired.
 - Never compact while a tool call or approval is pending.
-${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
+${skillIndex.isEmpty ? '' : '\nSkills available (use /skill-name to invoke one explicitly):\n$skillIndex'}
+${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillText'}
 ''';
+  }
+
+  /// `/name` always wins over keyword relevance. Slash alone is ignored by the
+  /// composer, so only a complete command reaches this point.
+  Set<String> _explicitSkills(String prompt, List<Skill> active) {
+    final ids = <String>{};
+    for (final match
+        in RegExp(r'(?:^|\s)/([a-zA-Z0-9][a-zA-Z0-9_-]*)').allMatches(prompt)) {
+      final command = match.group(1)!.toLowerCase();
+      for (final skill in active) {
+        final name =
+            skill.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-');
+        final idTail = skill.id.toLowerCase().split(':').last;
+        if (name == command ||
+            idTail == command ||
+            skill.id.toLowerCase() == command) {
+          ids.add(skill.id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  bool _skillLooksRelevant(Skill skill, String prompt) {
+    final lower = prompt.toLowerCase();
+    final name = skill.name.toLowerCase();
+    if (lower.contains(name.replaceAll('-', ' '))) return true;
+    final words = skill.instructions
+        .toLowerCase()
+        .split(RegExp(r'[^a-z0-9]+'))
+        .where((word) => word.length >= 5)
+        .take(40)
+        .toSet();
+    var hits = 0;
+    for (final word in words) {
+      if (lower.contains(word)) hits++;
+    }
+    return hits >= 2;
   }
 
   /// Project-installed skills use the Claude-style layout:
@@ -1140,6 +1221,11 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
   }
 
   Future<_ToolOutcome> _execute(AiToolCall call) async {
+    if (_planMode && _planBannedTools.contains(call.name)) {
+      return const _ToolOutcome(
+          'Error: Plan mode cannot change files or repositories. Switch to '
+          'Build mode to make this change.');
+    }
     try {
       switch (call.name) {
         case 'list_files':
@@ -1213,8 +1299,22 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
           if (command.isEmpty) {
             return const _ToolOutcome('Error: command is required');
           }
+          if (_planMode && _commandChangesFiles(command)) {
+            return const _ToolOutcome(
+                'Error: Plan mode only allows read-only commands. This command '
+                'can modify files or state.');
+          }
           return _runSingleCommand(command);
         case 'run_commands':
+          if (_planMode) {
+            final commands = call.arguments['commands'];
+            if (commands is List &&
+                commands.any((command) =>
+                    command is String && _commandChangesFiles(command))) {
+              return const _ToolOutcome(
+                  'Error: Plan mode only allows read-only commands.');
+            }
+          }
           return await _runCommands(call);
         case 'commit_and_push':
           final action = onCommitAndPush;
@@ -1294,6 +1394,58 @@ ${skillText.isEmpty ? '' : '\nSkills the user enabled:\n$skillText'}
       }
     }
     return _execute(call);
+  }
+
+  bool _commandChangesFiles(String raw) {
+    final command = raw.toLowerCase().trim();
+    const mutations = [
+      'rm ',
+      'rm -',
+      'mv ',
+      'cp ',
+      'touch ',
+      'mkdir ',
+      'rmdir ',
+      'truncate ',
+      'tee ',
+      'sed -i',
+      'chmod ',
+      'chown ',
+      'apk add',
+      'apk del',
+      'npm install',
+      'npm i ',
+      'npm run build',
+      'pnpm ',
+      'yarn ',
+      'pip install',
+      'pip3 install',
+      'python -m ',
+      'django-admin ',
+      'manage.py migrate',
+      'git add',
+      'git commit',
+      'git push',
+      'git pull',
+      'git merge',
+      'git reset',
+      'git checkout',
+      'git switch',
+      'git clone',
+      'curl -o',
+      'wget ',
+      'flutter ',
+    ];
+    if (command.contains('>')) return true;
+    for (final prefix in const [';', '&&', '||', '|']) {
+      if (command.contains(prefix)) {
+        for (final part in command.split(prefix)) {
+          if (_commandChangesFiles(part)) return true;
+        }
+      }
+    }
+    return mutations.any(command.startsWith) ||
+        mutations.any((mutation) => command.contains(' $mutation'));
   }
 
   Future<_ToolOutcome> _runSingleCommand(String command) async {
