@@ -919,6 +919,7 @@ class CloudflarePagesClient {
 
   Future<IntegrationResult> deploy({
     required String project,
+    String projectUrl = '',
     required List<DeploymentFile> files,
     String environment = 'production',
     String branch = 'main',
@@ -1058,12 +1059,26 @@ class CloudflarePagesClient {
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     final result = body['result'] as Map<String, dynamic>?;
+    final deploymentUrl = result?['url'] as String? ?? '';
     final aliases = result?['aliases'];
     final firstAlias =
         aliases is List && aliases.isNotEmpty ? aliases.first.toString() : '';
-    final url = firstAlias.startsWith('http')
-        ? firstAlias
-        : 'https://$project.pages.dev';
+    final known = projectUrl.trim();
+    // Cloudflare assigns a unique subdomain when the plain project name is
+    // taken (portfolio becomes portfolio-36k.pages.dev). Never invent
+    // <name>.pages.dev: prefer the project the API returned, then the actual
+    // deployment URL, then an alias.
+    final productionUrl = known.isNotEmpty
+        ? known
+        : (deploymentUrl.isNotEmpty
+            ? deploymentUrl
+            : (firstAlias.startsWith('http')
+                ? firstAlias
+                : 'https://$project.pages.dev'));
+    final previewUrl = deploymentUrl.isNotEmpty
+        ? deploymentUrl
+        : (firstAlias.startsWith('http') ? firstAlias : productionUrl);
+    final url = environment == 'production' ? productionUrl : previewUrl;
     onProgress?.call(DeployProgress('Live', detail: url));
     return IntegrationResult(
       message: 'Deployed ${files.length} files to $accountName · '

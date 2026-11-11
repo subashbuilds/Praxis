@@ -323,12 +323,15 @@ class ProjectFs {
   /// Every project file as raw bytes, including images and other binaries.
   /// Text files beyond the editor's inline limit are included as bytes too so
   /// a static deployment matches the folder the user sees.
-  Future<List<DeploymentFile>> deploymentFiles() async {
-    final entries = await list(includeHidden: true);
+  Future<List<DeploymentFile>> deploymentFiles({String from = ''}) async {
+    final base = normalize(from);
+    final entries = await list(path: base, includeHidden: true);
     final result = <DeploymentFile>[];
     for (final entry in entries) {
       if (entry.isDir) continue;
-      final lower = entry.path.toLowerCase();
+      final relative =
+          base.isEmpty ? entry.path : entry.path.substring(base.length + 1);
+      final lower = relative.toLowerCase();
       // `.next` is generated output, not source. Uploading it bloats a Pages
       // deployment and was the main source of failed asset uploads.
       if (lower == '.next' ||
@@ -342,7 +345,7 @@ class ProjectFs {
       try {
         final bytes = await readBytes(entry.path);
         result.add(DeploymentFile(
-          path: entry.path,
+          path: relative,
           bytes: bytes,
           mime: classifyFile(entry.path, bytes: bytes).mime ??
               'application/octet-stream',

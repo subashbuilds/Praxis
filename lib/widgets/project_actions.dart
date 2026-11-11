@@ -647,6 +647,7 @@ class _DeploySheetState extends State<_DeploySheet> {
               _state.projectById(widget.project.id),
               _cfAccount!,
               projectName: _project!.name,
+              projectUrl: _project!.url,
               environment: _environment,
               branch: widget.project.branch,
               onProgress: _onDeployProgress,

@@ -11,6 +11,53 @@ import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/ui.dart';
 
+/// Styles slash skills and @file tags inside the composer itself, so a command
+/// stays visible after it is typed and not only while the suggestion panel is
+/// open.
+class _PromptController extends TextEditingController {
+  static final _token = RegExp(r'(^|\s)([/@][A-Za-z0-9._/-]+)');
+
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final base = style ?? const TextStyle();
+    if (withComposing &&
+        value.composing.isValid &&
+        !value.composing.isCollapsed) {
+      return super.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: withComposing,
+      );
+    }
+    final spans = <InlineSpan>[];
+    var index = 0;
+    for (final match in _token.allMatches(text)) {
+      if (match.start > index) {
+        spans.add(TextSpan(text: text.substring(index, match.start)));
+      }
+      final prefix = match.group(1) ?? '';
+      if (prefix.isNotEmpty) spans.add(TextSpan(text: prefix));
+      final token = match.group(2) ?? '';
+      spans.add(TextSpan(
+        text: token,
+        style: base.copyWith(
+          color: Pal.ember,
+          fontWeight: FontWeight.w600,
+        ),
+      ));
+      index = match.end;
+    }
+    if (index < text.length) {
+      spans.add(TextSpan(text: text.substring(index)));
+    }
+    return TextSpan(style: base, children: spans);
+  }
+}
+
 class AgentTab extends StatefulWidget {
   const AgentTab({super.key, required this.project});
 
@@ -21,7 +68,7 @@ class AgentTab extends StatefulWidget {
 }
 
 class _AgentTabState extends State<AgentTab> {
-  final _composer = TextEditingController();
+  final _composer = _PromptController();
   final _scroll = ScrollController();
   final _attachments = <String>[];
   int _lastThreadLength = 0;

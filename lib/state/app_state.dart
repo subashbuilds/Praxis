@@ -744,13 +744,20 @@ class AppState extends ChangeNotifier {
     liveText = '';
     liveThinking = '';
     liveTools.clear();
-    unawaited(store.write(_kLiveDraft, ''));
+    _lastLiveDraftText = '';
+    final hadDraft = _liveDraftSaved;
+    _liveDraftSaved = false;
+    if (hadDraft) unawaited(store.write(_kLiveDraft, ''));
   }
 
   Timer? _liveNotify;
   Timer? _liveDraftTimer;
   DateTime _lastLiveDraft = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastLiveDraftText = '';
+  bool _liveDraftSaved = false;
   bool _restoringLiveDraft = false;
+  Timer? _chatPersistTimer;
+  String? _chatPersistProject;
 
   /// Streaming replies produce dozens of deltas a second. Repainting the whole
   /// workspace for each one made large projects stutter, so live text is
@@ -764,16 +771,21 @@ class AppState extends ChangeNotifier {
     });
   }
 
-  /// The app can be killed while a reply is streaming. Keep a small draft of
-  /// the text received so far, at most once a second, so reopening shows the
-  /// answer instead of only the prompt.
+  /// The app can be killed while a reply is streaming. Keep a draft of the
+  /// text received so far, but not more often than every two seconds: writing
+  /// a large transcript string to platform storage on every repaint made big
+  /// projects stutter.
   void _queueLiveDraft() {
     final projectId = _activeProjectId;
-    if (projectId == null || _restoringLiveDraft || liveText.trim().isEmpty) {
+    final text = liveText;
+    if (projectId == null ||
+        _restoringLiveDraft ||
+        text.trim().isEmpty ||
+        text == _lastLiveDraftText) {
       return;
     }
     final wait = DateTime.now().difference(_lastLiveDraft);
-    const interval = Duration(milliseconds: 800);
+    const interval = Duration(milliseconds: 2000);
     if (wait >= interval) {
       _lastLiveDraft = DateTime.now();
       unawaited(_writeLiveDraft(projectId));
@@ -788,7 +800,9 @@ class AppState extends ChangeNotifier {
   Future<void> _writeLiveDraft(String projectId) async {
     if (_activeProjectId != projectId) return;
     final text = liveText;
-    if (text.trim().isEmpty) return;
+    if (text.trim().isEmpty || text == _lastLiveDraftText) return;
+    _lastLiveDraftText = text;
+    _liveDraftSaved = true;
     await store.write(
       _kLiveDraft,
       jsonEncode({
@@ -798,6 +812,20 @@ class AppState extends ChangeNotifier {
         'at': DateTime.now().toIso8601String(),
       }),
     );
+  }
+
+  /// Transcript writes used to happen on every tool event, which meant
+  /// re-encoding the whole conversation dozens of times per task. Coalesce
+  /// them; the final write still runs when the run ends.
+  void _queueChatPersist(String projectId) {
+    _chatPersistProject = projectId;
+    if (_chatPersistTimer != null) return;
+    _chatPersistTimer = Timer(const Duration(milliseconds: 1500), () {
+      _chatPersistTimer = null;
+      final id = _chatPersistProject;
+      _chatPersistProject = null;
+      if (id != null) unawaited(_persistChat(id));
+    });
   }
 
   Future<void> _restoreLiveDraft() async {
@@ -892,8 +920,12 @@ class AppState extends ChangeNotifier {
       ));
     }
     _clearLive();
+    // Mark the composer busy before the first persistence await so tapping
+    // Send or Resume gives immediate feedback on a large conversation.
+    busy = true;
+    _cancelled = false;
     notifyListeners();
-    await _persistChat(projectId);
+    unawaited(_persistChat(projectId));
 
     if (!provider.isConfigured) {
       thread.add(_entry(
@@ -902,14 +934,11 @@ class AppState extends ChangeNotifier {
             ? 'No provider is ready. Open Settings → Providers and add an API key.'
             : 'Finish configuring ${provider.name} in Settings → Providers.',
       ));
+      busy = false;
       notifyListeners();
       await _persistChat(projectId);
       return;
     }
-
-    busy = true;
-    _cancelled = false;
-    notifyListeners();
 
     var checkpoint = (resumeFrom ??
             TaskCheckpoint(
@@ -1077,9 +1106,9 @@ class AppState extends ChangeNotifier {
         }
         notifyListeners();
         // Committed text and tool rows are real transcript entries, so write
-        // them during the run. If the app is killed before the task ends, the
-        // next launch still has everything received up to that point.
-        unawaited(_persistChat(projectId));
+        // them during the run. Coalescing keeps a large thread from being
+        // re-encoded on every single event.
+        _queueChatPersist(projectId);
       },
     );
 
@@ -1193,6 +1222,9 @@ class AppState extends ChangeNotifier {
       ));
       busy = false;
       _activeProjectId = null;
+      _chatPersistTimer?.cancel();
+      _chatPersistTimer = null;
+      _chatPersistProject = null;
       notifyListeners();
       await _persistChat(projectId);
     }
@@ -1432,9 +1464,7 @@ class AppState extends ChangeNotifier {
     final checkpoint = _checkpoints[projectId];
     if (checkpoint == null || !checkpoint.resumable) return;
     final project = projectById(projectId);
-    final external = await _externalChanges(project, checkpoint);
     final provider = activeProvider;
-    final summary = _resumeSummary(checkpoint, external);
     final skip =
         checkpoint.completedActions.map((action) => action.fingerprint).toSet();
     final thread = threadOf(projectId);
@@ -1442,23 +1472,44 @@ class AppState extends ChangeNotifier {
       role: ChatRole.note,
       text: 'Resumed with ${provider.name} (${provider.model}). '
           '${checkpoint.completed.isEmpty ? 'No completed steps.' : 'Completed ${checkpoint.completed.length} steps; '}'
-          '${checkpoint.changedFiles.length} changed files. '
-          '${external.isEmpty ? 'No external file changes detected.' : '${external.length} file(s) changed outside the task.'}',
+          '${checkpoint.changedFiles.length} changed files.',
     ));
     _queueCheckpoint(checkpoint.copyWith(
       status: TaskCheckpointStatus.running,
       updatedAt: DateTime.now(),
     ));
     notifyListeners();
-    await _persistChat(projectId);
+    unawaited(_persistChat(projectId));
+    // Hashing changed files used to delay Resume itself. Run that check while
+    // the task is already starting and report it as a note.
+    unawaited(_reportExternalChanges(project, checkpoint));
     await _runPrompt(
       projectId,
-      summary,
+      _resumeSummary(checkpoint, const []),
       historyOverride: const [],
       skipActionFingerprints: skip,
       resumeFrom: checkpoint,
       recordUserMessage: false,
     );
+  }
+
+  Future<void> _reportExternalChanges(
+    Project project,
+    TaskCheckpoint checkpoint,
+  ) async {
+    try {
+      final external = await _externalChanges(project, checkpoint);
+      if (external.isEmpty || !projects.any((item) => item.id == project.id)) {
+        return;
+      }
+      threadOf(project.id).add(_entry(
+        role: ChatRole.note,
+        text: '${external.length} file(s) changed outside the task.',
+      ));
+      notifyListeners();
+    } catch (_) {
+      // This note is informational; it must not affect the resumed task.
+    }
   }
 
   Future<List<String>> _externalChanges(
@@ -2593,13 +2644,14 @@ Continue the task. Do not repeat a write or destructive action that already comp
     Project project,
     IntegrationAccount account, {
     required String projectName,
+    String projectUrl = '',
     String environment = 'production',
     String branch = 'main',
     void Function(DeployProgress)? onProgress,
   }) async {
     onProgress?.call(
         const DeployProgress('Preparing', detail: 'Collecting project files'));
-    final files = await fsFor(project).deploymentFiles();
+    final files = await _cloudflareFiles(project, onProgress);
     if (files.isEmpty) {
       throw IntegrationException('This project has no files to deploy.');
     }
@@ -2617,6 +2669,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
       client: httpClient,
     ).deploy(
       project: projectName,
+      projectUrl: projectUrl,
       files: files,
       environment: environment,
       branch: branch,
@@ -2629,6 +2682,91 @@ Continue the task. Do not repeat a write or destructive action that already comp
       signature,
     );
     return result;
+  }
+
+  /// Pages Direct Upload serves the files it receives; it does not build a
+  /// Node project. Build first and upload the static output, otherwise a
+  /// Next/React source tree is published and every URL returns 404.
+  Future<List<DeploymentFile>> _cloudflareFiles(
+    Project project,
+    void Function(DeployProgress)? onProgress,
+  ) async {
+    final fs = fsFor(project);
+    if (project.kind != ProjectKind.node || !await fs.exists('package.json')) {
+      return fs.deploymentFiles();
+    }
+    // A Node project that already has a root index.html is a static site.
+    if (await fs.exists('index.html')) return fs.deploymentFiles();
+
+    var hasBuild = false;
+    try {
+      final package = jsonDecode(await fs.read('package.json'));
+      final scripts = package is Map ? package['scripts'] : null;
+      hasBuild = scripts is Map && scripts['build'] is String;
+    } catch (_) {
+      hasBuild = false;
+    }
+    if (!hasBuild) {
+      final existing = await _staticOutput(fs);
+      if (existing != null) return fs.deploymentFiles(from: existing);
+      throw IntegrationException(
+          'This Node project has no build script and no static output. Add a '
+          'build script that writes to out/, dist/ or build/.');
+    }
+
+    final shell = systemShellFor(project);
+    onProgress?.call(const DeployProgress(
+      'Building',
+      detail: 'Installing dependencies',
+    ));
+    final install = await shell.run(
+      'npm install --no-audit --no-fund',
+      timeout: const Duration(minutes: 8),
+    );
+    if (install.exitCode != 0) {
+      throw IntegrationException(
+          'npm install failed (exit ${install.exitCode}). ${_tail(install.output)}');
+    }
+    onProgress?.call(const DeployProgress(
+      'Building',
+      detail: 'Running npm run build',
+    ));
+    final build = await shell.run(
+      'npm run build',
+      timeout: const Duration(minutes: 12),
+    );
+    if (build.exitCode != 0) {
+      throw IntegrationException(
+          'npm run build failed (exit ${build.exitCode}). ${_tail(build.output)}');
+    }
+    final output = await _staticOutput(fs);
+    if (output == null) {
+      throw IntegrationException(
+          'The build finished but no static folder was found. For Next.js, set '
+          "output: 'export' so the build writes to out/.");
+    }
+    onProgress?.call(DeployProgress('Preparing', detail: 'Reading $output/'));
+    return fs.deploymentFiles(from: output);
+  }
+
+  Future<String?> _staticOutput(ProjectFs fs) async {
+    for (final candidate in const [
+      'out',
+      'dist',
+      'build/web',
+      'build',
+      '.vercel/output/static',
+    ]) {
+      if (await fs.exists('$candidate/index.html')) return candidate;
+    }
+    return null;
+  }
+
+  String _tail(String output) {
+    final trimmed = output.trim();
+    if (trimmed.isEmpty) return '';
+    final lines = trimmed.split('\n');
+    return lines.skip(lines.length > 6 ? lines.length - 6 : 0).join('\n');
   }
 
   /// Removes the newest unpushed commit record for a branch. The files on disk
