@@ -291,10 +291,13 @@ class _PreviewTabState extends State<PreviewTab> {
           const desktop = ${_desktop ? 'true' : 'false'};
           if (desktop) {
             const width = 1280;
-            const screenWidth = window.screen && window.screen.width
-              ? window.screen.width
-              : width;
-            const scale = Math.min(1, screenWidth / width);
+            // screen.width can be physical pixels on Android, which would
+            // leave the wide page larger than the phone. The visual viewport
+            // is the CSS width actually visible before the override.
+            const deviceWidth =
+              (window.visualViewport && window.visualViewport.width) ||
+              window.innerWidth || width;
+            const scale = Math.min(1, deviceWidth / width);
             meta.setAttribute(
               'content',
               'width=' + width + ', initial-scale=' + scale +
