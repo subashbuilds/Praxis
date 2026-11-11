@@ -30,8 +30,8 @@ android {
         targetSdk = 36
         // pubspec.yaml is the source of truth. Flutter passes both values to
         // Gradle, and CI can override the build number without editing code.
-        versionCode = flutterVersionCode.toInteger()
-        versionName = flutterVersionName
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
     }
 
     signingConfigs {
