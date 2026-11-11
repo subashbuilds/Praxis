@@ -26,8 +26,16 @@ class WorkspaceScreen extends StatefulWidget {
 class _WorkspaceScreenState extends State<WorkspaceScreen> {
   int _tab = 0;
 
+  /// Tabs that have been opened stay mounted. Rebuilding the shell when the
+  /// user switches tabs used to wipe its transcript, and removing the agent
+  /// tab interrupted a running reply.
+  final Set<int> _visited = {0};
+
   void _selectTab(int tab) {
-    setState(() => _tab = _tab == tab ? 0 : tab);
+    setState(() {
+      _tab = _tab == tab ? 0 : tab;
+      _visited.add(_tab);
+    });
   }
 
   void _back() {
@@ -126,12 +134,24 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                   ),
                 ),
               Expanded(
-                child: switch (_tab) {
-                  0 => AgentTab(project: project),
-                  1 => FilesTab(project: project),
-                  2 => TerminalTab(project: project),
-                  _ => PreviewTab(project: project),
-                },
+                child: Stack(
+                  children: [
+                    for (var index = 0; index < 4; index++)
+                      if (_visited.contains(index))
+                        Offstage(
+                          offstage: _tab != index,
+                          child: TickerMode(
+                            enabled: _tab == index,
+                            child: switch (index) {
+                              0 => AgentTab(project: project),
+                              1 => FilesTab(project: project),
+                              2 => TerminalTab(project: project),
+                              _ => PreviewTab(project: project),
+                            },
+                          ),
+                        ),
+                  ],
+                ),
               ),
             ],
           ),

@@ -178,9 +178,22 @@ class _EditorScreenState extends State<EditorScreen> {
         if (!binary && text != null) _controller.text = text;
         _loading = false;
       });
-      if (widget.initialLine != null) {
+      final query = widget.highlight?.trim() ?? '';
+      if (widget.initialLine != null || query.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _jumpToLine(widget.initialLine!, widget.highlight);
+          if (!mounted) return;
+          if (query.isNotEmpty) {
+            // Opening a project-search hit starts a find session, so every
+            // occurrence is highlighted and the arrows step through them.
+            _find.text = widget.highlight!;
+            setState(() => _searchOpen = true);
+            _runFind(widget.highlight!);
+            if (widget.initialLine != null) {
+              _selectFind(_findIndexForLine(widget.initialLine!));
+            }
+          } else if (widget.initialLine != null) {
+            _jumpToLine(widget.initialLine!, null);
+          }
         });
       }
     } catch (error) {
@@ -190,6 +203,20 @@ class _EditorScreenState extends State<EditorScreen> {
         _error = '$error';
       });
     }
+  }
+
+  int _findIndexForLine(int line) {
+    if (_findStarts.isEmpty) return 0;
+    final lines = _controller.text.split('\n');
+    final index = (line - 1).clamp(0, lines.length - 1);
+    var start = 0;
+    for (var i = 0; i < index; i++) {
+      start += lines[i].length + 1;
+    }
+    for (var i = 0; i < _findStarts.length; i++) {
+      if (_findStarts[i] >= start) return i;
+    }
+    return _findStarts.length - 1;
   }
 
   void _jumpToLine(int line, String? query) {
@@ -639,6 +666,9 @@ class _EditorScreenState extends State<EditorScreen> {
       wrap: wrap,
       fontSize: AppScope.of(context).editorFontSize.toDouble(),
       undoController: _undo,
+      findStarts: _findStarts,
+      findEnds: _findEnds,
+      activeFindIndex: _findIndex,
       onChanged: (_) {
         if (!_dirty) setState(() => _dirty = true);
       },

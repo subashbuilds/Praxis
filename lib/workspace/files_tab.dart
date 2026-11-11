@@ -42,6 +42,7 @@ class _FilesTabState extends State<FilesTab> {
   String? _searchError;
   bool _importing = false;
   bool _refreshing = false;
+  final Set<String> _collapsedMatches = {};
   int _loadToken = 0;
   DateTime? _changesLoadedAt;
 
@@ -1008,9 +1009,19 @@ class _FilesTabState extends State<FilesTab> {
         ),
       );
     }
+    // Flatten file headers and every match into one list so a file with 50
+    // hits renders lazily instead of building a tall Column up front.
+    final rows = <_SearchRow>[];
+    for (final file in result.files) {
+      rows.add(_SearchRow.header(file));
+      if (_collapsedMatches.contains(file.path)) continue;
+      for (final match in file.matches) {
+        rows.add(_SearchRow.match(file, match));
+      }
+    }
     return ListView.builder(
       padding: const EdgeInsets.only(bottom: Sp.x4),
-      itemCount: result.files.length + 1,
+      itemCount: rows.length + 1,
       itemBuilder: (context, index) {
         if (index == 0) {
           return Container(
@@ -1023,109 +1034,118 @@ class _FilesTabState extends State<FilesTab> {
             ),
           );
         }
-        final file = result.files[index - 1];
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            InkWell(
-              onTap: () => _open(
-                FileEntry(
-                  path: file.path,
-                  name: file.path.split('/').last,
-                  isDir: false,
-                  size: 0,
-                ),
-                line: file.matches.isEmpty ? null : file.matches.first.line,
-                highlight: result.query,
+        final row = rows[index - 1];
+        final file = row.file;
+        final match = row.match;
+        if (match == null) {
+          final collapsed = _collapsedMatches.contains(file.path);
+          return InkWell(
+            onTap: () => _open(
+              FileEntry(
+                path: file.path,
+                name: file.path.split('/').last,
+                isDir: false,
+                size: 0,
               ),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(Sp.x4, 7, Sp.x4, 6),
-                child: Row(
-                  children: [
-                    FileGlyph(name: file.path.split('/').last, size: 15),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _MatchText(
-                            text: file.path.split('/').last,
-                            query: result.query,
-                            style: Txt.code.copyWith(fontSize: 11.5),
-                          ),
-                          Text(
-                            file.path,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Txt.meta.copyWith(fontSize: 8.5),
-                          ),
-                        ],
+              line: file.matches.isEmpty ? null : file.matches.first.line,
+              highlight: result.query,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.x4, 7, Sp.x2, 6),
+              child: Row(
+                children: [
+                  FileGlyph(name: file.path.split('/').last, size: 15),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          file.path.split('/').last,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Txt.code.copyWith(fontSize: 11.5),
+                        ),
+                        Text(
+                          file.path,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Txt.meta.copyWith(fontSize: 8.5),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (file.nameMatch)
+                    MonoChip('NAME',
+                        tint: Pal.mint, icon: Icons.text_fields_rounded),
+                  const SizedBox(width: 4),
+                  Text('${file.count}', style: Txt.meta.copyWith(fontSize: 9)),
+                  if (file.matches.isNotEmpty)
+                    GestureDetector(
+                      onTap: () => setState(() {
+                        if (!_collapsedMatches.remove(file.path)) {
+                          _collapsedMatches.add(file.path);
+                        }
+                      }),
+                      behavior: HitTestBehavior.opaque,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(6, 4, 2, 4),
+                        child: Icon(
+                          collapsed
+                              ? Icons.keyboard_arrow_right_rounded
+                              : Icons.keyboard_arrow_down_rounded,
+                          size: 17,
+                          color: Pal.textDim,
+                        ),
                       ),
                     ),
-                    if (file.nameMatch)
-                      MonoChip('NAME',
-                          tint: Pal.mint, icon: Icons.text_fields_rounded),
-                    const SizedBox(width: 4),
-                    Text('${file.count}',
-                        style: Txt.meta.copyWith(fontSize: 9)),
-                  ],
-                ),
+                ],
               ),
             ),
-            for (final match in file.matches.take(8))
-              InkWell(
-                onTap: () => _open(
-                  FileEntry(
-                    path: file.path,
-                    name: file.path.split('/').last,
-                    isDir: false,
-                    size: 0,
-                  ),
-                  line: match.line,
-                  highlight: result.query,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(Sp.x4 + 23, 4, Sp.x4, 4),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SizedBox(
-                        width: 28,
-                        child: Text(
-                          '${match.line}',
-                          textAlign: TextAlign.right,
-                          style: Txt.code.copyWith(
-                            fontSize: 9,
-                            color: Pal.textDim,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _MatchText(
-                          text: searchLinePreview(match.text),
-                          query: result.query,
-                          maxLines: 2,
-                          style: Txt.code.copyWith(
-                            fontSize: 9.5,
-                            color: Pal.textMuted,
-                          ),
-                        ),
-                      ),
-                    ],
+          );
+        }
+        return InkWell(
+          onTap: () => _open(
+            FileEntry(
+              path: file.path,
+              name: file.path.split('/').last,
+              isDir: false,
+              size: 0,
+            ),
+            line: match.line,
+            highlight: result.query,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(Sp.x4 + 23, 4, Sp.x4, 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 28,
+                  child: Text(
+                    '${match.line}',
+                    textAlign: TextAlign.right,
+                    style: Txt.code.copyWith(
+                      fontSize: 9,
+                      color: Pal.textDim,
+                    ),
                   ),
                 ),
-              ),
-            if (file.matches.length > 8)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(Sp.x4 + 23, 2, Sp.x4, 6),
-                child: Text(
-                  '+${file.matches.length - 8} more matches',
-                  style: Txt.meta.copyWith(fontSize: 9, color: Pal.textDim),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _MatchText(
+                    text: searchLinePreview(match.text),
+                    query: result.query,
+                    maxLines: 2,
+                    style: Txt.code.copyWith(
+                      fontSize: 9.5,
+                      color: Pal.textMuted,
+                    ),
+                  ),
                 ),
-              ),
-            const Hairline(),
-          ],
+              ],
+            ),
+          ),
         );
       },
     );
@@ -1167,6 +1187,14 @@ class _TreeRow {
   const _TreeRow(this.entry, this.depth);
   final FileEntry entry;
   final int depth;
+}
+
+class _SearchRow {
+  const _SearchRow.header(this.file) : match = null;
+  const _SearchRow.match(this.file, this.match);
+
+  final FileSearchResult file;
+  final CodeSearchMatch? match;
 }
 
 class _FilesData {

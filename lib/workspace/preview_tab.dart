@@ -18,6 +18,13 @@ class PreviewTab extends StatefulWidget {
 }
 
 class _PreviewTabState extends State<PreviewTab> {
+  static const _desktopUserAgent =
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) '
+      'Chrome/124.0.0.0 Safari/537.36';
+  static const _mobileUserAgent =
+      'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+
   WebViewController? _controller;
   HttpServer? _server;
   String? _path;
@@ -89,19 +96,29 @@ class _PreviewTabState extends State<PreviewTab> {
       final controller = WebViewController();
       await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
       await controller.setBackgroundColor(Pal.terminal);
+      try {
+        await controller.setUserAgent(
+          _desktop ? _desktopUserAgent : _mobileUserAgent,
+        );
+      } catch (_) {
+        // The default user agent is still usable.
+      }
       await controller.setNavigationDelegate(NavigationDelegate(
-        onPageFinished: (_) => _applyDesktopViewport(controller),
+        onPageFinished: (_) {
+          if (!_desktop) _applyDesktopViewport(controller);
+        },
       ));
-      if (devPort != null) {
-        await controller.loadRequest(
-          Uri.parse('http://127.0.0.1:$devPort/'),
-        );
-      } else if (server == null) {
-        await controller.loadFile(path!);
+      final target = devPort != null
+          ? 'http://127.0.0.1:$devPort/'
+          : (server != null ? 'http://127.0.0.1:${server.port}/' : null);
+      if (_desktop && target != null) {
+        // A 1280 CSS-pixel iframe gives the page a real desktop layout viewport,
+        // including pages that choose their layout in JavaScript at load time.
+        await controller.loadHtmlString(_desktopFrame(target));
+      } else if (target != null) {
+        await controller.loadRequest(Uri.parse(target));
       } else {
-        await controller.loadRequest(
-          Uri.parse('http://127.0.0.1:${server.port}/'),
-        );
+        await controller.loadFile(path!);
       }
       if (!mounted) {
         await server?.close(force: true);
@@ -255,6 +272,37 @@ class _PreviewTabState extends State<PreviewTab> {
     await _load();
   }
 
+  String _desktopFrame(String url) => '''
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0b0d0c; overflow: hidden; }
+  #fit { position: absolute; top: 0; left: 0; width: 1280px; transform-origin: top left; }
+  iframe { width: 1280px; height: 100vh; border: 0; background: #fff; display: block; }
+</style>
+</head>
+<body>
+<div id="fit"><iframe src="$url"></iframe></div>
+<script>
+  function fit() {
+    var scale = window.innerWidth / 1280;
+    var frame = document.querySelector('iframe');
+    var box = document.getElementById('fit');
+    box.style.transform = 'scale(' + scale + ')';
+    var height = window.innerHeight / scale;
+    box.style.height = height + 'px';
+    frame.style.height = height + 'px';
+  }
+  fit();
+  window.addEventListener('resize', fit);
+</script>
+</body>
+</html>
+''';
+
   Future<void> _applyDesktopViewport(WebViewController controller) async {
     if (!mounted) return;
     try {
@@ -299,9 +347,9 @@ class _PreviewTabState extends State<PreviewTab> {
       _error = null;
     });
     try {
-      // Change the layout in place. Reloading after a user-agent swap made the
-      // desktop toggle visibly stutter and loaded the page twice.
-      await _applyDesktopViewport(controller);
+      // A real reload is required: responsive sites decide their layout from
+      // the user agent and the initial viewport width, not from a later resize.
+      await _load();
     } catch (error) {
       if (mounted) {
         setState(() => _error = 'Could not switch preview mode: $error');

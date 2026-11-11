@@ -314,6 +314,9 @@ class CodeEditor extends StatefulWidget {
     this.wrap = false,
     this.fontSize = 12.5,
     this.undoController,
+    this.findStarts = const [],
+    this.findEnds = const [],
+    this.activeFindIndex = 0,
   });
 
   final CodeController controller;
@@ -322,6 +325,12 @@ class CodeEditor extends StatefulWidget {
   final bool wrap;
   final double fontSize;
   final UndoHistoryController? undoController;
+
+  /// All find matches. They are painted behind the text so every occurrence is
+  /// visible at once; [activeFindIndex] is drawn in a stronger colour.
+  final List<int> findStarts;
+  final List<int> findEnds;
+  final int activeFindIndex;
 
   @override
   State<CodeEditor> createState() => _CodeEditorState();
@@ -343,6 +352,11 @@ class _CodeEditorState extends State<CodeEditor> {
 
   List<double> _lineHeights = const [];
   double _viewportWidth = 0;
+  List<Rect> _findMatches = const [];
+  List<Rect> _findActive = const [];
+  String _findCacheText = '';
+  double _findCacheWidth = -1;
+  int _findCacheSignature = -1;
 
   TextStyle get _style => Txt.code.copyWith(
         fontSize: _fontSize,
@@ -504,6 +518,63 @@ class _CodeEditorState extends State<CodeEditor> {
     return buffer.toString();
   }
 
+  void _layoutFindHighlights(String text, double width, TextScaler scaler) {
+    if (widget.findStarts.isEmpty) {
+      _findMatches = const [];
+      _findActive = const [];
+      _findCacheText = text;
+      _findCacheWidth = width;
+      _findCacheSignature = -1;
+      return;
+    }
+    final signature = Object.hash(
+      widget.findStarts.length,
+      widget.findEnds.length,
+      widget.activeFindIndex,
+      text.length,
+      scaler,
+    );
+    if (_findCacheText == text &&
+        _findCacheWidth == width &&
+        _findCacheSignature == signature) {
+      return;
+    }
+    _findCacheText = text;
+    _findCacheWidth = width;
+    _findCacheSignature = signature;
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: _style),
+      textDirection: TextDirection.ltr,
+      strutStyle: _strut,
+      textScaler: scaler,
+    )..layout(maxWidth: width);
+    final matches = <Rect>[];
+    final active = <Rect>[];
+    final count = math.min(widget.findStarts.length, 600);
+    for (var index = 0; index < count; index++) {
+      final start = widget.findStarts[index].clamp(0, text.length);
+      final end = widget.findEnds[index].clamp(start, text.length);
+      for (final box in painter.getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: end),
+      )) {
+        final rect = Rect.fromLTWH(
+          box.left + _left,
+          box.top + _top,
+          math.max(1, box.right - box.left),
+          box.bottom - box.top,
+        );
+        if (index == widget.activeFindIndex) {
+          active.add(rect);
+        } else {
+          matches.add(rect);
+        }
+      }
+    }
+    painter.dispose();
+    _findMatches = matches;
+    _findActive = active;
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -539,6 +610,11 @@ class _CodeEditorState extends State<CodeEditor> {
           ),
         );
 
+        _layoutFindHighlights(
+          text,
+          codeWidth,
+          MediaQuery.textScalerOf(context),
+        );
         final field = TextField(
           controller: widget.controller,
           undoController: widget.undoController,
@@ -561,6 +637,22 @@ class _CodeEditorState extends State<CodeEditor> {
             contentPadding: EdgeInsets.fromLTRB(_left, _top, _right, _bottom),
           ),
         );
+        final editor = Stack(
+          children: [
+            if (_findMatches.isNotEmpty || _findActive.isNotEmpty)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: _FindHighlightPainter(
+                      matches: _findMatches,
+                      active: _findActive,
+                    ),
+                  ),
+                ),
+              ),
+            field,
+          ],
+        );
 
         return Container(
           color: Pal.ghBg,
@@ -581,7 +673,7 @@ class _CodeEditorState extends State<CodeEditor> {
                     child: widget.wrap
                         ? SizedBox(
                             width: codeViewport + _left + _right,
-                            child: field,
+                            child: editor,
                           )
                         : Scrollbar(
                             controller: _horizontal,
@@ -592,7 +684,7 @@ class _CodeEditorState extends State<CodeEditor> {
                               scrollDirection: Axis.horizontal,
                               child: SizedBox(
                                 width: codeWidth + _left + _right,
-                                child: field,
+                                child: editor,
                               ),
                             ),
                           ),
@@ -605,4 +697,35 @@ class _CodeEditorState extends State<CodeEditor> {
       },
     );
   }
+}
+
+/// Paints find matches behind the editor text. The field itself stays the only
+/// text renderer, so selection, IME and scrolling keep working as usual.
+class _FindHighlightPainter extends CustomPainter {
+  const _FindHighlightPainter({required this.matches, required this.active});
+
+  final List<Rect> matches;
+  final List<Rect> active;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = Pal.amber.withOpacity(0.22);
+    for (final rect in matches) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(3)),
+        paint,
+      );
+    }
+    paint.color = Pal.ember.withOpacity(0.42);
+    for (final rect in active) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(3)),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _FindHighlightPainter oldDelegate) =>
+      oldDelegate.matches != matches || oldDelegate.active != active;
 }

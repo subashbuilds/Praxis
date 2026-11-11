@@ -108,6 +108,18 @@ ThemeData buildAppTheme({required bool dark}) {
       linearTrackColor: Pal.overlay,
       circularTrackColor: Pal.overlay,
     ),
+    // Android 14 predictive back: the outgoing screen follows the gesture
+    // instead of jumping once the pop completes.
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
+        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.windows: ZoomPageTransitionsBuilder(),
+        TargetPlatform.linux: ZoomPageTransitionsBuilder(),
+        TargetPlatform.fuchsia: ZoomPageTransitionsBuilder(),
+      },
+    ),
     scrollbarTheme: ScrollbarThemeData(
       thickness: const WidgetStatePropertyAll(3),
       radius: const Radius.circular(3),

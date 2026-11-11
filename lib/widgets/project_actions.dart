@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -423,6 +425,45 @@ class _DeploySheetState extends State<_DeploySheet> {
     super.dispose();
   }
 
+  void _remember(String platform, String value) {
+    if (value.isEmpty) return;
+    unawaited(_state.rememberDeployChoice(
+      _state.projectById(widget.project.id),
+      platform,
+      value,
+    ));
+  }
+
+  void _restorePagesChoice(List<CloudflarePagesProject> projects) {
+    final saved = _state.deployChoice(
+      _state.projectById(widget.project.id),
+      'cloudflare',
+    );
+    if (saved == null || saved.isEmpty) return;
+    for (final project in projects) {
+      if (project.name == saved) {
+        _project = project;
+        return;
+      }
+    }
+  }
+
+  void _restoreVercelChoice(List<VercelProject> projects) {
+    final saved = _state.deployChoice(
+      _state.projectById(widget.project.id),
+      'vercel',
+    );
+    if (saved == null || saved.isEmpty || saved == 'new') return;
+    for (final project in projects) {
+      if (project.id == saved) {
+        _vercelProject = project;
+        _createVercelProject = false;
+        _name.text = project.name;
+        return;
+      }
+    }
+  }
+
   Future<void> _load() async {
     final accounts = _state.integrations.ofKind(IntegrationKind.vercel);
     final cfAccounts = _state.integrations.ofKind(IntegrationKind.cloudflare);
@@ -457,6 +498,7 @@ class _DeploySheetState extends State<_DeploySheet> {
         _vercelProject = null;
         _createVercelProject = true;
         _vercelError = null;
+        _restoreVercelChoice(projects);
       });
     } catch (error) {
       if (mounted) setState(() => _vercelError = '$error');
@@ -513,6 +555,7 @@ class _DeploySheetState extends State<_DeploySheet> {
         _project = created;
         _cfError = null;
       });
+      _remember('cloudflare', created.name);
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -532,6 +575,7 @@ class _DeploySheetState extends State<_DeploySheet> {
         _projects = projects;
         _project = projects.isEmpty ? null : projects.first;
         _cfError = null;
+        _restorePagesChoice(projects);
       });
     } catch (error) {
       // Keep provider errors apart. A Cloudflare failure used to appear under
@@ -598,7 +642,15 @@ class _DeploySheetState extends State<_DeploySheet> {
               environment: _environment,
               branch: widget.project.branch,
             );
-      if (mounted) setState(() => _result = result);
+      if (mounted) {
+        setState(() => _result = result);
+        _remember(
+          _platform == IntegrationKind.cloudflare ? 'cloudflare' : 'vercel',
+          _platform == IntegrationKind.cloudflare
+              ? _project!.name
+              : (selectedVercel?.id ?? 'new'),
+        );
+      }
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -750,6 +802,9 @@ class _DeploySheetState extends State<_DeploySheet> {
                               _project = value;
                               _result = null;
                             });
+                            if (value != null) {
+                              _remember('cloudflare', value.name);
+                            }
                           },
                         ),
                       const SizedBox(height: 2),
@@ -768,23 +823,33 @@ class _DeploySheetState extends State<_DeploySheet> {
                           _VercelProjectDropdown(
                             projects: _vercelProjects,
                             value: _vercelProject,
-                            onChanged: (value) => setState(() {
-                              _vercelProject = value;
-                              _createVercelProject = value == null;
-                              if (value != null) {
-                                _name.text = value.name;
-                              }
-                              _result = null;
-                            }),
+                            onChanged: (value) {
+                              setState(() {
+                                _vercelProject = value;
+                                _createVercelProject = value == null;
+                                if (value != null) {
+                                  _name.text = value.name;
+                                }
+                                _result = null;
+                              });
+                              _remember('vercel', value?.id ?? 'new');
+                            },
                           ),
                         TextButton.icon(
                           onPressed: _loadingVercel
                               ? null
-                              : () => setState(() {
+                              : () {
+                                  setState(() {
                                     _createVercelProject =
                                         !_createVercelProject;
                                     _result = null;
-                                  }),
+                                  });
+                                  _remember(
+                                      'vercel',
+                                      _createVercelProject
+                                          ? 'new'
+                                          : (_vercelProject?.id ?? 'new'));
+                                },
                           icon: Icon(
                             _createVercelProject
                                 ? Icons.list_alt_rounded

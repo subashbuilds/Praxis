@@ -9,7 +9,6 @@ import '../core/task_checkpoint.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
-import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 class AgentTab extends StatefulWidget {
@@ -43,8 +42,6 @@ class _AgentTabState extends State<AgentTab> {
     super.didChangeDependencies();
     final state = AppScope.of(context);
     _state = state;
-    state.limitPrompt = _askLimit;
-    state.confirmPrompt = _askConfirm;
     if (!_draftRestored) {
       _draftRestored = true;
       final draft = state.promptDraftFor(widget.project.id);
@@ -56,12 +53,7 @@ class _AgentTabState extends State<AgentTab> {
 
   @override
   void dispose() {
-    final state = _state;
-    if (state != null) {
-      state.limitPrompt = null;
-      state.confirmPrompt = null;
-      state.setPromptDraft(widget.project.id, _composer.text);
-    }
+    _state?.setPromptDraft(widget.project.id, _composer.text);
     _composer.removeListener(_persistDraft);
     _composer.dispose();
     _scroll.removeListener(_onScroll);
@@ -82,32 +74,6 @@ class _AgentTabState extends State<AgentTab> {
       _stickToBottom = nearBottom;
       _showJumpToBottom = !nearBottom;
     });
-  }
-
-  Future<bool> _askLimit(String title, String body, String accept) async {
-    if (!mounted) return false;
-    return showPraxisConfirm(
-      context,
-      title: title,
-      body: body,
-      confirmLabel: accept,
-      cancelLabel: 'Stop',
-      icon: Icons.bolt_outlined,
-    );
-  }
-
-  Future<bool> _askConfirm(String title, String body, String accept) async {
-    if (!mounted) return false;
-    final pull = title.toLowerCase().contains('pull');
-    return showPraxisConfirm(
-      context,
-      title: title,
-      body: body,
-      confirmLabel: accept,
-      icon: pull ? Icons.cloud_download_outlined : Icons.cloud_upload_outlined,
-      note:
-          'The agent pauses here for your approval. Nothing leaves the device until you confirm.',
-    );
   }
 
   void _scrollToEnd({bool force = false}) {

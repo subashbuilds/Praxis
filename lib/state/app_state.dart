@@ -565,7 +565,21 @@ class AppState extends ChangeNotifier {
 
   /// The port a project's dev server was last seen on. Preview uses it to load
   /// the running app instead of the exported files.
-  int? devPortFor(Project project) => _devPorts[project.id];
+  int? devPortFor(Project project) =>
+      _devPorts[project.id] ?? (project.kind == ProjectKind.node ? 3000 : null);
+
+  /// The deploy target last chosen for this project and platform, so the
+  /// deploy sheet can preselect it instead of starting from scratch.
+  String? deployChoice(Project project, String platform) =>
+      store.read('praxis.deployChoice.${project.id}.$platform');
+
+  Future<void> rememberDeployChoice(
+    Project project,
+    String platform,
+    String value,
+  ) async {
+    await store.write('praxis.deployChoice.${project.id}.$platform', value);
+  }
 
   Future<void> setDevPort(Project project, int? port) async {
     final ports = _devPorts;
@@ -997,18 +1011,20 @@ class AppState extends ChangeNotifier {
           updatedAt: DateTime.now(),
         );
       }
+    } on AiCancelledException {
+      // Stop is not an error. The finally block keeps the streamed text.
     } on AiProviderException catch (error) {
       checkpointError = error.message;
-      _clearLive();
       thread.add(_entry(role: ChatRole.error, text: error.message, ok: false));
     } catch (error) {
-      checkpointError = '$error';
-      _clearLive();
-      thread.add(_entry(
-        role: ChatRole.error,
-        text: 'Unexpected error: $error',
-        ok: false,
-      ));
+      if (!_cancelled) {
+        checkpointError = '$error';
+        thread.add(_entry(
+          role: ChatRole.error,
+          text: 'Unexpected error: $error',
+          ok: false,
+        ));
+      }
     } finally {
       // Keep whatever the model had already streamed. Stopping cleared the live
       // reply and left the thread showing only the user's prompt.

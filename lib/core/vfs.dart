@@ -272,6 +272,19 @@ class ProjectFs {
           (entity.path.contains('/.') || name.startsWith('.'))) {
         continue;
       }
+      // Dependency and tool caches are not project content and are huge. They
+      // still appear as a folder, and opening one lists it normally, but
+      // recursive walks (search, diffs, deploy, export) skip their contents.
+      final generated = relative.startsWith('node_modules/') ||
+          relative.startsWith('.dart_tool/') ||
+          relative.startsWith('.gradle/') ||
+          relative.startsWith('.next/cache/');
+      if (generated) {
+        final rootSegment = relative.split('/').first;
+        final explicitlyOpened =
+            rel == rootSegment || rel.startsWith('$rootSegment/');
+        if (!explicitlyOpened) continue;
+      }
       final type = await FileSystemEntity.type(entity.path);
       entries.add(FileEntry(
         path: relative,
