@@ -17,6 +17,7 @@ import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
 import '../core/model_info.dart';
+import '../core/project_env.dart';
 import '../core/project_search.dart';
 import '../core/project_skills.dart';
 import '../core/project_templates.dart';
@@ -490,6 +491,15 @@ class AppState extends ChangeNotifier {
 
   Future<List<ProjectSkill>> installedSkillsFor(Project project) =>
       ProjectSkillsStore.load(fsFor(project));
+
+  Future<List<ProjectEnvEntry>> environmentFor(Project project) =>
+      ProjectEnvStore.load(fsFor(project));
+
+  Future<void> saveEnvironment(
+    Project project,
+    List<ProjectEnvEntry> entries,
+  ) =>
+      ProjectEnvStore.save(fsFor(project), entries);
 
   Future<void> deletePath(Project project, String path) async {
     await fsFor(project).delete(path);
@@ -977,6 +987,9 @@ class AppState extends ChangeNotifier {
       activeFile: _activeFiles[projectId],
       skills: skills,
       mode: agentMode,
+      onIntegrationQuery: (service, action, target) =>
+          _integrationStatus(project, service, action, target),
+      expectChanges: resumeFrom != null,
       fetchText: _fetchSkillText,
       fetchBytes: _fetchUrlBytes,
       onCommitAndPush: activeGithub == null
@@ -2649,6 +2662,16 @@ Continue the task. Do not repeat a write or destructive action that already comp
     String branch = 'main',
     void Function(DeployProgress)? onProgress,
   }) async {
+    final fs = fsFor(project);
+    if (await _needsWorker(fs)) {
+      return _deployWorker(
+        project,
+        account,
+        projectName: projectName,
+        environment: environment,
+        onProgress: onProgress,
+      );
+    }
     onProgress?.call(
         const DeployProgress('Preparing', detail: 'Collecting project files'));
     final files = await _cloudflareFiles(project, onProgress);
@@ -2684,6 +2707,296 @@ Continue the task. Do not repeat a write or destructive action that already comp
     return result;
   }
 
+  /// Reads deployment and workflow data from connected accounts for the
+  /// agent. Credentials never appear in the returned text.
+  Future<String> _integrationStatus(
+    Project project,
+    String service,
+    String action,
+    String target,
+  ) async {
+    try {
+      switch (service) {
+        case 'github':
+          final account = activeGithub;
+          if (account == null) {
+            return 'GitHub is not connected. Ask the user to connect it in '
+                'Integrations.';
+          }
+          final repo = (target.contains('/') ? target : project.repo)
+              .replaceAll('.git', '')
+              .trim();
+          if (repo.isEmpty) {
+            return 'No GitHub repository is linked to this project.';
+          }
+          final headers = {
+            'Authorization': 'Bearer ${account.token}',
+            'Accept': 'application/vnd.github+json',
+          };
+          if (action == 'logs') {
+            if (!RegExp(r'^\d+$').hasMatch(target)) {
+              return 'Pass the numeric GitHub Actions run id as target.';
+            }
+            final response = await httpClient.get(
+              Uri.parse(
+                  'https://api.github.com/repos/$repo/actions/runs/$target/jobs'),
+              headers: headers,
+            );
+            if (response.statusCode != 200) {
+              return 'GitHub returned ${response.statusCode} for run $target.';
+            }
+            final decoded = jsonDecode(response.body);
+            final jobs = decoded is Map ? decoded['jobs'] : null;
+            if (jobs is! List || jobs.isEmpty) {
+              return 'No jobs for run $target.';
+            }
+            return 'GitHub Actions jobs for $repo run $target:\n${jobs.map(
+              (job) {
+                final map = job as Map;
+                final steps = map['steps'];
+                final failed = steps is List
+                    ? steps
+                        .whereType<Map>()
+                        .where((step) =>
+                            step['conclusion'] == 'failure' ||
+                            step['conclusion'] == 'timed_out')
+                        .map((step) => step['name'])
+                        .join(', ')
+                    : '';
+                return '- ${map['name']} [${map['status']}/${map['conclusion']}]'
+                    '${failed.isEmpty ? '' : ' failed: $failed'}';
+              },
+            ).join('\n')}';
+          }
+          final response = await httpClient.get(
+            Uri.parse(
+                'https://api.github.com/repos/$repo/actions/runs?per_page=8'),
+            headers: headers,
+          );
+          if (response.statusCode != 200) {
+            return 'GitHub returned ${response.statusCode} for $repo.';
+          }
+          final decoded = jsonDecode(response.body);
+          final runs = decoded is Map ? decoded['workflow_runs'] : null;
+          if (runs is! List || runs.isEmpty) {
+            return 'No workflow runs found for $repo.';
+          }
+          return 'GitHub Actions for $repo:\n${runs.whereType<Map>().take(8).map((run) => '- #${run['id']} ${run['name']} '
+              '[${run['status']}/${run['conclusion']}] '
+              'branch ${run['head_branch']} ${run['html_url'] ?? ''}').join('\n')}';
+        case 'cloudflare':
+          final account = integrations.activeFor(IntegrationKind.cloudflare);
+          if (account == null) {
+            return 'Cloudflare is not connected. Ask the user to connect it in '
+                'Integrations.';
+          }
+          final accountId = account.accountId.trim();
+          if (accountId.isEmpty) {
+            return 'The Cloudflare account has no account id configured.';
+          }
+          final headers = {
+            'Authorization': 'Bearer ${account.token}',
+            'Content-Type': 'application/json',
+          };
+          if (action == 'deployments' && target.isNotEmpty) {
+            final response = await httpClient.get(
+              Uri.parse(
+                  'https://api.cloudflare.com/client/v4/accounts/$accountId/pages/projects/${Uri.encodeComponent(target)}/deployments?per_page=8'),
+              headers: headers,
+            );
+            if (response.statusCode != 200) {
+              return 'Cloudflare returned ${response.statusCode} for $target.';
+            }
+            final decoded = jsonDecode(response.body);
+            final deployments = decoded is Map ? decoded['result'] : null;
+            if (deployments is! List || deployments.isEmpty) {
+              return 'No deployments found for $target.';
+            }
+            return 'Cloudflare deployments for $target:\n${deployments.whereType<Map>().take(8).map((item) {
+              final stage = item['latest_stage'];
+              final stageText = stage is Map
+                  ? '${stage['name']}/${stage['status']}'
+                  : '${item['environment'] ?? ''}';
+              return '- ${item['created_on'] ?? ''} $stageText '
+                  '${item['url'] ?? ''}';
+            }).join('\n')}';
+          }
+          final response = await httpClient.get(
+            Uri.parse(
+                'https://api.cloudflare.com/client/v4/accounts/$accountId/pages/projects?per_page=10'),
+            headers: headers,
+          );
+          if (response.statusCode != 200) {
+            return 'Cloudflare returned ${response.statusCode}.';
+          }
+          final decoded = jsonDecode(response.body);
+          final projects = decoded is Map ? decoded['result'] : null;
+          if (projects is! List || projects.isEmpty) {
+            return 'No Cloudflare Pages projects found.';
+          }
+          return 'Cloudflare Pages projects:\n${projects.whereType<Map>().map((item) => '- ${item['name']} '
+              '(${item['subdomain'] ?? item['domains'] ?? ''})').join('\n')}';
+        case 'vercel':
+          final account = activeVercel;
+          if (account == null) {
+            return 'Vercel is not connected. Ask the user to connect it in '
+                'Integrations.';
+          }
+          final response = await httpClient.get(
+            Uri.parse(
+                'https://api.vercel.com/v6/deployments?limit=8${target.isEmpty ? '' : '&projectId=${Uri.encodeQueryComponent(target)}'}'),
+            headers: {'Authorization': 'Bearer ${account.token}'},
+          );
+          if (response.statusCode != 200) {
+            return 'Vercel returned ${response.statusCode}.';
+          }
+          final decoded = jsonDecode(response.body);
+          final deployments = decoded is Map ? decoded['deployments'] : null;
+          if (deployments is! List || deployments.isEmpty) {
+            return 'No Vercel deployments found.';
+          }
+          return 'Vercel deployments:\n${deployments.whereType<Map>().take(8).map((item) => '- ${item['name']} [${item['state']}] '
+              'https://${item['url']}').join('\n')}';
+        default:
+          return 'Unknown integration service: $service.';
+      }
+    } catch (error) {
+      return 'Integration request failed: $error';
+    }
+  }
+
+  /// Pages serves static output. Server code (API routes, Express, a Worker
+  /// entry) has to go through Workers, where its runtime actually exists.
+  Future<bool> _needsWorker(ProjectFs fs) async {
+    final entries = await fs.list(includeHidden: true);
+    final paths = entries
+        .map((entry) => entry.path.replaceAll('\\', '/'))
+        .where((path) => !path.startsWith('node_modules/'))
+        .toList();
+    if (paths.any((path) => RegExp(
+          r'^wrangler\.(toml|jsonc?)$',
+          caseSensitive: false,
+        ).hasMatch(path))) {
+      return true;
+    }
+    // Pages Functions are already a supported Pages runtime.
+    if (paths.any(
+      (path) => path == '_worker.js' || path.startsWith('functions/'),
+    )) {
+      return false;
+    }
+    if (paths.any((path) => RegExp(
+          r'(^|/)(server|worker|backend)\.(js|ts|mjs|cjs)$',
+          caseSensitive: false,
+        ).hasMatch(path))) {
+      return true;
+    }
+    if (paths.any((path) => RegExp(
+          r'^(src/|pages/|src/pages/)?api/.*\.(js|ts|mjs|cjs|jsx|tsx)$|'
+          r'^(src/)?app/api/.*\.(js|ts|mjs|cjs|jsx|tsx)$',
+          caseSensitive: false,
+        ).hasMatch(path))) {
+      return true;
+    }
+    if (paths.contains('package.json')) {
+      try {
+        final package = jsonDecode(await fs.read('package.json'));
+        final dependencies = package is Map ? package['dependencies'] : null;
+        final devDependencies =
+            package is Map ? package['devDependencies'] : null;
+        final deps = <String>{
+          if (dependencies is Map) ...dependencies.keys.cast<String>(),
+          if (devDependencies is Map) ...devDependencies.keys.cast<String>(),
+        };
+        const serverDeps = {
+          'express',
+          'koa',
+          'fastify',
+          '@nestjs/core',
+          'hono',
+          'nuxt',
+        };
+        if (deps.any(serverDeps.contains)) return true;
+      } catch (_) {
+        // An unreadable package file is handled by the build path.
+      }
+    }
+    return false;
+  }
+
+  Future<IntegrationResult> _deployWorker(
+    Project project,
+    IntegrationAccount account, {
+    required String projectName,
+    required String environment,
+    void Function(DeployProgress)? onProgress,
+  }) async {
+    final fs = fsFor(project);
+    final entries = await fs.list(includeHidden: true);
+    final hasWrangler = entries.any((entry) => RegExp(
+          r'^wrangler\.(toml|jsonc?)$',
+          caseSensitive: false,
+        ).hasMatch(entry.path));
+    if (!hasWrangler) {
+      throw IntegrationException(
+          'This project contains server code that Pages cannot run. Add a '
+          'wrangler.toml (or Wrangler JSON config) for the Worker entry so it '
+          'can be deployed to Cloudflare Workers.');
+    }
+    var accountId = account.accountId.trim();
+    if (accountId.isEmpty) {
+      accountId = await CloudflarePagesClient(
+        account.token,
+        client: httpClient,
+      ).accountIdentifier();
+    }
+    final shell = systemShellFor(project);
+    final shellEnv = {
+      ...ProjectEnvStore.values(await environmentFor(project)),
+      'CLOUDFLARE_API_TOKEN': account.token,
+      'CLOUDFLARE_ACCOUNT_ID': accountId,
+    };
+    if (await fs.exists('package.json') && !await fs.exists('node_modules')) {
+      onProgress?.call(const DeployProgress(
+        'Building',
+        detail: 'Installing dependencies',
+      ));
+      final install = await shell.run(
+        'npm install --no-audit --no-fund',
+        environment: shellEnv,
+        timeout: const Duration(minutes: 8),
+      );
+      if (install.exitCode != 0) {
+        throw IntegrationException(
+            'npm install failed (exit ${install.exitCode}). '
+            '${_tail(install.output)}');
+      }
+    }
+    onProgress?.call(DeployProgress(
+      'Deploying',
+      detail: 'Cloudflare Workers ($environment)',
+    ));
+    final result = await shell.run(
+      'npx --yes wrangler deploy',
+      environment: shellEnv,
+      timeout: const Duration(minutes: 15),
+    );
+    if (result.exitCode != 0) {
+      throw IntegrationException(
+          'Worker deploy failed (exit ${result.exitCode}). '
+          '${_tail(result.output)}');
+    }
+    final url = RegExp(r'https://[a-zA-Z0-9._-]+\.workers\.dev')
+        .firstMatch(result.output)
+        ?.group(0);
+    return IntegrationResult(
+      message: url == null
+          ? 'Deployed $projectName to Cloudflare Workers.'
+          : 'Deployed $projectName to Cloudflare Workers at $url.',
+      url: url,
+    );
+  }
+
   /// Pages Direct Upload serves the files it receives; it does not build a
   /// Node project. Build first and upload the static output, otherwise a
   /// Next/React source tree is published and every URL returns 404.
@@ -2715,12 +3028,14 @@ Continue the task. Do not repeat a write or destructive action that already comp
     }
 
     final shell = systemShellFor(project);
+    final environment = ProjectEnvStore.values(await environmentFor(project));
     onProgress?.call(const DeployProgress(
       'Building',
       detail: 'Installing dependencies',
     ));
     final install = await shell.run(
       'npm install --no-audit --no-fund',
+      environment: environment,
       timeout: const Duration(minutes: 8),
     );
     if (install.exitCode != 0) {
@@ -2733,6 +3048,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
     ));
     final build = await shell.run(
       'npm run build',
+      environment: environment,
       timeout: const Duration(minutes: 12),
     );
     if (build.exitCode != 0) {

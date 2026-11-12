@@ -242,12 +242,14 @@ class _FilesTabState extends State<FilesTab> {
     await state.createFile(widget.project, name);
     if (!mounted) return;
     _refresh();
-    await navigator.push(
+    final changed = await navigator.push<bool>(
       MaterialPageRoute(
         builder: (_) => EditorScreen(project: widget.project, path: name),
       ),
     );
-    if (mounted) _refresh();
+    // Only rescan the tree when the editor actually wrote a file. Closing an
+    // untouched file used to walk the whole project again.
+    if (mounted && changed == true) _refresh();
   }
 
   Future<void> _createNewFolder() async {
@@ -652,7 +654,7 @@ class _FilesTabState extends State<FilesTab> {
       }
       return;
     }
-    await Navigator.of(context).push(
+    final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => EditorScreen(
           project: widget.project,
@@ -662,7 +664,7 @@ class _FilesTabState extends State<FilesTab> {
         ),
       ),
     );
-    if (mounted) _refresh();
+    if (mounted && changed == true) _refresh();
   }
 
   Future<void> _delete(FileEntry entry) async {

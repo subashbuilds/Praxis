@@ -828,6 +828,9 @@ class CloudflarePagesClient {
 
   Future<String> login() async => (await _account()).$2;
 
+  /// Resolves the account id when the saved account did not record one.
+  Future<String> accountIdentifier() async => (await _account()).$1;
+
   Future<List<CloudflarePagesProject>> projects() async {
     final (accountId, _) = await _account();
     final projects = <String, CloudflarePagesProject>{};

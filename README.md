@@ -20,10 +20,12 @@ Grab the latest signed APK from [GitHub Releases](https://github.com/subashbuild
 - **Real projects, real files.** A project is a normal folder in the app's documents directory. Clone a Git repository or start from a template.
 - **An agent that edits code.** Bring your own OpenAI-compatible provider and API key. The agent can read, write, search, run commands, download assets, and commit to GitHub. Stop a run at any time with the stop button.
 - **A file-backed editor.** Syntax highlighting, line numbers, word wrap, image and SVG previews, Markdown previews, binary-safe storage, and file-type logos in the explorer and editor header.
-- **A device shell.** Run the tools installed on the phone through `/system/bin/sh`, and see the real working directory and exit code.
+- **A device shell with project tools.** Run the tools installed on the phone through `/system/bin/sh`, see the real working directory and exit code, and open **Tools** to manage environment values and project skills without leaving the shell.
+- **Environment values and secrets.** Add build and runtime variables under Tools → Environment. They are passed to npm scripts, shell commands and deploys. Secret values stay on the device; the agent sees the name and can use it, but never sees the value.
+- **Approvals only for destructive work.** Edits and ordinary commands run without interruption. Deleting or removing files requires approval, and the dialog keeps Cancel and Approve visible above a scrollable list of what will be removed.
 - **A real Alpine environment.** Settings → **Linux Environment** prepares Alpine 3.21.7 under proot, repairs incomplete rootfs links, installs Node.js, Python, PHP, or Go with `apk`, and provides an interactive shell with the project mounted at `/workspace`. The shell header reports guest CPU and RAM, and tapping the Alpine pill opens this page.
 - **A live preview.** Static web projects, Markdown, images and SVGs can be inspected without leaving the app.
-- **An Integrations page.** Connect GitHub, Vercel, Cloudflare Pages, Expo (EAS), Tavily, and Supabase. GitHub drives commit, push, pull, branch, and pull-request actions; Vercel drives static deploys. Every token stays on the device and can be removed from the page.
+- **An Integrations page.** Connect GitHub, Vercel, Cloudflare, Expo (EAS), Tavily, and Supabase. GitHub drives commit, push, pull, branch, and pull-request actions; Vercel drives static deploys; Cloudflare deploys static sites to Pages and server projects to Workers. The agent can read connected workflow runs and deployment status with the `integration_status` tool, including failing job names, instead of asking for pasted logs. Every token stays on the device and can be removed from the page.
 - **Skills, with discovery.** Create or edit reusable instructions, import `.md` and `.txt` files, or discover public `SKILL.md` files through GitHub's free API. Global skills apply everywhere; project skills under `.praxis/skills/<name>/SKILL.md` still load for that project.
 - **Import without losing bytes.** Add files or merge a folder into an existing project. Android uses the system folder picker, copies the selected tree into app-private cache, then imports every child recursively. Existing folders merge, collisions are resolved one by one, and the imported tree expands immediately.
 - **Logs you can inspect and export.** Review model requests by task, including round counts, token usage when the provider reports it, and repeated calls. Export the aggregate as privacy-preserving JSON.
@@ -57,7 +59,7 @@ Open **Settings → Integrations** to connect services. The page is also availab
 | --- | --- |
 | GitHub | Repository sync, branches, commits, pushes, and pull requests |
 | Vercel | Static deployments |
-| Cloudflare Pages | API token storage for Cloudflare Pages work |
+| Cloudflare | Pages deployments for static output and Workers deployments for server code |
 | Expo (EAS) | Access-token storage for EAS builds |
 | Web Search (Tavily) | API-key storage for web search |
 | Supabase | Access-token storage and Management API check |
@@ -93,7 +95,24 @@ For example:
 flutter run --dart-define=PRAXIS_PREFETCH=false
 ```
 
-`run_commands` and `apply_patch` use the approval dialog. A `run_commands` approval lists every command before anything runs, and a missing approval UI refuses the action instead of bypassing it.
+Ordinary edits and commands run without approval. `run_commands` and `apply_patch` ask only when they remove files or folders: a command batch that contains `rm`, `rmdir`, `unlink`, `git clean` or `git reset --hard`, or a patch that deletes a file. The approval dialog lists every command in a scrolling body with Cancel and Approve pinned below it; tapping outside the dialog cancels. A missing approval UI refuses a destructive action instead of bypassing it.
+
+Resumed tasks keep change expectations, so replying **Continue** after an allowance limit does not end after a single read.
+
+## Tools, environment and deploys
+
+Open the **Tools** button in the shell header for two tabs:
+
+- **Environment** — add, edit and remove variables. Values are available to `npm run build`, shell commands run by the agent, and deploys. Mark a value as a secret to keep it out of the agent prompt; the agent still sees the variable name so it can use it.
+- **Project skills** — the same installed project skills that load from `.praxis/skills/`.
+
+Environment entries are stored at `.praxis/environment.json` inside the project. Secret values never enter the conversation. A large text file is guarded by a preview and an **Open anyway** action, so tapping a multi-megabyte file does not freeze the editor.
+
+The Cloudflare deploy path chooses the runtime from the project itself:
+
+- A static frontend is built if needed and uploaded to **Cloudflare Pages**.
+- Server code — API routes under `api/`, `pages/api/`, `app/api/`, a `server.*` entry, Express/Koa/Fastify/Nest/Hono, or an explicit `wrangler.toml` — deploys through **Workers** with `wrangler deploy`.
+- A Worker deploy needs a Wrangler config and a Cloudflare account ID. Without either, the deploy stops with that instruction instead of uploading a source tree that would return 404.
 
 ## Logs and export
 
@@ -167,6 +186,7 @@ Praxis is intentionally small and inspectable. The important boundaries are:
 - Project files, chats, API keys, provider settings, and the optional Alpine rootfs are stored on the device.
 - When you run the agent, the prompt and relevant project context — including prefetched excerpts and tool results — are sent to the provider you configured. Prefetch excludes `.gitignore` paths, `.env*`, credential/key files, and known generated directories.
 - API keys are sent only to the provider endpoint you configure. Integration tokens are sent only to the service they belong to. Cloudflare, Supabase, GitHub, and Vercel tokens are checked against their APIs when saved; Expo and Tavily tokens are stored without a remote check.
+- Project environment values stay in `.praxis/environment.json`. Non-secret values are included in the agent prompt; secret values are replaced by the variable name only. Values are passed to local build commands and deploys, never written into conversation messages or tool results.
 - The agent can read and write files only inside the current project. The device shell is rooted at the project folder; the Alpine environment mounts it at `/workspace`.
 - Binary assets are copied byte-for-byte and are never decoded as UTF-8.
 - Do not put credentials in project files. Use the in-app settings and GitHub Actions secrets.

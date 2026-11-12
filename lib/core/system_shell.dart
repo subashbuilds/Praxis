@@ -51,6 +51,7 @@ class SystemShell {
     String raw, {
     void Function(String chunk)? onStdout,
     void Function(String chunk)? onStderr,
+    Map<String, String> environment = const {},
     Duration timeout = const Duration(seconds: 120),
   }) async {
     await fs.ensureRoot();
@@ -94,6 +95,7 @@ class SystemShell {
         projectRoot: fs.rootPath,
         cwd: cwd,
         timeout: timeout,
+        environment: environment,
         onStdout: onStdout,
         onStderr: onStderr,
       );
@@ -132,6 +134,7 @@ class SystemShell {
           'LANG': 'C.UTF-8',
           'TMPDIR': '${fs.rootPath}/.praxis/tmp',
           'PATH': path,
+          ...environment,
         },
         includeParentEnvironment: true,
       );

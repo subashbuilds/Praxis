@@ -3,9 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../core/file_types.dart';
 import '../core/linux_environment.dart';
-import '../core/project_skills.dart';
 import '../core/shell.dart';
 import '../core/system_shell.dart';
 import '../models.dart';
@@ -13,6 +11,7 @@ import '../screens/linux_environment_screen.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/ui.dart';
+import 'tools_sheet.dart';
 
 class TerminalTab extends StatefulWidget {
   const TerminalTab({super.key, required this.project});
@@ -31,11 +30,9 @@ class _TerminalTabState extends State<TerminalTab> {
   final _pendingErr = StringBuffer();
   final _lines = <ShellLine>[];
   final _history = <String>[];
-  final _skills = <ProjectSkill>[];
   bool _running = false;
   bool _ctrlArmed = false;
   bool _started = false;
-  bool _loadedSkills = false;
   int _historyIndex = 0;
 
   @override
@@ -47,10 +44,6 @@ class _TerminalTabState extends State<TerminalTab> {
       final linux = state.linux;
       _lines.addAll(_welcome(linux));
       if (linux != null) unawaited(linux.prepare());
-    }
-    if (!_loadedSkills) {
-      _loadedSkills = true;
-      unawaited(_refreshSkills());
     }
     _input.removeListener(_onCtrlInput);
     _input.addListener(_onCtrlInput);
@@ -87,97 +80,6 @@ class _TerminalTabState extends State<TerminalTab> {
       ),
       ShellLine('', ShellTone.output),
     ];
-  }
-
-  Future<void> _refreshSkills() async {
-    final skills =
-        await AppScope.of(context).installedSkillsFor(widget.project);
-    if (mounted) {
-      setState(() {
-        _skills
-          ..clear()
-          ..addAll(skills);
-      });
-    }
-  }
-
-  Future<void> _showSkills() async {
-    await _refreshSkills();
-    if (!mounted) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Pal.surface,
-      builder: (sheetContext) => SafeArea(
-        child: DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.55,
-          minChildSize: 0.3,
-          maxChildSize: 0.9,
-          builder: (_, scrollController) => ListView(
-            controller: scrollController,
-            padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x5),
-            children: [
-              const Center(child: SheetHandle()),
-              const SizedBox(height: Sp.x3),
-              Text('Project skills',
-                  style: Txt.headline.copyWith(fontSize: 21)),
-              const SizedBox(height: 4),
-              Text(
-                'Installed in .praxis/skills. Every folder holds a SKILL.md and '
-                'loads into the next agent turn for this project.',
-                style: Txt.bodySoft.copyWith(height: 1.5),
-              ),
-              const SizedBox(height: Sp.x3),
-              if (_skills.isEmpty)
-                Text(
-                  'No skills yet. Ask the agent to install one.',
-                  style: Txt.meta.copyWith(height: 1.5),
-                )
-              else
-                for (final skill in _skills)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.all(Sp.x3),
-                    decoration: BoxDecoration(
-                      color: Pal.raised,
-                      borderRadius: Rd.sm,
-                      border: Border.all(color: Pal.line),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(Icons.extension_outlined,
-                                size: 16, color: Pal.mint),
-                            const SizedBox(width: 7),
-                            Expanded(
-                              child: Text(skill.name,
-                                  style: Txt.label.copyWith(fontSize: 12)),
-                            ),
-                            Text(humanFileSize(skill.size),
-                                style: Txt.meta.copyWith(fontSize: 9)),
-                          ],
-                        ),
-                        if (skill.description.isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            skill.description,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: Txt.meta.copyWith(height: 1.4),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   @override
@@ -530,7 +432,13 @@ class _TerminalTabState extends State<TerminalTab> {
                     ),
                   ),
                 GestureDetector(
-                  onTap: _showSkills,
+                  onTap: () => showModalBottomSheet<void>(
+                    context: context,
+                    isScrollControlled: true,
+                    useSafeArea: true,
+                    backgroundColor: Pal.surface,
+                    builder: (_) => ToolsSheet(project: widget.project),
+                  ),
                   behavior: HitTestBehavior.opaque,
                   child: Container(
                     margin: const EdgeInsets.only(right: 4),
@@ -543,11 +451,10 @@ class _TerminalTabState extends State<TerminalTab> {
                     ),
                     child: Row(
                       children: [
-                        Icon(Icons.extension_outlined,
+                        Icon(Icons.handyman_outlined,
                             size: 12, color: Pal.amber),
                         const SizedBox(width: 4),
-                        Text('${_skills.length}',
-                            style: Txt.meta.copyWith(fontSize: 9.5)),
+                        Text('Tools', style: Txt.meta.copyWith(fontSize: 9.5)),
                       ],
                     ),
                   ),

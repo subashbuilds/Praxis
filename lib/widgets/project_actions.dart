@@ -621,9 +621,8 @@ class _DeploySheetState extends State<_DeploySheet> {
       return;
     }
     if (_platform == IntegrationKind.vercel && _account == null) return;
-    if (_platform == IntegrationKind.cloudflare &&
-        (_cfAccount == null || _project == null)) {
-      setState(() => _error = 'Choose or create a Pages project first.');
+    if (_platform == IntegrationKind.cloudflare && _cfAccount == null) {
+      setState(() => _error = 'Choose a Cloudflare account first.');
       return;
     }
     FocusScope.of(context).unfocus();
@@ -646,8 +645,8 @@ class _DeploySheetState extends State<_DeploySheet> {
           : await _state.deployToCloudflare(
               _state.projectById(widget.project.id),
               _cfAccount!,
-              projectName: _project!.name,
-              projectUrl: _project!.url,
+              projectName: _project?.name ?? widget.project.name,
+              projectUrl: _project?.url ?? '',
               environment: _environment,
               branch: widget.project.branch,
               onProgress: _onDeployProgress,
@@ -657,7 +656,7 @@ class _DeploySheetState extends State<_DeploySheet> {
         _remember(
           _platform == IntegrationKind.cloudflare ? 'cloudflare' : 'vercel',
           _platform == IntegrationKind.cloudflare
-              ? _project!.name
+              ? (_project?.name ?? widget.project.name)
               : (selectedVercel?.id ?? 'new'),
         );
       }
@@ -796,11 +795,17 @@ class _DeploySheetState extends State<_DeploySheet> {
                       value: '$_fileCount project files',
                     ),
                     if (_platform == IntegrationKind.cloudflare) ...[
-                      const _Label('PAGES PROJECT'),
+                      Text(
+                        'Projects with server code deploy to Workers '
+                        'automatically. Choose a Pages project only for a static '
+                        'site.',
+                        style: Txt.meta.copyWith(fontSize: 10, height: 1.4),
+                      ),
+                      const _Label('PAGES PROJECT (STATIC SITES)'),
                       if (_projects.isEmpty)
                         Text(
-                          'No Pages projects found. Create one here or in the '
-                          'Cloudflare dashboard.',
+                          'No Pages projects found. A server project can still '
+                          'deploy to Workers.',
                           style: Txt.meta.copyWith(fontSize: 10),
                         )
                       else

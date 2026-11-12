@@ -205,8 +205,7 @@ ignored/
     expect(toolMessages[1]['content'], contains('beta'));
   });
 
-  test('compound command approval lists every command before running',
-      () async {
+  test('destructive compound command approval lists every command', () async {
     var calls = 0;
     String? approvalBody;
     final client = MockClient((request) async {
@@ -220,7 +219,11 @@ ignored/
                 'content': '',
                 'tool_calls': [
                   call('commands', 'run_commands', {
-                    'commands': ["printf 'one'", "printf 'two'"],
+                    'commands': [
+                      'rm -rf build/old',
+                      "printf 'one'",
+                      "printf 'two'",
+                    ],
                   }),
                 ],
               },
@@ -252,6 +255,7 @@ ignored/
     ).run(history: const [], prompt: 'run the checks');
 
     expect(approvalBody, isNotNull);
+    expect(approvalBody, contains('rm -rf build/old'));
     expect(approvalBody, contains("printf 'one'"));
     expect(approvalBody, contains("printf 'two'"));
     final tool =

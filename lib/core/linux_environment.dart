@@ -511,6 +511,7 @@ class LinuxEnvironment extends ChangeNotifier {
     required String projectRoot,
     String cwd = '',
     Duration timeout = const Duration(seconds: 180),
+    Map<String, String> environment = const {},
     void Function(String chunk)? onStdout,
     void Function(String chunk)? onStderr,
   }) async {
@@ -563,6 +564,7 @@ class LinuxEnvironment extends ChangeNotifier {
           'TMPDIR': '/tmp',
           'PROOT_TMP_DIR': hostTmp.path,
           if (prootLoaderPath.isNotEmpty) 'PROOT_LOADER': prootLoaderPath,
+          ...environment,
         },
         includeParentEnvironment: true,
       );

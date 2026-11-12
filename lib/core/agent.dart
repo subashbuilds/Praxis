@@ -8,6 +8,7 @@ import 'diff.dart';
 import 'file_types.dart';
 import 'patch.dart';
 import 'phase1_flags.dart';
+import 'project_env.dart';
 import 'project_skills.dart';
 import 'round_log.dart';
 import 'sensitive_paths.dart';
@@ -104,6 +105,12 @@ typedef AgentToolApproval = Future<bool> Function(
   String title,
   String body,
   String confirmLabel,
+);
+
+typedef AgentIntegrationQuery = Future<String> Function(
+  String service,
+  String action,
+  String target,
 );
 
 const _baseAgentTools = <AiToolSpec>[
@@ -424,6 +431,8 @@ class Agent {
     this.activeFile,
     this.linuxShell = false,
     this.toolApproval,
+    this.onIntegrationQuery,
+    this.expectChanges = false,
     this.repeatLimit = Phase1Flags.repeatLimit,
     this.maxRounds = 40,
     this.contextLimit = 128000,
@@ -467,6 +476,13 @@ class Agent {
   final String? activeFile;
   final bool linuxShell;
   final AgentToolApproval? toolApproval;
+
+  /// Reads connected deployment and CI data without exposing credentials.
+  final AgentIntegrationQuery? onIntegrationQuery;
+
+  /// A resumed task is continuing work that already asked for edits, even
+  /// when the visible continuation prompt is just "Continue".
+  final bool expectChanges;
   final int repeatLimit;
   final int maxRounds;
 
@@ -501,9 +517,37 @@ class Agent {
         if (fetchBytes != null) _downloadTool,
         if (onCommitAndPush != null) _gitPushTool,
         if (onPullLatest != null) _gitPullTool,
+        if (onIntegrationQuery != null) _integrationTool,
       ]
           .where((tool) => !_planMode || !_planBannedTools.contains(tool.name))
           .toList();
+
+  static const _integrationTool = AiToolSpec(
+    name: 'integration_status',
+    description:
+        'Read connected GitHub Actions, Cloudflare Pages/Workers or Vercel '
+        'deployments, including status, URLs and failing job names. Use this '
+        'instead of asking the user to paste logs. Never prints access tokens.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'service': {
+          'type': 'string',
+          'enum': ['github', 'cloudflare', 'vercel'],
+        },
+        'action': {
+          'type': 'string',
+          'enum': ['workflows', 'deployments', 'logs'],
+        },
+        'target': {
+          'type': 'string',
+          'description':
+              'Optional owner/repo, Cloudflare project or Vercel deployment id.',
+        },
+      },
+      'required': ['service', 'action'],
+    },
+  );
 
   static const _downloadTool = AiToolSpec(
     name: 'download_file',
@@ -670,7 +714,10 @@ class Agent {
           // Plan mode is expected to end without a mutation. Treating it like a
           // build request sent a "you have not changed a file" nudge that made
           // the model try to write, fail, and stop without ever showing a plan.
-          final wantsChange = !_planMode && _looksLikeChangeRequest(prompt);
+          final wantsChange = !_planMode &&
+              (expectChanges ||
+                  _looksLikeChangeRequest(prompt) ||
+                  _looksLikeContinueRequest(prompt));
 
           // A reasoning model can spend the entire output budget before it emits
           // its tool call. That is not a completed answer, so never print the
@@ -1038,6 +1085,7 @@ class Agent {
     required bool firstTurn,
   }) async {
     final files = await _fileTree();
+    final projectEnv = await ProjectEnvStore.load(fs);
     final installed = await _installedSkills();
     final activeSkills = [
       ...skills.where(
@@ -1138,6 +1186,7 @@ Context policy (the host enforces this automatically):
   messages verbatim. Tool calls and their results always stay paired.
 - Never compact while a tool call or approval is pending.
 ${skillIndex.isEmpty ? '' : '\nSkills available (use /skill-name to invoke one explicitly):\n$skillIndex'}
+${projectEnv.isEmpty ? '' : '\nProject environment (values are available to build and shell commands; secret values are hidden from you):\n${projectEnv.map((entry) => entry.secret ? '- ${entry.name} (secret)' : '- ${entry.name}=${entry.value}').join('\n')}\nNever ask the user to paste a secret; use the variable name in commands.'}
 ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillText'}
 ''';
   }
@@ -1263,11 +1312,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         case 'apply_patch':
           final patchText = call.arguments['patch'] as String? ?? '';
           final approval = toolApproval;
-          if (approval != null) {
+          if (approval != null && _patchRemovesFiles(patchText)) {
             final allowed = await approval(
-              'Apply this patch?',
+              'Delete files in this patch?',
               _patchSummary(patchText),
-              'Apply patch',
+              'Delete',
             );
             if (!allowed) {
               return const _ToolOutcome('Patch cancelled by the user.');
@@ -1303,6 +1352,20 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
           return await _installSkill(call);
         case 'download_file':
           return await _downloadFile(call);
+        case 'integration_status':
+          final query = onIntegrationQuery;
+          if (query == null) {
+            return const _ToolOutcome(
+                'No GitHub, Cloudflare or Vercel account is connected.');
+          }
+          final service = (call.arguments['service'] as String? ?? '').trim();
+          final action = (call.arguments['action'] as String? ?? '').trim();
+          final target = (call.arguments['target'] as String? ?? '').trim();
+          if (service.isEmpty || action.isEmpty) {
+            return const _ToolOutcome(
+                'Error: service and action are required.');
+          }
+          return _ToolOutcome(await query(service, action, target));
         case 'run_command':
           final command = (call.arguments['command'] as String? ?? '').trim();
           if (command.isEmpty) {
@@ -1312,6 +1375,17 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
             return const _ToolOutcome(
                 'Error: Plan mode only allows read-only commands. This command '
                 'can modify files or state.');
+          }
+          final approval = toolApproval;
+          if (approval != null && _commandRemovesFiles(command)) {
+            final allowed = await approval(
+              'Remove files with this command?',
+              command,
+              'Run command',
+            );
+            if (!allowed) {
+              return const _ToolOutcome('Command cancelled by the user.');
+            }
           }
           return _runSingleCommand(command);
         case 'run_commands':
@@ -1405,6 +1479,46 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     return _execute(call);
   }
 
+  bool _looksLikeContinueRequest(String prompt) => RegExp(
+        r'^\s*(continue|resume|keep going|go on)\b',
+        caseSensitive: false,
+      ).hasMatch(prompt.trim());
+
+  /// Only patches that delete a file need permission. Ordinary edits and
+  /// writes proceed without an approval round.
+  bool _patchRemovesFiles(String patch) =>
+      RegExp(
+        r'^\*\*\* (Delete File|Remove File):',
+        multiLine: true,
+      ).hasMatch(patch) ||
+      RegExp(r'^\+\+\+ /dev/null', multiLine: true).hasMatch(patch);
+
+  /// A batch asks once when it removes anything. Creating files, editing or
+  /// running a build does not interrupt the task.
+  bool _commandRemovesFiles(String raw) {
+    final command = raw.toLowerCase().trim();
+    const deletions = [
+      'rm ',
+      'rm -',
+      'rmdir ',
+      'unlink ',
+      'shred ',
+      'git clean',
+      'git rm',
+      'git reset --hard',
+      '-delete',
+    ];
+    for (final prefix in const [';', '&&', '||', '|', '\n']) {
+      if (command.contains(prefix)) {
+        for (final part in command.split(prefix)) {
+          if (_commandRemovesFiles(part)) return true;
+        }
+      }
+    }
+    return deletions.any(command.startsWith) ||
+        deletions.any((item) => command.contains(' $item'));
+  }
+
   bool _commandChangesFiles(String raw) {
     final command = raw.toLowerCase().trim();
     const mutations = [
@@ -1458,9 +1572,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
   }
 
   Future<_ToolOutcome> _runSingleCommand(String command) async {
+    final environment = ProjectEnvStore.values(await ProjectEnvStore.load(fs));
     if (deviceShell != null) {
       final result = await deviceShell!.run(
         command,
+        environment: environment,
         timeout: const Duration(seconds: 180),
       );
       final text = result.output.trim();
@@ -1503,9 +1619,9 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       return const _ToolOutcome('Error: at most 8 commands can run at once.');
     }
     final approval = toolApproval;
-    if (approval != null) {
+    if (approval != null && commands.any(_commandRemovesFiles)) {
       final allowed = await approval(
-        'Run ${commands.length} command${commands.length == 1 ? '' : 's'}?',
+        'Remove files with these commands?',
         commands
             .asMap()
             .entries
@@ -1984,6 +2100,8 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         return '${args['name'] ?? args['source_url'] ?? 'skill'}';
       case 'download_file':
         return '${args['path'] ?? args['url'] ?? '?'}';
+      case 'integration_status':
+        return '${args['service'] ?? '?'} ${args['target'] ?? ''}'.trim();
       case 'apply_patch':
         return 'patch';
       case 'read_files':

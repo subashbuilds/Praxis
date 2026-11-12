@@ -10,8 +10,8 @@ class ConfirmDetail {
 }
 
 /// The single confirmation surface used by destructive actions, pushes and
-/// pulls. It stays compact for one-line prompts and grows into a detail sheet
-/// for destination checks without becoming a second screen.
+/// pulls. The body scrolls inside a bounded height and the actions stay pinned
+/// to the bottom, so a long command list can never push them off screen.
 Future<bool> showPraxisConfirm(
   BuildContext context, {
   required String title,
@@ -26,111 +26,141 @@ Future<bool> showPraxisConfirm(
   final color = destructive ? Pal.rose : Pal.ember;
   final confirmed = await showDialog<bool>(
     context: context,
+    barrierDismissible: true,
     barrierColor: Colors.black.withOpacity(0.7),
     builder: (dialogContext) {
+      final maxHeight = MediaQuery.sizeOf(dialogContext).height * 0.86;
       return Dialog(
         backgroundColor: Colors.transparent,
         insetPadding:
             const EdgeInsets.symmetric(horizontal: Sp.x5, vertical: Sp.x5),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 430),
+          constraints: BoxConstraints(maxWidth: 430, maxHeight: maxHeight),
           child: Container(
             decoration: BoxDecoration(
               color: Pal.surface,
               borderRadius: Rd.lg,
               border: Border.all(color: Pal.lineStrong),
             ),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x5, Sp.x5, Sp.x4),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      GlyphBadge(
-                          icon: icon, color: color, size: 38, iconSize: 18),
-                      const SizedBox(width: Sp.x3),
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.only(top: 2),
-                          child: Text(
-                            title,
-                            style: Txt.headline.copyWith(fontSize: 21),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: Sp.x3),
-                  Text(body, style: Txt.bodySoft.copyWith(height: 1.55)),
-                  if (details.isNotEmpty) ...[
-                    const SizedBox(height: Sp.x3 + 2),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.fromLTRB(Sp.x3, 7, Sp.x3, 7),
-                      decoration: BoxDecoration(
-                        color: Pal.raised,
-                        borderRadius: Rd.sm,
-                        border: Border.all(color: Pal.line),
-                      ),
-                      child: Column(
-                        children: [
-                          for (var i = 0; i < details.length; i++) ...[
-                            if (i > 0) const Hairline(),
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 7),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  SizedBox(
-                                    width: 82,
-                                    child: Text(
-                                      details[i].label,
-                                      style: Txt.meta.copyWith(fontSize: 9.5),
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: Text(
-                                      details[i].value,
-                                      style: Txt.code.copyWith(
-                                        fontSize: 11.5,
-                                        height: 1.4,
-                                      ),
-                                    ),
-                                  ),
-                                ],
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(
+                      Sp.x5,
+                      Sp.x5,
+                      Sp.x5,
+                      Sp.x4,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            GlyphBadge(
+                              icon: icon,
+                              color: color,
+                              size: 38,
+                              iconSize: 18,
+                            ),
+                            const SizedBox(width: Sp.x3),
+                            Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Text(
+                                  title,
+                                  style: Txt.headline.copyWith(fontSize: 21),
+                                ),
                               ),
                             ),
                           ],
-                        ],
-                      ),
-                    ),
-                  ],
-                  if (note != null && note.trim().isNotEmpty) ...[
-                    const SizedBox(height: Sp.x3),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(Icons.info_outline_rounded,
-                            size: 14, color: color),
-                        const SizedBox(width: 7),
-                        Expanded(
-                          child: Text(
-                            note,
-                            style: Txt.meta.copyWith(
-                              fontSize: 10,
-                              height: 1.45,
-                              color: Pal.textMuted,
+                        ),
+                        const SizedBox(height: Sp.x3),
+                        Text(body, style: Txt.bodySoft.copyWith(height: 1.55)),
+                        if (details.isNotEmpty) ...[
+                          const SizedBox(height: Sp.x3 + 2),
+                          Container(
+                            width: double.infinity,
+                            padding:
+                                const EdgeInsets.fromLTRB(Sp.x3, 7, Sp.x3, 7),
+                            decoration: BoxDecoration(
+                              color: Pal.raised,
+                              borderRadius: Rd.sm,
+                              border: Border.all(color: Pal.line),
+                            ),
+                            child: Column(
+                              children: [
+                                for (var i = 0; i < details.length; i++) ...[
+                                  if (i > 0) const Hairline(),
+                                  Padding(
+                                    padding:
+                                        const EdgeInsets.symmetric(vertical: 7),
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        SizedBox(
+                                          width: 82,
+                                          child: Text(
+                                            details[i].label,
+                                            style: Txt.meta
+                                                .copyWith(fontSize: 9.5),
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: Text(
+                                            details[i].value,
+                                            style: Txt.code.copyWith(
+                                              fontSize: 11.5,
+                                              height: 1.4,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ],
                             ),
                           ),
-                        ),
+                        ],
+                        if (note != null && note.trim().isNotEmpty) ...[
+                          const SizedBox(height: Sp.x3),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.info_outline_rounded,
+                                  size: 14, color: color),
+                              const SizedBox(width: 7),
+                              Expanded(
+                                child: Text(
+                                  note,
+                                  style: Txt.meta.copyWith(
+                                    fontSize: 10,
+                                    height: 1.45,
+                                    color: Pal.textMuted,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
-                  ],
-                  const SizedBox(height: Sp.x5),
-                  Row(
+                  ),
+                ),
+                const Hairline(),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Sp.x5,
+                    Sp.x3,
+                    Sp.x5,
+                    Sp.x4,
+                  ),
+                  child: Row(
                     children: [
                       Expanded(
                         child: GhostButton(
@@ -148,8 +178,8 @@ Future<bool> showPraxisConfirm(
                       ),
                     ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

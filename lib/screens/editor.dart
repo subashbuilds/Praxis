@@ -49,6 +49,9 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _dirty = false;
   bool _saving = false;
   bool _binary = false;
+  bool _tooLarge = false;
+  bool _forceOpen = false;
+  bool _saved = false;
   bool _image = false;
   bool _svg = false;
   bool _preview = false;
@@ -59,7 +62,7 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _markedActive = false;
 
   bool get _isMarkdown => languageForPath(widget.path) == CodeLanguage.markdown;
-  bool get _canEdit => !_image && !_binary;
+  bool get _canEdit => !_image && !_binary && !_tooLarge;
   bool get _hasPreview => _isMarkdown || _svg;
 
   String get _typeLabel {
@@ -166,6 +169,10 @@ class _EditorScreenState extends State<EditorScreen> {
       final text = image ? null : decodeUtf8(bytes, allowEmpty: true);
       final binary =
           !svg && (image || type.kind == FileKind.binary || text == null);
+      // A megabyte of text is thousands of laid-out lines. Opening it made the
+      // whole workspace stutter, so ask before loading it into the editor.
+      final oversized =
+          !binary && !svg && (text?.length ?? 0) > 500000 && !_forceOpen;
       if (!mounted) return;
       setState(() {
         _type = type;
@@ -173,9 +180,10 @@ class _EditorScreenState extends State<EditorScreen> {
         _image = image;
         _svg = svg;
         _binary = binary;
+        _tooLarge = oversized;
         _preview = widget.initialLine == null &&
             (image || svg || (_isMarkdown && !binary));
-        if (!binary && text != null) _controller.text = text;
+        if (!binary && text != null && !oversized) _controller.text = text;
         _loading = false;
       });
       final query = widget.highlight?.trim() ?? '';
@@ -258,6 +266,7 @@ class _EditorScreenState extends State<EditorScreen> {
       setState(() {
         _dirty = false;
         _saving = false;
+        _saved = true;
       });
       messenger.showSnackBar(SnackBar(content: Text('Saved ${widget.path}')));
     } catch (error) {
@@ -271,7 +280,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<void> _confirmLeave() async {
     if (!_dirty) {
-      Navigator.of(context).pop();
+      Navigator.of(context).pop(_saved);
       return;
     }
     final leave = await showPraxisConfirm(
@@ -284,7 +293,16 @@ class _EditorScreenState extends State<EditorScreen> {
       destructive: true,
       icon: Icons.edit_off_rounded,
     );
-    if (leave && mounted) Navigator.of(context).pop();
+    if (leave && mounted) Navigator.of(context).pop(_saved);
+  }
+
+  void _openLargeFile() {
+    setState(() {
+      _forceOpen = true;
+      _loading = true;
+      _error = null;
+    });
+    _load();
   }
 
   @override
@@ -652,6 +670,7 @@ class _EditorScreenState extends State<EditorScreen> {
     if (_image && _preview) return _imagePreview();
     if (_svg && _preview) return _svgPreview();
     if (_binary) return _binaryPreview();
+    if (_tooLarge) return _largeFilePreview();
     if (_isMarkdown && _preview) {
       return GithubMarkdownPreview(
         project: widget.project,
@@ -672,6 +691,33 @@ class _EditorScreenState extends State<EditorScreen> {
       onChanged: (_) {
         if (!_dirty) setState(() => _dirty = true);
       },
+    );
+  }
+
+  Widget _largeFilePreview() {
+    return ListView(
+      padding: const EdgeInsets.all(Sp.page),
+      children: [
+        EmptyState(
+          icon: Icons.data_array_rounded,
+          title: 'Large file',
+          body: '${widget.path} is ${humanFileSize(_bytes?.length ?? 0)}. '
+              'Loading all of it at once can make the workspace slow on this '
+              'device. Open it only if you need to edit the whole file.',
+        ),
+        const SizedBox(height: Sp.x4),
+        EmberButton(
+          label: 'Open anyway',
+          icon: Icons.open_in_full_rounded,
+          onTap: _openLargeFile,
+        ),
+        const SizedBox(height: Sp.x3),
+        Text(
+          'Opening a large file as text turns off syntax highlighting above '
+          '160 KB, but the full contents still load into the editor.',
+          style: Txt.meta,
+        ),
+      ],
     );
   }
 
