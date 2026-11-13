@@ -8,6 +8,7 @@ import 'diff.dart';
 import 'file_types.dart';
 import 'patch.dart';
 import 'phase1_flags.dart';
+import 'agent_todos.dart';
 import 'project_env.dart';
 import 'project_skills.dart';
 import 'round_log.dart';
@@ -385,6 +386,39 @@ const _compoundTools = <AiToolSpec>[
       'required': ['patch'],
     },
   ),
+  AiToolSpec(
+    name: 'update_todos',
+    description:
+        'Create and maintain the task checklist shown to the user above the '
+        'composer. Call this before starting a multi-step task, then update it '
+        'whenever a step starts or finishes. Mark a step completed immediately '
+        'after finishing it. Keep 2-7 short, concrete steps; replace the list '
+        'when the task changes. Do not use this for a trivial one-step reply.',
+    parameters: {
+      'type': 'object',
+      'properties': {
+        'todos': {
+          'type': 'array',
+          'maxItems': 12,
+          'items': {
+            'type': 'object',
+            'properties': {
+              'text': {
+                'type': 'string',
+                'description': 'One short step.',
+              },
+              'status': {
+                'type': 'string',
+                'enum': ['pending', 'in_progress', 'completed'],
+              },
+            },
+            'required': ['text', 'status'],
+          },
+        },
+      },
+      'required': ['todos'],
+    },
+  ),
 ];
 
 bool providerSupportsParallelToolCalls(ProviderConfig provider) {
@@ -432,6 +466,8 @@ class Agent {
     this.linuxShell = false,
     this.toolApproval,
     this.onIntegrationQuery,
+    this.initialTodos = const [],
+    this.onTodosChanged,
     this.expectChanges = false,
     this.repeatLimit = Phase1Flags.repeatLimit,
     this.maxRounds = 40,
@@ -480,6 +516,9 @@ class Agent {
   /// Reads connected deployment and CI data without exposing credentials.
   final AgentIntegrationQuery? onIntegrationQuery;
 
+  final List<AgentTodo> initialTodos;
+  final void Function(List<AgentTodo> todos)? onTodosChanged;
+
   /// A resumed task is continuing work that already asked for edits, even
   /// when the visible continuation prompt is just "Continue".
   final bool expectChanges;
@@ -490,6 +529,7 @@ class Agent {
   /// the host knows a real limit.
   final int contextLimit;
 
+  late final List<AgentTodo> _todos = List.of(initialTodos);
   final Map<String, int> _readCache = {};
   final Map<String, int> _signatureCounts = {};
   final Map<String, int> _argumentFailureCounts = {};
@@ -526,8 +566,10 @@ class Agent {
     name: 'integration_status',
     description:
         'Read connected GitHub Actions, Cloudflare Pages/Workers or Vercel '
-        'deployments, including status, URLs and failing job names. Use this '
-        'instead of asking the user to paste logs. Never prints access tokens.',
+        'deployments, including status, URLs and failing job names. For '
+        'Cloudflare, use action logs with target project or '
+        'project/deployment-id to fetch the real build log. Use this instead of '
+        'asking the user to paste logs. Never prints access tokens.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -1086,6 +1128,7 @@ class Agent {
   }) async {
     final files = await _fileTree();
     final projectEnv = await ProjectEnvStore.load(fs);
+    final todoContext = _todoContext();
     final installed = await _installedSkills();
     final activeSkills = [
       ...skills.where(
@@ -1186,7 +1229,7 @@ Context policy (the host enforces this automatically):
   messages verbatim. Tool calls and their results always stay paired.
 - Never compact while a tool call or approval is pending.
 ${skillIndex.isEmpty ? '' : '\nSkills available (use /skill-name to invoke one explicitly):\n$skillIndex'}
-${projectEnv.isEmpty ? '' : '\nProject environment (values are available to build and shell commands; secret values are hidden from you):\n${projectEnv.map((entry) => entry.secret ? '- ${entry.name} (secret)' : '- ${entry.name}=${entry.value}').join('\n')}\nNever ask the user to paste a secret; use the variable name in commands.'}
+${todoContext.isEmpty ? '' : '\n$todoContext'}\n${projectEnv.isEmpty ? '' : '\nProject environment (values are available to build and shell commands; secret values are hidden from you):\n${projectEnv.map((entry) => entry.secret ? '- ${entry.name} (secret)' : '- ${entry.name}=${entry.value}').join('\n')}\nNever ask the user to paste a secret; use the variable name in commands.'}
 ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillText'}
 ''';
   }
@@ -1352,6 +1395,31 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
           return await _installSkill(call);
         case 'download_file':
           return await _downloadFile(call);
+        case 'update_todos':
+          final rawTodos = call.arguments['todos'];
+          if (rawTodos is! List) {
+            return const _ToolOutcome('Error: todos must be an array.');
+          }
+          if (rawTodos.length > 12) {
+            return const _ToolOutcome(
+                'Error: keep the checklist to 12 items or fewer.');
+          }
+          final next = <AgentTodo>[];
+          for (final item in rawTodos) {
+            if (item is! Map) continue;
+            final text =
+                '${item['text'] ?? ''}'.replaceAll(RegExp(r'\s+'), ' ').trim();
+            if (text.isEmpty) continue;
+            next.add(AgentTodo(
+              text: text.length > 160 ? '${text.substring(0, 157)}...' : text,
+              status: AgentTodoStatusX.parse(item['status']),
+            ));
+          }
+          _todos
+            ..clear()
+            ..addAll(next);
+          onTodosChanged?.call(List.unmodifiable(_todos));
+          return _ToolOutcome(_renderTodos());
         case 'integration_status':
           final query = onIntegrationQuery;
           if (query == null) {
@@ -1478,6 +1546,25 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     }
     return _execute(call);
   }
+
+  String _todoContext() {
+    if (_todos.isEmpty) {
+      return 'Task checklist: none yet. For multi-step work, call update_todos '
+          'with 2-7 concrete steps before you start.';
+    }
+    final done = _todos.where((todo) => todo.done).length;
+    return 'Current task checklist ($done/${_todos.length} complete). Update it '
+        'with update_todos as work progresses; replace it when the task changes.\n'
+        '${_renderTodos()}';
+  }
+
+  String _renderTodos() => _todos
+      .map((todo) => '- [${switch (todo.status) {
+            AgentTodoStatus.completed => 'x',
+            AgentTodoStatus.inProgress => '>',
+            AgentTodoStatus.pending => ' ',
+          }}] ${todo.text}')
+      .join('\n');
 
   bool _looksLikeContinueRequest(String prompt) => RegExp(
         r'^\s*(continue|resume|keep going|go on)\b',
@@ -2102,6 +2189,9 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         return '${args['path'] ?? args['url'] ?? '?'}';
       case 'integration_status':
         return '${args['service'] ?? '?'} ${args['target'] ?? ''}'.trim();
+      case 'update_todos':
+        final todos = args['todos'];
+        return todos is List ? '${todos.length} steps' : 'checklist';
       case 'apply_patch':
         return 'patch';
       case 'read_files':

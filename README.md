@@ -19,6 +19,7 @@ Grab the latest signed APK from [GitHub Releases](https://github.com/subashbuild
 
 - **Real projects, real files.** A project is a normal folder in the app's documents directory. Clone a Git repository or start from a template.
 - **An agent that edits code.** Bring your own OpenAI-compatible provider and API key. The agent can read, write, search, run commands, download assets, and commit to GitHub. Stop a run at any time with the stop button.
+- **A live task checklist.** For multi-step work the agent creates a short checklist above the composer, marks each step in progress and complete, and keeps the list when a run is interrupted or the project is reopened. Tap the bar to see every step.
 - **A file-backed editor.** Syntax highlighting, line numbers, word wrap, image and SVG previews, Markdown previews, binary-safe storage, and file-type logos in the explorer and editor header.
 - **A device shell with project tools.** Run the tools installed on the phone through `/system/bin/sh`, see the real working directory and exit code, and open **Tools** to manage environment values and project skills without leaving the shell.
 - **Environment values and secrets.** Add build and runtime variables under Tools → Environment. They are passed to npm scripts, shell commands and deploys. Secret values stay on the device; the agent sees the name and can use it, but never sees the value.
@@ -106,7 +107,11 @@ Open the **Tools** button in the shell header for two tabs:
 - **Environment** — add, edit and remove variables. Values are available to `npm run build`, shell commands run by the agent, and deploys. Mark a value as a secret to keep it out of the agent prompt; the agent still sees the variable name so it can use it.
 - **Project skills** — the same installed project skills that load from `.praxis/skills/`.
 
-Environment entries are stored at `.praxis/environment.json` inside the project. Secret values never enter the conversation. A large text file is guarded by a preview and an **Open anyway** action, so tapping a multi-megabyte file does not freeze the editor.
+Environment entries are stored at `.praxis/environment.json` inside the project. Secret values never enter the conversation. The task checklist is stored at `.praxis/todos.json`, so it survives a paused run, a stop, or an app restart and is available to the next agent turn. A large text file is guarded by a preview and an **Open anyway** action, so tapping a multi-megabyte file does not freeze the editor.
+
+The deploy sheet shows the same decision before the upload starts, naming **Cloudflare Workers** or **Cloudflare Pages** and explaining why. The runtime stays visible during the deploy stages and in the success panel.
+
+After a deployment, Praxis fetches the real build log from Cloudflare's Pages `history/logs` endpoint and shows it in the result, where it can be selected or copied. Workers deployments show the actual `wrangler deploy` output. The agent's `integration_status` tool can also fetch Pages build logs with `action: logs`; the target is a Pages project name or `project/deployment-id`.
 
 The Cloudflare deploy path chooses the runtime from the project itself:
 

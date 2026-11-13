@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../core/agent_todos.dart';
 import '../core/diff.dart';
 import '../core/task_checkpoint.dart';
 import '../models.dart';
@@ -76,6 +77,7 @@ class _AgentTabState extends State<AgentTab> {
   bool _stickToBottom = true;
   bool _showJumpToBottom = false;
   bool _draftRestored = false;
+  bool _todosLoaded = false;
   AppState? _state;
 
   @override
@@ -95,6 +97,10 @@ class _AgentTabState extends State<AgentTab> {
       _composer.text = draft;
       _composer.selection = TextSelection.collapsed(offset: draft.length);
       _composer.addListener(_persistDraft);
+    }
+    if (!_todosLoaded) {
+      _todosLoaded = true;
+      unawaited(state.loadTodos(widget.project));
     }
   }
 
@@ -218,6 +224,7 @@ class _AgentTabState extends State<AgentTab> {
     }
 
     final showLive = state.busy || state.hasLiveReply;
+    final todos = state.todosFor(widget.project.id);
     return Column(
       children: [
         Expanded(
@@ -266,6 +273,8 @@ class _AgentTabState extends State<AgentTab> {
             ],
           ),
         ),
+        if (todos.isNotEmpty)
+          _TodoBar(todos: todos, onTap: () => _showTodos(todos)),
         if (state.activeQuota.hasLimit &&
             (state.activeQuota.warning ||
                 state.activeQuota.low ||
@@ -293,6 +302,197 @@ class _AgentTabState extends State<AgentTab> {
           onStop: state.stop,
         ),
       ],
+    );
+  }
+
+  Future<void> _showTodos(List<AgentTodo> todos) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (_) => _TodoSheet(todos: todos),
+    );
+  }
+}
+
+class _TodoBar extends StatelessWidget {
+  const _TodoBar({required this.todos, required this.onTap});
+
+  final List<AgentTodo> todos;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final done = todos.where((todo) => todo.done).length;
+    final active = todos.where((todo) => !todo.done).firstOrNull;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Sp.x4, 0, Sp.x4, Sp.x2),
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(11, 8, 8, 8),
+          decoration: BoxDecoration(
+            color: Pal.raised,
+            borderRadius: Rd.sm,
+            border: Border.all(color: Pal.line),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                done == todos.length
+                    ? Icons.check_circle_rounded
+                    : Icons.checklist_rounded,
+                size: 17,
+                color: done == todos.length ? Pal.mint : Pal.ember,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'TASK · $done/${todos.length} COMPLETE',
+                      style: Txt.meta.copyWith(
+                        fontSize: 8.5,
+                        letterSpacing: 0.8,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      active?.text ?? 'All steps complete',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Txt.body.copyWith(
+                        fontSize: 11.5,
+                        color: active == null ? Pal.mint : Pal.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(Icons.expand_less_rounded, size: 16, color: Pal.textMuted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TodoSheet extends StatelessWidget {
+  const _TodoSheet({required this.todos});
+
+  final List<AgentTodo> todos;
+
+  @override
+  Widget build(BuildContext context) {
+    final done = todos.where((todo) => todo.done).length;
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.62,
+        child: Column(
+          children: [
+            const SheetHandle(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.x2, Sp.x3),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Task checklist', style: Txt.headline),
+                        const SizedBox(height: 2),
+                        Text(
+                          '$done of ${todos.length} complete · maintained by the '
+                          'agent and kept when a run is paused',
+                          style: Txt.meta.copyWith(fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconAction(
+                    icon: Icons.close_rounded,
+                    tooltip: 'Close',
+                    onTap: () => Navigator.of(context).maybePop(),
+                  ),
+                ],
+              ),
+            ),
+            const Hairline(),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(
+                  Sp.page,
+                  Sp.x3,
+                  Sp.page,
+                  Sp.x6,
+                ),
+                children: [
+                  for (final todo in todos)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            switch (todo.status) {
+                              AgentTodoStatus.completed =>
+                                Icons.check_circle_rounded,
+                              AgentTodoStatus.inProgress =>
+                                Icons.radio_button_checked_rounded,
+                              AgentTodoStatus.pending =>
+                                Icons.radio_button_unchecked_rounded,
+                            },
+                            size: 18,
+                            color: switch (todo.status) {
+                              AgentTodoStatus.completed => Pal.mint,
+                              AgentTodoStatus.inProgress => Pal.ember,
+                              AgentTodoStatus.pending => Pal.textMuted,
+                            },
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  todo.text,
+                                  style: Txt.body.copyWith(
+                                    fontSize: 12.5,
+                                    height: 1.4,
+                                    color: todo.done ? Pal.textMuted : Pal.text,
+                                    decoration: todo.done
+                                        ? TextDecoration.lineThrough
+                                        : null,
+                                  ),
+                                ),
+                                if (todo.status == AgentTodoStatus.inProgress)
+                                  Text(
+                                    'IN PROGRESS',
+                                    style: Txt.meta.copyWith(
+                                      fontSize: 8.5,
+                                      color: Pal.ember,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

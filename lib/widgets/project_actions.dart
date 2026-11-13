@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../core/cloudflare_routing.dart';
+import '../core/deploy_logs.dart';
 import '../core/integrations.dart';
 import '../models.dart';
 import '../screens/integrations_screen.dart';
@@ -403,7 +405,12 @@ class _DeploySheetState extends State<_DeploySheet> {
   IntegrationKind _platform = IntegrationKind.vercel;
   String _environment = 'production';
   int _fileCount = 0;
+  CloudflareDeployPlan? _cloudflarePlan;
   DeployProgress? _progress;
+  LastDeployLog? _lastDeploy;
+  String? _failureLogs;
+  String? _failureRuntime;
+  bool _refreshingLogs = false;
 
   @override
   void didChangeDependencies() {
@@ -470,6 +477,8 @@ class _DeploySheetState extends State<_DeploySheet> {
     final cfAccounts = _state.integrations.ofKind(IntegrationKind.cloudflare);
     final entries =
         await _state.fsFor(widget.project).list(includeHidden: true);
+    final cloudflarePlan = await _state.cloudflareDeployPlan(widget.project);
+    final lastDeploy = await _state.lastDeployLogFor(widget.project);
     if (!mounted) return;
     setState(() {
       _accounts = accounts;
@@ -477,6 +486,8 @@ class _DeploySheetState extends State<_DeploySheet> {
       _account =
           _state.activeVercel ?? (accounts.isEmpty ? null : accounts.first);
       _cfAccount = _state.integrations.activeFor(IntegrationKind.cloudflare);
+      _cloudflarePlan = cloudflarePlan;
+      _lastDeploy = lastDeploy;
       _fileCount = entries.where((entry) => !entry.isDir).length;
       if (accounts.isEmpty && cfAccounts.isNotEmpty) {
         _platform = IntegrationKind.cloudflare;
@@ -631,6 +642,9 @@ class _DeploySheetState extends State<_DeploySheet> {
       _error = null;
       _result = null;
       _progress = null;
+      _failureLogs = null;
+      _failureRuntime = null;
+      _lastDeploy = null;
     });
     try {
       final result = _platform == IntegrationKind.vercel
@@ -661,9 +675,80 @@ class _DeploySheetState extends State<_DeploySheet> {
         );
       }
     } catch (error) {
+      if (error is IntegrationException) {
+        final logs = error.logs ?? '';
+        final deploymentId = error.deploymentId ?? '';
+        // Keep a failed deployment even when Cloudflare has not published its
+        // build log yet, so the refresh button has something to refresh.
+        if (logs.trim().isNotEmpty || deploymentId.isNotEmpty) {
+          try {
+            final failure = await _state.rememberDeployFailure(
+              _state.projectById(widget.project.id),
+              runtime: error.runtime ??
+                  (_platform == IntegrationKind.cloudflare
+                      ? (_cloudflarePlan?.usesWorkers == true
+                          ? 'Cloudflare Workers'
+                          : 'Cloudflare Pages')
+                      : 'Vercel'),
+              message: error.message,
+              logs: logs,
+              deploymentId: deploymentId,
+            );
+            if (mounted) {
+              setState(() {
+                _failureLogs = failure.logs;
+                _failureRuntime = failure.runtime;
+                _lastDeploy = failure;
+              });
+            }
+          } catch (_) {
+            // The error itself is still shown below.
+          }
+        }
+      }
       if (mounted) setState(() => _error = '$error');
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _refreshLogs() async {
+    final result = _result;
+    final deploymentId = (result?.deploymentId ?? '').isNotEmpty
+        ? result!.deploymentId!
+        : (_lastDeploy?.deploymentId ?? '');
+    if (deploymentId.isEmpty || _refreshingLogs) return;
+    setState(() => _refreshingLogs = true);
+    try {
+      final record = await _state.refreshCloudflareDeploymentLogs(
+        _state.projectById(widget.project.id),
+        projectName: _project?.name ?? widget.project.name,
+        deploymentId: deploymentId,
+      );
+      if (!mounted) return;
+      final logs = record?.logs ?? '';
+      setState(() {
+        _lastDeploy = record;
+        if (logs.trim().isNotEmpty) {
+          if (result != null) _result = result.copyWith(logs: logs);
+          if (_failureLogs != null) _failureLogs = logs;
+        }
+      });
+      if (logs.trim().isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cloudflare has not published the build log yet.'),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not refresh logs: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _refreshingLogs = false);
     }
   }
 
@@ -795,42 +880,67 @@ class _DeploySheetState extends State<_DeploySheet> {
                       value: '$_fileCount project files',
                     ),
                     if (_platform == IntegrationKind.cloudflare) ...[
+                      _DetailRow(
+                        label: 'Runtime',
+                        value: _cloudflarePlan == null
+                            ? 'Checking…'
+                            : _cloudflarePlan!.usesWorkers
+                                ? 'Cloudflare Workers'
+                                : 'Cloudflare Pages',
+                      ),
                       Text(
-                        'Projects with server code deploy to Workers '
-                        'automatically. Choose a Pages project only for a static '
-                        'site.',
+                        _cloudflarePlan?.reason ??
+                            'Checking whether this project needs Workers or Pages.',
                         style: Txt.meta.copyWith(fontSize: 10, height: 1.4),
                       ),
-                      const _Label('PAGES PROJECT (STATIC SITES)'),
-                      if (_projects.isEmpty)
-                        Text(
-                          'No Pages projects found. A server project can still '
-                          'deploy to Workers.',
-                          style: Txt.meta.copyWith(fontSize: 10),
-                        )
-                      else
-                        _ProjectDropdown(
-                          projects: _projects,
-                          value: _project,
-                          onChanged: (value) {
-                            setState(() {
-                              _project = value;
-                              _result = null;
-                            });
-                            if (value != null) {
-                              _remember('cloudflare', value.name);
-                            }
-                          },
+                      if (_cloudflarePlan?.usesWorkers == true)
+                        Container(
+                          margin: const EdgeInsets.only(top: Sp.x2),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Pal.raised,
+                            borderRadius: Rd.sm,
+                            border: Border.all(color: Pal.line),
+                          ),
+                          child: Text(
+                            'Server projects deploy with wrangler deploy. A '
+                            'wrangler.toml or Wrangler JSON config is required; '
+                            'Pages project selection is ignored.',
+                            style: Txt.meta.copyWith(height: 1.4),
+                          ),
                         ),
-                      const SizedBox(height: 2),
-                      TextButton.icon(
-                        onPressed:
-                            _creatingProject ? null : _createPagesProject,
-                        icon: const Icon(Icons.add_rounded, size: 16),
-                        label: Text(_creatingProject
-                            ? 'Creating…'
-                            : 'Create new Pages project'),
-                      ),
+                      if (_cloudflarePlan?.usesWorkers != true) ...[
+                        const _Label('PAGES PROJECT (STATIC SITES)'),
+                        if (_projects.isEmpty)
+                          Text(
+                            'No Pages projects found. A server project can still '
+                            'deploy to Workers.',
+                            style: Txt.meta.copyWith(fontSize: 10),
+                          )
+                        else
+                          _ProjectDropdown(
+                            projects: _projects,
+                            value: _project,
+                            onChanged: (value) {
+                              setState(() {
+                                _project = value;
+                                _result = null;
+                              });
+                              if (value != null) {
+                                _remember('cloudflare', value.name);
+                              }
+                            },
+                          ),
+                        const SizedBox(height: 2),
+                        TextButton.icon(
+                          onPressed:
+                              _creatingProject ? null : _createPagesProject,
+                          icon: const Icon(Icons.add_rounded, size: 16),
+                          label: Text(_creatingProject
+                              ? 'Creating…'
+                              : 'Create new Pages project'),
+                        ),
+                      ],
                     ] else ...[
                       const _Label('VERCEL PROJECT'),
                       if (_vercelProjects.isNotEmpty) ...[
@@ -911,12 +1021,45 @@ class _DeploySheetState extends State<_DeploySheet> {
                       const SizedBox(height: 12),
                       _DeployProgressView(
                         platform: _platform,
+                        runtime: _platform == IntegrationKind.cloudflare
+                            ? (_cloudflarePlan?.usesWorkers == true
+                                ? 'Cloudflare Workers'
+                                : 'Cloudflare Pages')
+                            : 'Vercel',
                         progress: _progress,
                       ),
                     ],
                     if (_result != null) ...[
                       const SizedBox(height: 12),
-                      _DeploymentSuccess(result: _result!),
+                      _DeploymentSuccess(
+                        result: _result!,
+                        refreshingLogs: _refreshingLogs,
+                        onRefreshLogs: (_result!.deploymentId ?? '').isEmpty
+                            ? null
+                            : _refreshLogs,
+                      ),
+                    ] else if (_failureLogs != null &&
+                        (_failureLogs!.trim().isNotEmpty ||
+                            (_lastDeploy?.deploymentId ?? '').isNotEmpty)) ...[
+                      const SizedBox(height: 12),
+                      _FailedDeployLogs(
+                        runtime: _failureRuntime ?? 'Deploy',
+                        logs: _failureLogs!,
+                        onRefreshLogs: (_lastDeploy?.deploymentId ?? '').isEmpty
+                            ? null
+                            : (_refreshingLogs ? null : _refreshLogs),
+                      ),
+                    ] else if (_lastDeploy != null &&
+                        (_lastDeploy!.logs.trim().isNotEmpty ||
+                            _lastDeploy!.deploymentId.isNotEmpty)) ...[
+                      const SizedBox(height: 12),
+                      _LastDeployCard(
+                        record: _lastDeploy!,
+                        onRefreshLogs: _lastDeploy!.deploymentId.isEmpty
+                            ? null
+                            : _refreshLogs,
+                        refreshingLogs: _refreshingLogs,
+                      ),
                     ],
                     const SizedBox(height: Sp.x4),
                     EmberButton(
@@ -937,13 +1080,22 @@ class _DeploySheetState extends State<_DeploySheet> {
 }
 
 class _DeploymentSuccess extends StatelessWidget {
-  const _DeploymentSuccess({required this.result});
+  const _DeploymentSuccess({
+    required this.result,
+    this.onRefreshLogs,
+    this.refreshingLogs = false,
+  });
 
   final IntegrationResult result;
+  final VoidCallback? onRefreshLogs;
+  final bool refreshingLogs;
 
   @override
   Widget build(BuildContext context) {
     final url = result.url;
+    final logs = (result.logs ?? '')
+        .replaceAll(RegExp(r'\x1B\[[0-9;]*[A-Za-z]'), '')
+        .trim();
     return Container(
       padding: const EdgeInsets.all(11),
       decoration: BoxDecoration(
@@ -954,6 +1106,24 @@ class _DeploymentSuccess extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (result.runtime != null && result.runtime!.isNotEmpty) ...[
+            Row(
+              children: [
+                Icon(Icons.dns_outlined, size: 14, color: Pal.mint),
+                const SizedBox(width: 7),
+                Text(
+                  result.runtime!.toUpperCase(),
+                  style: Txt.meta.copyWith(
+                    fontSize: 8.5,
+                    color: Pal.mint,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 7),
+          ],
           Row(
             children: [
               Icon(Icons.check_circle_outline_rounded,
@@ -996,6 +1166,246 @@ class _DeploymentSuccess extends StatelessWidget {
               ],
             ),
           ],
+          if (logs.isNotEmpty)
+            _DeployLogPanel(logs: logs)
+          else if (result.deploymentId?.isNotEmpty == true) ...[
+            const SizedBox(height: 9),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'The build log is still empty. Cloudflare can take a few '
+                    'seconds to publish it.',
+                    style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+                  ),
+                ),
+                TextButton(
+                  onPressed: refreshingLogs ? null : onRefreshLogs,
+                  child: refreshingLogs
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 1.5),
+                        )
+                      : const Text('Refresh logs'),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _DeployLogPanel extends StatelessWidget {
+  const _DeployLogPanel({required this.logs, this.title = 'DEPLOY LOGS'});
+
+  final String logs;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final clean = logs.replaceAll(RegExp(r'\x1B\[[0-9;]*[A-Za-z]'), '').trim();
+    if (clean.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Icon(Icons.terminal_rounded, size: 14, color: Pal.textMuted),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                title,
+                style: Txt.meta.copyWith(
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: () async {
+                await Clipboard.setData(ClipboardData(text: clean));
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Deploy logs copied')),
+                );
+              },
+              behavior: HitTestBehavior.opaque,
+              child: Text(
+                'Copy',
+                style: Txt.meta.copyWith(
+                  fontSize: 9.5,
+                  color: Pal.ember,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(maxHeight: 180),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Pal.canvas.withOpacity(0.55),
+            borderRadius: Rd.sm,
+            border: Border.all(color: Pal.line),
+          ),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              clean,
+              style: Txt.code.copyWith(
+                fontSize: 9.5,
+                height: 1.45,
+                color: Pal.textMuted,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FailedDeployLogs extends StatelessWidget {
+  const _FailedDeployLogs({
+    required this.runtime,
+    required this.logs,
+    this.onRefreshLogs,
+  });
+
+  final String runtime;
+  final String logs;
+  final VoidCallback? onRefreshLogs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: Pal.rose.withOpacity(0.07),
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.rose.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.error_outline_rounded, size: 16, color: Pal.rose),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  runtime.toUpperCase(),
+                  style: Txt.meta.copyWith(
+                    fontSize: 8.5,
+                    color: Pal.rose,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ),
+              if (onRefreshLogs != null)
+                TextButton(
+                  onPressed: onRefreshLogs,
+                  child: const Text('Refresh logs'),
+                ),
+            ],
+          ),
+          if (logs.trim().isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Cloudflare has not published the build log yet. Refresh to '
+                'try again.',
+                style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+              ),
+            )
+          else
+            _DeployLogPanel(logs: logs, title: 'FAILED DEPLOY LOGS'),
+        ],
+      ),
+    );
+  }
+}
+
+class _LastDeployCard extends StatelessWidget {
+  const _LastDeployCard({
+    required this.record,
+    this.onRefreshLogs,
+    this.refreshingLogs = false,
+  });
+
+  final LastDeployLog record;
+  final VoidCallback? onRefreshLogs;
+  final bool refreshingLogs;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = record.success ? Pal.mint : Pal.rose;
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.06),
+        borderRadius: Rd.sm,
+        border: Border.all(color: color.withOpacity(0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                record.success
+                    ? Icons.history_rounded
+                    : Icons.error_outline_rounded,
+                size: 15,
+                color: color,
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'LAST DEPLOY · ${record.runtime.toUpperCase()}',
+                  style: Txt.meta.copyWith(
+                    fontSize: 8.5,
+                    color: color,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.7,
+                  ),
+                ),
+              ),
+              if (onRefreshLogs != null)
+                TextButton(
+                  onPressed: refreshingLogs ? null : onRefreshLogs,
+                  child: refreshingLogs
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 1.5),
+                        )
+                      : const Text('Refresh'),
+                ),
+            ],
+          ),
+          Text(
+            record.message,
+            style: Txt.meta.copyWith(fontSize: 10, height: 1.4),
+          ),
+          if (record.logs.trim().isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                'No build log was saved for this deployment.',
+                style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+              ),
+            )
+          else
+            _DeployLogPanel(logs: record.logs, title: 'SAVED DEPLOY LOGS'),
         ],
       ),
     );
@@ -1003,14 +1413,25 @@ class _DeploymentSuccess extends StatelessWidget {
 }
 
 class _DeployProgressView extends StatelessWidget {
-  const _DeployProgressView({required this.platform, required this.progress});
+  const _DeployProgressView({
+    required this.platform,
+    required this.progress,
+    this.runtime,
+  });
 
   final IntegrationKind platform;
   final DeployProgress? progress;
+  final String? runtime;
 
-  List<String> get _stages => platform == IntegrationKind.vercel
-      ? const ['Preparing', 'Uploading', 'Building', 'Live']
-      : const ['Preparing', 'Uploading', 'Deploying', 'Live'];
+  List<String> get _stages {
+    if (platform == IntegrationKind.vercel) {
+      return const ['Preparing', 'Uploading', 'Building', 'Live'];
+    }
+    if (runtime == 'Cloudflare Workers') {
+      return const ['Preparing', 'Building', 'Deploying', 'Live'];
+    }
+    return const ['Preparing', 'Uploading', 'Deploying', 'Live'];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1028,6 +1449,23 @@ class _DeployProgressView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (runtime != null && runtime!.isNotEmpty) ...[
+            Row(
+              children: [
+                Icon(Icons.dns_outlined, size: 12, color: Pal.ember),
+                const SizedBox(width: 6),
+                Text(
+                  runtime!,
+                  style: Txt.meta.copyWith(
+                    fontSize: 9,
+                    color: Pal.textMuted,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
           for (var index = 0; index < stages.length; index++)
             Padding(
               padding: EdgeInsets.only(

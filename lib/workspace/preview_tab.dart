@@ -17,6 +17,16 @@ class PreviewTab extends StatefulWidget {
   State<PreviewTab> createState() => _PreviewTabState();
 }
 
+/// The fit scale for the desktop preview. A 1280 CSS-pixel page is rendered
+/// inside [viewportWidth] logical pixels. Keeping this calculation in Dart
+/// avoids reading the WebView's visual viewport after the desktop override,
+/// which already reports 1280 and would otherwise reset the scale to 1.
+@visibleForTesting
+double desktopPreviewScale(double viewportWidth) {
+  if (!viewportWidth.isFinite || viewportWidth <= 0) return 1;
+  return (viewportWidth / 1280).clamp(0.1, 1.0);
+}
+
 class _PreviewTabState extends State<PreviewTab> {
   static const _desktopUserAgent =
       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -273,10 +283,17 @@ class _PreviewTabState extends State<PreviewTab> {
 
   Future<void> _applyDesktopViewport(WebViewController controller) async {
     if (!mounted) return;
+    final scale = desktopPreviewScale(MediaQuery.sizeOf(context).width);
+    final scaleText = scale.toStringAsFixed(4);
     try {
       // A viewport of 1280 CSS pixels gives the page a desktop layout width,
       // so media queries and width-dependent scripts choose desktop styles. The
       // WebView shrinks the wide page to fit the screen like a desktop site.
+      //
+      // Do not recompute this from window.visualViewport on a later navigation:
+      // after the first override that viewport is already 1280 wide, so the
+      // second page would be displayed at scale 1 and appear zoomed in. Locking
+      // the scale also stops taps from changing the preview's zoom level.
       await controller.runJavaScript('''
         (() => {
           let meta = document.querySelector('meta[name="viewport"]');
@@ -290,18 +307,11 @@ class _PreviewTabState extends State<PreviewTab> {
           }
           const desktop = ${_desktop ? 'true' : 'false'};
           if (desktop) {
-            const width = 1280;
-            // screen.width can be physical pixels on Android, which would
-            // leave the wide page larger than the phone. The visual viewport
-            // is the CSS width actually visible before the override.
-            const deviceWidth =
-              (window.visualViewport && window.visualViewport.width) ||
-              window.innerWidth || width;
-            const scale = Math.min(1, deviceWidth / width);
             meta.setAttribute(
               'content',
-              'width=' + width + ', initial-scale=' + scale +
-                ', minimum-scale=' + scale,
+              'width=1280, initial-scale=$scaleText' +
+                ', maximum-scale=$scaleText, minimum-scale=$scaleText' +
+                ', user-scalable=no',
             );
           } else {
             meta.setAttribute('content', meta.dataset.praxisOriginal ||

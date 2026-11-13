@@ -5,20 +5,60 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'file_types.dart';
+import 'project_env.dart';
 import 'vfs.dart';
 
 class IntegrationException implements Exception {
-  IntegrationException(this.message);
+  IntegrationException(
+    this.message, {
+    this.logs,
+    this.runtime,
+    this.deploymentId,
+  });
   final String message;
+
+  /// Masked deploy output for the failure card. Never include credentials.
+  final String? logs;
+  final String? runtime;
+  final String? deploymentId;
 
   @override
   String toString() => message;
 }
 
 class IntegrationResult {
-  const IntegrationResult({required this.message, this.url});
+  const IntegrationResult({
+    required this.message,
+    this.url,
+    this.runtime,
+    this.logs,
+    this.deploymentId,
+  });
   final String message;
   final String? url;
+
+  /// The runtime that served this deploy, e.g. Cloudflare Pages or Workers.
+  final String? runtime;
+
+  /// Real deploy output: Cloudflare build logs for Pages, Wrangler output for
+  /// Workers. Never includes credentials.
+  final String? logs;
+  final String? deploymentId;
+
+  IntegrationResult copyWith({
+    String? message,
+    String? url,
+    String? runtime,
+    String? logs,
+    String? deploymentId,
+  }) =>
+      IntegrationResult(
+        message: message ?? this.message,
+        url: url ?? this.url,
+        runtime: runtime ?? this.runtime,
+        logs: logs ?? this.logs,
+        deploymentId: deploymentId ?? this.deploymentId,
+      );
 }
 
 class GitHubRepo {
@@ -1062,6 +1102,19 @@ class CloudflarePagesClient {
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     final result = body['result'] as Map<String, dynamic>?;
+    final deploymentId = result?['id'] as String? ?? '';
+    final stage = result?['latest_stage'];
+    if (stage is Map && stage['status'] == 'failure') {
+      // Do not attach raw logs here. The app fetches failed-build output
+      // through the project-aware masked log path, which knows the secrets and
+      // applies the cutoff only after masking.
+      throw IntegrationException(
+        'Cloudflare Pages deployment failed. Open the logs for the build '
+        'error.',
+        runtime: 'Cloudflare Pages',
+        deploymentId: deploymentId,
+      );
+    }
     final deploymentUrl = result?['url'] as String? ?? '';
     final aliases = result?['aliases'];
     final firstAlias =
@@ -1087,7 +1140,71 @@ class CloudflarePagesClient {
       message: 'Deployed ${files.length} files to $accountName · '
           '$project ${environment == 'preview' ? 'preview' : 'production'}.',
       url: url,
+      runtime: 'Cloudflare Pages',
+      deploymentId: deploymentId,
     );
+  }
+
+  /// Fetch the actual build log for a Pages deployment. Cloudflare wraps the
+  /// entries in `result.data`; older responses put `data` at the top level.
+  Future<String> deploymentLogs({
+    required String project,
+    required String deploymentId,
+    required Iterable<ProjectEnvEntry> secrets,
+  }) async {
+    final (accountId, _) = await _account();
+    final response = await _client
+        .get(
+          Uri.parse(
+            'https://api.cloudflare.com/client/v4/accounts/$accountId/pages/'
+            'projects/${Uri.encodeComponent(project)}/deployments/'
+            '${Uri.encodeComponent(deploymentId)}/history/logs',
+          ),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 45));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Could not fetch Pages deployment logs'));
+    }
+    final decoded = jsonDecode(response.body);
+    final root = decoded is Map && decoded['result'] is Map
+        ? decoded['result'] as Map
+        : decoded;
+    final data = root is Map ? root['data'] : null;
+    if (data is! List) return '';
+    final lines = <String>[];
+    for (final item in data) {
+      if (item is! Map) continue;
+      final line = '${item['line'] ?? ''}'.trimRight();
+      if (line.isEmpty) continue;
+      final ts = '${item['ts'] ?? ''}'.trim();
+      lines.add(ts.isEmpty ? line : '$ts  $line');
+    }
+    // Mask first, then truncate. The returned log is safe to pass to the
+    // agent, the UI, an exception, or the persisted deploy record.
+    return maskSecretLog(lines.join('\n'), secrets);
+  }
+
+  Future<String> latestDeploymentId(String project) async {
+    final (accountId, _) = await _account();
+    final response = await _client
+        .get(
+          Uri.parse(
+            'https://api.cloudflare.com/client/v4/accounts/$accountId/pages/'
+            'projects/${Uri.encodeComponent(project)}/deployments?per_page=1',
+          ),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Could not find the latest Pages deployment'));
+    }
+    final decoded = jsonDecode(response.body);
+    final result = decoded is Map ? decoded['result'] : null;
+    if (result is! List || result.isEmpty || result.first is! Map) return '';
+    return (result.first as Map)['id'] as String? ?? '';
   }
 
   String _error(http.Response response, String fallback) {

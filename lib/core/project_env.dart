@@ -72,3 +72,33 @@ class ProjectEnvStore {
           if (entry.name.trim().isNotEmpty) entry.name.trim(): entry.value,
       };
 }
+
+/// Replaces every project secret value with its variable name. This is applied
+/// to deploy output before it reaches the UI, the agent, or the persisted log
+/// record, so build tools that echo an environment value cannot leak it.
+String maskSecretValues(String text, Iterable<ProjectEnvEntry> entries) {
+  if (text.isEmpty) return text;
+  final secrets = entries
+      .where((entry) => entry.secret && entry.value.isNotEmpty)
+      .toList()
+    ..sort((a, b) => b.value.length.compareTo(a.value.length));
+  var masked = text;
+  for (final entry in secrets) {
+    masked = masked.replaceAll(entry.value, '[secret:${entry.name}]');
+  }
+  return masked;
+}
+
+/// Masks secrets before keeping the last [maxChars] characters of a log.
+///
+/// Truncating first can split a secret at the cutoff and leave part of it
+/// visible. Call this instead of applying [maskSecretValues] after a substring.
+String maskSecretLog(
+  String text,
+  Iterable<ProjectEnvEntry> entries, {
+  int maxChars = 40000,
+}) {
+  final masked = maskSecretValues(text, entries);
+  if (maxChars <= 0 || masked.length <= maxChars) return masked;
+  return masked.substring(masked.length - maxChars);
+}

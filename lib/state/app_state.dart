@@ -10,6 +10,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/agent.dart';
+import '../core/cloudflare_routing.dart';
+import '../core/deploy_logs.dart';
 import '../core/ai.dart';
 import '../core/diff.dart';
 import '../core/file_import.dart';
@@ -17,6 +19,7 @@ import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
 import '../core/model_info.dart';
+import '../core/agent_todos.dart';
 import '../core/project_env.dart';
 import '../core/project_search.dart';
 import '../core/project_skills.dart';
@@ -151,8 +154,10 @@ class AppState extends ChangeNotifier {
   final Map<String, SystemShell> _systemShells = {};
   final Map<String, PushState> _pushStates = {};
   final Map<String, TaskCheckpoint> _checkpoints = {};
+  final Map<String, List<AgentTodo>> _todos = {};
   QuotaTracker _quota = QuotaTracker();
   Future<void> _checkpointWrite = Future.value();
+  Future<void> _todosWrite = Future.value();
 
   bool _ready = false;
   bool get ready => _ready;
@@ -500,6 +505,27 @@ class AppState extends ChangeNotifier {
     List<ProjectEnvEntry> entries,
   ) =>
       ProjectEnvStore.save(fsFor(project), entries);
+
+  Future<CloudflareDeployPlan> cloudflareDeployPlan(Project project) =>
+      planCloudflareDeploy(fsFor(project));
+
+  /// The checklist currently shown for a project. The agent updates this while
+  /// it works, and the persisted copy restores it after a pause or restart.
+  List<AgentTodo> todosFor(String projectId) => _todos[projectId] ?? const [];
+
+  Future<void> loadTodos(Project project) async {
+    final loaded = await ProjectTodosStore.load(fsFor(project));
+    _todos[project.id] = loaded;
+    notifyListeners();
+  }
+
+  void _setTodos(Project project, List<AgentTodo> next) {
+    _todos[project.id] = List.unmodifiable(next);
+    notifyListeners();
+    _todosWrite = _todosWrite
+        .then((_) => ProjectTodosStore.save(fsFor(project), next))
+        .catchError((Object _) {});
+  }
 
   Future<void> deletePath(Project project, String path) async {
     await fsFor(project).delete(path);
@@ -973,6 +999,8 @@ class AppState extends ChangeNotifier {
     final pendingCalls = <String, AiToolCall>{};
     var checkpointError = '';
     _queueCheckpoint(checkpoint);
+    final savedTodos = await ProjectTodosStore.load(fsFor(project));
+    _todos[projectId] = savedTodos;
 
     final agent = Agent(
       client: ai,
@@ -989,6 +1017,8 @@ class AppState extends ChangeNotifier {
       mode: agentMode,
       onIntegrationQuery: (service, action, target) =>
           _integrationStatus(project, service, action, target),
+      initialTodos: savedTodos,
+      onTodosChanged: (next) => _setTodos(project, next),
       expectChanges: resumeFrom != null,
       fetchText: _fetchSkillText,
       fetchBytes: _fetchUrlBytes,
@@ -2650,7 +2680,136 @@ Continue the task. Do not repeat a write or destructive action that already comp
       onProgress: onProgress,
     );
     await _rememberDeployment(project, 'vercel', target, signature);
-    return result;
+    return _secureDeployResult(
+      project,
+      result.copyWith(runtime: 'Vercel'),
+    );
+  }
+
+  String _boundedLog(String text) =>
+      text.length > 40000 ? text.substring(text.length - 40000) : text;
+
+  Future<String> _fetchPagesLogs(
+    CloudflarePagesClient pages,
+    String projectName,
+    String deploymentId,
+    Iterable<ProjectEnvEntry> entries,
+  ) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final logs = await pages.deploymentLogs(
+          project: projectName,
+          deploymentId: deploymentId,
+          secrets: entries,
+        );
+        if (logs.trim().isNotEmpty) return logs;
+      } catch (_) {
+        // A delayed or unavailable log must not turn a deploy into a failure.
+      }
+      if (attempt < 2) {
+        await Future<void>.delayed(const Duration(milliseconds: 900));
+      }
+    }
+    return '';
+  }
+
+  Future<IntegrationResult> _secureDeployResult(
+    Project project,
+    IntegrationResult result, {
+    bool success = true,
+  }) async {
+    final entries = await environmentFor(project);
+    final secured = result.copyWith(
+      logs: maskSecretLog(result.logs ?? '', entries),
+    );
+    try {
+      await DeployLogStore.save(
+        fsFor(project),
+        LastDeployLog(
+          runtime: secured.runtime ?? 'Deploy',
+          message: secured.message,
+          logs: secured.logs ?? '',
+          at: DateTime.now(),
+          url: secured.url ?? '',
+          deploymentId: secured.deploymentId ?? '',
+          success: success,
+        ),
+      );
+    } catch (_) {
+      // A log write must not turn a successful deploy into a failure.
+    }
+    return secured;
+  }
+
+  Future<LastDeployLog?> lastDeployLogFor(Project project) async {
+    final record = await DeployLogStore.load(fsFor(project));
+    if (record == null) return null;
+    final entries = await environmentFor(project);
+    return record.copyWith(logs: maskSecretLog(record.logs, entries));
+  }
+
+  Future<LastDeployLog> rememberDeployFailure(
+    Project project, {
+    required String runtime,
+    required String message,
+    required String logs,
+    String deploymentId = '',
+  }) async {
+    final entries = await environmentFor(project);
+    final record = LastDeployLog(
+      runtime: runtime,
+      message: message,
+      logs: maskSecretLog(logs, entries),
+      at: DateTime.now(),
+      deploymentId: deploymentId,
+      success: false,
+    );
+    try {
+      await DeployLogStore.save(fsFor(project), record);
+    } catch (_) {
+      // The failure card can still show the masked log for this session.
+    }
+    return record;
+  }
+
+  Future<LastDeployLog?> refreshCloudflareDeploymentLogs(
+    Project project, {
+    required String projectName,
+    required String deploymentId,
+  }) async {
+    final account = integrations.activeFor(IntegrationKind.cloudflare);
+    if (account == null) {
+      throw IntegrationException('Cloudflare is not connected.');
+    }
+    final pages = CloudflarePagesClient(
+      account.token,
+      accountId: account.accountId,
+      client: httpClient,
+    );
+    final entries = await environmentFor(project);
+    final logs = await _fetchPagesLogs(
+      pages,
+      projectName,
+      deploymentId,
+      entries,
+    );
+    final masked = maskSecretLog(logs, entries);
+    final existing = await DeployLogStore.load(fsFor(project));
+    final record = (existing ??
+            LastDeployLog(
+              runtime: 'Cloudflare Pages',
+              message: 'Cloudflare Pages deployment',
+              logs: '',
+              at: DateTime.now(),
+              deploymentId: deploymentId,
+            ))
+        .copyWith(logs: masked, deploymentId: deploymentId);
+    try {
+      await DeployLogStore.save(fsFor(project), record);
+    } catch (_) {
+      // The refreshed log is still returned to the caller for display.
+    }
+    return record;
   }
 
   Future<IntegrationResult> deployToCloudflare(
@@ -2686,26 +2845,73 @@ Continue the task. Do not repeat a write or destructive action that already comp
           'No changes since the last deployment to this Pages project. '
           'Edit the project before deploying again.');
     }
-    final result = await CloudflarePagesClient(
+    final pages = CloudflarePagesClient(
       account.token,
       accountId: account.accountId,
       client: httpClient,
-    ).deploy(
-      project: projectName,
-      projectUrl: projectUrl,
-      files: files,
-      environment: environment,
-      branch: branch,
-      onProgress: onProgress,
     );
+    IntegrationResult result;
+    try {
+      result = await pages.deploy(
+        project: projectName,
+        projectUrl: projectUrl,
+        files: files,
+        environment: environment,
+        branch: branch,
+        onProgress: onProgress,
+      );
+    } on IntegrationException catch (error) {
+      final failedDeploymentId = error.deploymentId ?? '';
+      if (failedDeploymentId.isNotEmpty && (error.logs ?? '').trim().isEmpty) {
+        // A failed build can publish its logs a moment after the deployment
+        // status flips to failure. Retry before giving up on the real output.
+        final entries = await environmentFor(project);
+        final logs = await _fetchPagesLogs(
+          pages,
+          projectName,
+          failedDeploymentId,
+          entries,
+        );
+        if (logs.trim().isNotEmpty) {
+          throw IntegrationException(
+            error.message,
+            logs: maskSecretLog(logs, entries),
+            runtime: error.runtime,
+            deploymentId: failedDeploymentId,
+          );
+        }
+      }
+      rethrow;
+    }
+    var logs = result.logs;
+    final deploymentId = result.deploymentId ?? '';
+    if (deploymentId.isNotEmpty) {
+      final entries = await environmentFor(project);
+      logs = await _fetchPagesLogs(
+        pages,
+        projectName,
+        deploymentId,
+        entries,
+      );
+    }
     await _rememberDeployment(
       project,
       'cloudflare',
       target,
       signature,
     );
-    return result;
+    return _secureDeployResult(project, result.copyWith(logs: logs));
   }
+
+  /// Used by tests to exercise the exact callback the agent receives.
+  @visibleForTesting
+  Future<String> integrationStatusForAgent(
+    Project project,
+    String service,
+    String action,
+    String target,
+  ) =>
+      _integrationStatus(project, service, action, target);
 
   /// Reads deployment and workflow data from connected accounts for the
   /// agent. Credentials never appear in the returned text.
@@ -2798,6 +3004,41 @@ Continue the task. Do not repeat a write or destructive action that already comp
             'Authorization': 'Bearer ${account.token}',
             'Content-Type': 'application/json',
           };
+          if (action == 'logs') {
+            final parts = target.split('/');
+            final projectName = parts.first.trim();
+            if (projectName.isEmpty) {
+              return 'Pass a Pages project name, optionally followed by a '
+                  'deployment id: project/deployment-id.';
+            }
+            final client = CloudflarePagesClient(
+              account.token,
+              accountId: accountId,
+              client: httpClient,
+            );
+            var deploymentId = parts.length > 1 ? parts[1].trim() : '';
+            if (deploymentId.isEmpty) {
+              deploymentId = await client.latestDeploymentId(projectName);
+            }
+            if (deploymentId.isEmpty) {
+              return 'No deployment was found for $projectName.';
+            }
+            final entries = await environmentFor(project);
+            final logs = await client.deploymentLogs(
+              project: projectName,
+              deploymentId: deploymentId,
+              secrets: entries,
+            );
+            if (logs.trim().isEmpty) {
+              return 'Cloudflare returned no build log for $projectName/'
+                  '$deploymentId yet.';
+            }
+            // The client already masked before its cutoff. Mask again here so
+            // the agent's smaller excerpt also truncates only masked text.
+            final excerpt = maskSecretLog(logs, entries, maxChars: 12000);
+            return 'Cloudflare Pages build logs for $projectName/$deploymentId:'
+                '\n$excerpt';
+          }
           if (action == 'deployments' && target.isNotEmpty) {
             final response = await httpClient.get(
               Uri.parse(
@@ -2867,62 +3108,8 @@ Continue the task. Do not repeat a write or destructive action that already comp
 
   /// Pages serves static output. Server code (API routes, Express, a Worker
   /// entry) has to go through Workers, where its runtime actually exists.
-  Future<bool> _needsWorker(ProjectFs fs) async {
-    final entries = await fs.list(includeHidden: true);
-    final paths = entries
-        .map((entry) => entry.path.replaceAll('\\', '/'))
-        .where((path) => !path.startsWith('node_modules/'))
-        .toList();
-    if (paths.any((path) => RegExp(
-          r'^wrangler\.(toml|jsonc?)$',
-          caseSensitive: false,
-        ).hasMatch(path))) {
-      return true;
-    }
-    // Pages Functions are already a supported Pages runtime.
-    if (paths.any(
-      (path) => path == '_worker.js' || path.startsWith('functions/'),
-    )) {
-      return false;
-    }
-    if (paths.any((path) => RegExp(
-          r'(^|/)(server|worker|backend)\.(js|ts|mjs|cjs)$',
-          caseSensitive: false,
-        ).hasMatch(path))) {
-      return true;
-    }
-    if (paths.any((path) => RegExp(
-          r'^(src/|pages/|src/pages/)?api/.*\.(js|ts|mjs|cjs|jsx|tsx)$|'
-          r'^(src/)?app/api/.*\.(js|ts|mjs|cjs|jsx|tsx)$',
-          caseSensitive: false,
-        ).hasMatch(path))) {
-      return true;
-    }
-    if (paths.contains('package.json')) {
-      try {
-        final package = jsonDecode(await fs.read('package.json'));
-        final dependencies = package is Map ? package['dependencies'] : null;
-        final devDependencies =
-            package is Map ? package['devDependencies'] : null;
-        final deps = <String>{
-          if (dependencies is Map) ...dependencies.keys.cast<String>(),
-          if (devDependencies is Map) ...devDependencies.keys.cast<String>(),
-        };
-        const serverDeps = {
-          'express',
-          'koa',
-          'fastify',
-          '@nestjs/core',
-          'hono',
-          'nuxt',
-        };
-        if (deps.any(serverDeps.contains)) return true;
-      } catch (_) {
-        // An unreadable package file is handled by the build path.
-      }
-    }
-    return false;
-  }
+  Future<bool> _needsWorker(ProjectFs fs) async =>
+      (await planCloudflareDeploy(fs)).usesWorkers;
 
   Future<IntegrationResult> _deployWorker(
     Project project,
@@ -2950,9 +3137,14 @@ Continue the task. Do not repeat a write or destructive action that already comp
         client: httpClient,
       ).accountIdentifier();
     }
+    onProgress?.call(const DeployProgress(
+      'Preparing',
+      detail: 'Checking the Wrangler config',
+    ));
     final shell = systemShellFor(project);
+    final envEntries = await environmentFor(project);
     final shellEnv = {
-      ...ProjectEnvStore.values(await environmentFor(project)),
+      ...ProjectEnvStore.values(envEntries),
       'CLOUDFLARE_API_TOKEN': account.token,
       'CLOUDFLARE_ACCOUNT_ID': accountId,
     };
@@ -2962,14 +3154,17 @@ Continue the task. Do not repeat a write or destructive action that already comp
         detail: 'Installing dependencies',
       ));
       final install = await shell.run(
-        'npm install --no-audit --no-fund',
+        cloudflareNpmInstallCommand,
         environment: shellEnv,
         timeout: const Duration(minutes: 8),
       );
       if (install.exitCode != 0) {
+        final logs = maskSecretValues(install.output, envEntries);
         throw IntegrationException(
             'npm install failed (exit ${install.exitCode}). '
-            '${_tail(install.output)}');
+            '${_tail(logs)}',
+            logs: _boundedLog(logs),
+            runtime: 'Cloudflare Workers');
       }
     }
     onProgress?.call(DeployProgress(
@@ -2982,18 +3177,27 @@ Continue the task. Do not repeat a write or destructive action that already comp
       timeout: const Duration(minutes: 15),
     );
     if (result.exitCode != 0) {
+      final logs = maskSecretValues(result.output, envEntries);
       throw IntegrationException(
           'Worker deploy failed (exit ${result.exitCode}). '
-          '${_tail(result.output)}');
+          '${_tail(logs)}',
+          logs: _boundedLog(logs),
+          runtime: 'Cloudflare Workers');
     }
     final url = RegExp(r'https://[a-zA-Z0-9._-]+\.workers\.dev')
         .firstMatch(result.output)
         ?.group(0);
-    return IntegrationResult(
-      message: url == null
-          ? 'Deployed $projectName to Cloudflare Workers.'
-          : 'Deployed $projectName to Cloudflare Workers at $url.',
-      url: url,
+    final output = maskSecretValues(result.output.trim(), envEntries);
+    return _secureDeployResult(
+      project,
+      IntegrationResult(
+        message: url == null
+            ? 'Deployed $projectName to Cloudflare Workers.'
+            : 'Deployed $projectName to Cloudflare Workers at $url.',
+        url: url,
+        runtime: 'Cloudflare Workers',
+        logs: _boundedLog(output),
+      ),
     );
   }
 
@@ -3013,9 +3217,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
 
     var hasBuild = false;
     try {
-      final package = jsonDecode(await fs.read('package.json'));
-      final scripts = package is Map ? package['scripts'] : null;
-      hasBuild = scripts is Map && scripts['build'] is String;
+      hasBuild = hasNpmBuildScript(await fs.read('package.json'));
     } catch (_) {
       hasBuild = false;
     }
@@ -3028,32 +3230,41 @@ Continue the task. Do not repeat a write or destructive action that already comp
     }
 
     final shell = systemShellFor(project);
-    final environment = ProjectEnvStore.values(await environmentFor(project));
+    final envEntries = await environmentFor(project);
+    final environment = ProjectEnvStore.values(envEntries);
     onProgress?.call(const DeployProgress(
       'Building',
       detail: 'Installing dependencies',
     ));
     final install = await shell.run(
-      'npm install --no-audit --no-fund',
+      cloudflareNpmInstallCommand,
       environment: environment,
       timeout: const Duration(minutes: 8),
     );
     if (install.exitCode != 0) {
+      final logs = maskSecretValues(install.output, envEntries);
       throw IntegrationException(
-          'npm install failed (exit ${install.exitCode}). ${_tail(install.output)}');
+        'npm install failed (exit ${install.exitCode}). ${_tail(logs)}',
+        logs: _boundedLog(logs),
+        runtime: 'Cloudflare Pages',
+      );
     }
     onProgress?.call(const DeployProgress(
       'Building',
       detail: 'Running npm run build',
     ));
     final build = await shell.run(
-      'npm run build',
+      cloudflareNpmBuildCommand,
       environment: environment,
       timeout: const Duration(minutes: 12),
     );
     if (build.exitCode != 0) {
+      final logs = maskSecretValues(build.output, envEntries);
       throw IntegrationException(
-          'npm run build failed (exit ${build.exitCode}). ${_tail(build.output)}');
+        'npm run build failed (exit ${build.exitCode}). ${_tail(logs)}',
+        logs: _boundedLog(logs),
+        runtime: 'Cloudflare Pages',
+      );
     }
     final output = await _staticOutput(fs);
     if (output == null) {
@@ -3065,18 +3276,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
     return fs.deploymentFiles(from: output);
   }
 
-  Future<String?> _staticOutput(ProjectFs fs) async {
-    for (final candidate in const [
-      'out',
-      'dist',
-      'build/web',
-      'build',
-      '.vercel/output/static',
-    ]) {
-      if (await fs.exists('$candidate/index.html')) return candidate;
-    }
-    return null;
-  }
+  Future<String?> _staticOutput(ProjectFs fs) => staticOutputFolder(fs);
 
   String _tail(String output) {
     final trimmed = output.trim();
