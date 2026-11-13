@@ -22,10 +22,17 @@ class SystemShellResult {
 /// Termux. Unlike the sandboxed [Shell] used by the agent, this is not limited
 /// to file verbs.
 class SystemShell {
-  SystemShell(this.fs, {this.linux});
+  SystemShell(this.fs, {this.linux, Directory? packageCacheRoot})
+      : packageCacheRoot = packageCacheRoot ??
+            Directory('${fs.rootPath}/.praxis/package-cache');
 
   final ProjectFs fs;
   final LinuxEnvironment? linux;
+
+  /// Shared across projects so npm, pub, Yarn and Gradle reuse downloads and
+  /// metadata instead of paying for them once per project. Installed
+  /// `node_modules` stay project-local because dependency versions can differ.
+  final Directory packageCacheRoot;
   String cwd = '';
   Process? _active;
 
@@ -47,6 +54,29 @@ class SystemShell {
     linux?.cancel();
   }
 
+  /// Package managers use one cache directory for every project. Inside the
+  /// Alpine environment `/root` is the persistent guest home and is already
+  /// shared, while the Android shell gets a cache outside the project folder.
+  Map<String, String> _packageCacheEnvironment() {
+    if (linux != null && Platform.isAndroid) {
+      return const {
+        'NPM_CONFIG_CACHE': '/root/.npm',
+        'YARN_CACHE_FOLDER': '/root/.cache/yarn',
+        'PNPM_HOME': '/root/.local/share/pnpm',
+        'PUB_CACHE': '/root/.pub-cache',
+        'GRADLE_USER_HOME': '/root/.gradle',
+      };
+    }
+    final cache = packageCacheRoot.path;
+    return {
+      'NPM_CONFIG_CACHE': '$cache/npm',
+      'YARN_CACHE_FOLDER': '$cache/yarn',
+      'PNPM_HOME': '$cache/pnpm',
+      'PUB_CACHE': '$cache/pub',
+      'GRADLE_USER_HOME': '$cache/gradle',
+    };
+  }
+
   Future<SystemShellResult> run(
     String raw, {
     void Function(String chunk)? onStdout,
@@ -55,6 +85,7 @@ class SystemShell {
     Duration timeout = const Duration(seconds: 120),
   }) async {
     await fs.ensureRoot();
+    await packageCacheRoot.create(recursive: true);
     final command = raw.trim();
     if (command.isEmpty) {
       return SystemShellResult(output: '', exitCode: 0, cwd: cwdDisplay);
@@ -95,7 +126,7 @@ class SystemShell {
         projectRoot: fs.rootPath,
         cwd: cwd,
         timeout: timeout,
-        environment: environment,
+        environment: {..._packageCacheEnvironment(), ...environment},
         onStdout: onStdout,
         onStderr: onStderr,
       );
@@ -134,6 +165,7 @@ class SystemShell {
           'LANG': 'C.UTF-8',
           'TMPDIR': '${fs.rootPath}/.praxis/tmp',
           'PATH': path,
+          ..._packageCacheEnvironment(),
           ...environment,
         },
         includeParentEnvironment: true,

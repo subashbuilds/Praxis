@@ -96,6 +96,13 @@ class CloudflarePagesProject {
   final String url;
 }
 
+class CloudflareWorker {
+  const CloudflareWorker({required this.name, this.modifiedOn = ''});
+
+  final String name;
+  final String modifiedOn;
+}
+
 class GitHubSnapshot {
   const GitHubSnapshot({
     required this.headSha,
@@ -928,6 +935,42 @@ class CloudflarePagesClient {
       page++;
     }
     return projects.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+  }
+
+  /// Existing Worker scripts in the account, so a project can deploy to one
+  /// that already has routes, bindings and Variables instead of creating a
+  /// second script from the wrangler config name.
+  Future<List<CloudflareWorker>> workers() async {
+    final (accountId, _) = await _account();
+    final response = await _client
+        .get(
+          Uri.parse('https://api.cloudflare.com/client/v4/accounts/'
+              '$accountId/workers/scripts?per_page=100'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 45));
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Could not list Workers scripts'));
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    final list = body['result'];
+    if (body['success'] != true || list is! List) {
+      throw IntegrationException(
+          _error(response, 'Could not list Workers scripts'));
+    }
+    final workers = <String, CloudflareWorker>{};
+    for (final item in list) {
+      if (item is! Map) continue;
+      final name =
+          (item['id'] as String? ?? item['name'] as String? ?? '').trim();
+      if (name.isEmpty) continue;
+      workers[name] = CloudflareWorker(
+        name: name,
+        modifiedOn: item['modified_on'] as String? ?? '',
+      );
+    }
+    return workers.values.toList()..sort((a, b) => a.name.compareTo(b.name));
   }
 
   Future<CloudflarePagesProject> createProject(

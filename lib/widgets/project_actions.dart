@@ -397,6 +397,11 @@ class _DeploySheetState extends State<_DeploySheet> {
   IntegrationAccount? _cfAccount;
   List<CloudflarePagesProject> _projects = const [];
   CloudflarePagesProject? _project;
+  List<CloudflareWorker> _workers = const [];
+  CloudflareWorker? _worker;
+  bool _loadingWorkers = false;
+  String? _workersError;
+  int _workersRequest = 0;
   List<VercelProject> _vercelProjects = const [];
   VercelProject? _vercelProject;
   bool _createVercelProject = true;
@@ -440,6 +445,20 @@ class _DeploySheetState extends State<_DeploySheet> {
       platform,
       value,
     ));
+  }
+
+  void _restoreWorkerChoice(List<CloudflareWorker> workers) {
+    final saved = _state.deployChoice(
+      _state.projectById(widget.project.id),
+      'cloudflare-worker',
+    );
+    if (saved == null || saved.isEmpty || saved == 'new') return;
+    for (final worker in workers) {
+      if (worker.name == saved) {
+        _worker = worker;
+        return;
+      }
+    }
   }
 
   void _restorePagesChoice(List<CloudflarePagesProject> projects) {
@@ -494,7 +513,10 @@ class _DeploySheetState extends State<_DeploySheet> {
       }
     });
     if (_account != null) await _loadVercelProjects(_account!);
-    if (_cfAccount != null) await _loadProjects(_cfAccount!);
+    if (_cfAccount != null) {
+      await _loadProjects(_cfAccount!);
+      if (cloudflarePlan.usesWorkers) await _loadWorkers(_cfAccount!);
+    }
   }
 
   Future<void> _loadVercelProjects(IntegrationAccount account) async {
@@ -596,6 +618,36 @@ class _DeploySheetState extends State<_DeploySheet> {
     }
   }
 
+  Future<void> _loadWorkers(IntegrationAccount account) async {
+    if (!mounted) return;
+    final request = ++_workersRequest;
+    setState(() {
+      _loadingWorkers = true;
+      _workersError = null;
+    });
+    try {
+      final workers = await _state.cloudflareWorkers(account);
+      if (!mounted ||
+          request != _workersRequest ||
+          _cfAccount?.id != account.id) {
+        return;
+      }
+      setState(() {
+        _workers = workers;
+        _workersError = null;
+        _restoreWorkerChoice(workers);
+      });
+    } catch (error) {
+      if (mounted && request == _workersRequest) {
+        setState(() => _workersError = '$error');
+      }
+    } finally {
+      if (mounted && request == _workersRequest) {
+        setState(() => _loadingWorkers = false);
+      }
+    }
+  }
+
   void _selectPlatform(IntegrationKind value) {
     setState(() {
       _platform = value;
@@ -607,10 +659,11 @@ class _DeploySheetState extends State<_DeploySheet> {
         _vercelProjects.isEmpty) {
       _loadVercelProjects(_account!);
     }
-    if (value == IntegrationKind.cloudflare &&
-        _cfAccount != null &&
-        _projects.isEmpty) {
-      _loadProjects(_cfAccount!);
+    if (value == IntegrationKind.cloudflare && _cfAccount != null) {
+      if (_projects.isEmpty) _loadProjects(_cfAccount!);
+      if (_cloudflarePlan?.usesWorkers == true && _workers.isEmpty) {
+        _loadWorkers(_cfAccount!);
+      }
     }
   }
 
@@ -663,16 +716,17 @@ class _DeploySheetState extends State<_DeploySheet> {
               projectUrl: _project?.url ?? '',
               environment: _environment,
               branch: widget.project.branch,
+              workerName: _worker?.name ?? '',
               onProgress: _onDeployProgress,
             );
       if (mounted) {
         setState(() => _result = result);
-        _remember(
-          _platform == IntegrationKind.cloudflare ? 'cloudflare' : 'vercel',
-          _platform == IntegrationKind.cloudflare
-              ? (_project?.name ?? widget.project.name)
-              : (selectedVercel?.id ?? 'new'),
-        );
+        if (_platform == IntegrationKind.cloudflare) {
+          _remember('cloudflare-worker', _worker?.name ?? 'new');
+          if (_worker == null) _remember('cloudflare', _project?.name ?? '');
+        } else {
+          _remember('vercel', selectedVercel?.id ?? 'new');
+        }
       }
     } catch (error) {
       if (error is IntegrationException) {
@@ -761,318 +815,378 @@ class _DeploySheetState extends State<_DeploySheet> {
     return AnimatedPadding(
       duration: Motion.fast,
       padding: EdgeInsets.only(bottom: insets),
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SheetHandle(),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.x3, Sp.x2),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Deploy', style: Txt.headline),
-                        const SizedBox(height: 2),
-                        Text(
-                          'A static deployment of the project as it is now.',
-                          style: Txt.meta,
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconAction(
-                    icon: Icons.close_rounded,
-                    tooltip: 'Close',
-                    onTap: () => Navigator.of(context).pop(_result != null),
-                  ),
-                ],
-              ),
-            ),
-            const Hairline(),
-            Padding(
-              padding: const EdgeInsets.all(Sp.page),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _PlatformPicker(
-                    value: _platform,
-                    onChanged: _selectPlatform,
-                  ),
-                  const SizedBox(height: Sp.x4),
-                  if ((_platform == IntegrationKind.vercel
-                          ? _accounts
-                          : _cfAccounts)
-                      .isEmpty)
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        EmptyState(
-                          icon: Icons.link_off_rounded,
-                          title: 'No ${_platform.label} account',
-                          body: 'Connect ${_platform.label} once, then deploy '
-                              'this project without leaving Praxis.',
-                        ),
-                        const SizedBox(height: Sp.x3),
-                        EmberButton(
-                          label: 'Add ${_platform.label} account',
-                          icon: Icons.add_link_rounded,
-                          onTap: _addAccount,
-                        ),
-                      ],
-                    )
-                  else ...[
-                    if ((_platform == IntegrationKind.vercel
-                                ? _accounts
-                                : _cfAccounts)
-                            .length >
-                        1) ...[
-                      const _Label('ACCOUNT'),
-                      _AccountDropdown(
-                        accounts: _platform == IntegrationKind.vercel
-                            ? _accounts
-                            : _cfAccounts,
-                        value: _platform == IntegrationKind.vercel
-                            ? _account
-                            : _cfAccount,
-                        onChanged: (value) {
-                          setState(() {
-                            if (_platform == IntegrationKind.vercel) {
-                              _account = value;
-                              _vercelProjects = const [];
-                              _vercelProject = null;
-                              _createVercelProject = true;
-                            } else {
-                              _cfAccount = value;
-                              _projects = const [];
-                              _project = null;
-                            }
-                            _result = null;
-                          });
-                          if (value != null) {
-                            if (_platform == IntegrationKind.vercel) {
-                              _loadVercelProjects(value);
-                            } else {
-                              _loadProjects(value);
-                            }
-                          }
-                        },
-                      ),
-                      const SizedBox(height: Sp.x3),
-                    ],
-                    _DetailRow(
-                      label: 'Account',
-                      value:
-                          '@${_platform == IntegrationKind.vercel ? (_account?.username ?? '—') : (_cfAccount?.username ?? '—')}',
-                    ),
-                    if (_platform == IntegrationKind.cloudflare)
-                      _DetailRow(
-                        label: 'Account ID',
-                        value: _cfAccount?.accountId.isEmpty ?? true
-                            ? 'Auto-detected'
-                            : _cfAccount!.accountId,
-                      ),
-                    _DetailRow(
-                      label: 'Files',
-                      value: '$_fileCount project files',
-                    ),
-                    if (_platform == IntegrationKind.cloudflare) ...[
-                      _DetailRow(
-                        label: 'Runtime',
-                        value: _cloudflarePlan == null
-                            ? 'Checking…'
-                            : _cloudflarePlan!.usesWorkers
-                                ? 'Cloudflare Workers'
-                                : 'Cloudflare Pages',
-                      ),
-                      Text(
-                        _cloudflarePlan?.reason ??
-                            'Checking whether this project needs Workers or Pages.',
-                        style: Txt.meta.copyWith(fontSize: 10, height: 1.4),
-                      ),
-                      if (_cloudflarePlan?.usesWorkers == true)
-                        Container(
-                          margin: const EdgeInsets.only(top: Sp.x2),
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: Pal.raised,
-                            borderRadius: Rd.sm,
-                            border: Border.all(color: Pal.line),
-                          ),
-                          child: Text(
-                            'Server projects deploy with wrangler deploy. A '
-                            'wrangler.toml or Wrangler JSON config is required; '
-                            'Pages project selection is ignored.',
-                            style: Txt.meta.copyWith(height: 1.4),
-                          ),
-                        ),
-                      if (_cloudflarePlan?.usesWorkers != true) ...[
-                        const _Label('PAGES PROJECT (STATIC SITES)'),
-                        if (_projects.isEmpty)
+      child: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SheetHandle(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.x3, Sp.x2),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Deploy', style: Txt.headline),
+                          const SizedBox(height: 2),
                           Text(
-                            'No Pages projects found. A server project can still '
-                            'deploy to Workers.',
-                            style: Txt.meta.copyWith(fontSize: 10),
-                          )
-                        else
-                          _ProjectDropdown(
-                            projects: _projects,
-                            value: _project,
-                            onChanged: (value) {
-                              setState(() {
-                                _project = value;
-                                _result = null;
-                              });
-                              if (value != null) {
-                                _remember('cloudflare', value.name);
-                              }
-                            },
+                            'A static deployment of the project as it is now.',
+                            style: Txt.meta,
                           ),
-                        const SizedBox(height: 2),
-                        TextButton.icon(
-                          onPressed:
-                              _creatingProject ? null : _createPagesProject,
-                          icon: const Icon(Icons.add_rounded, size: 16),
-                          label: Text(_creatingProject
-                              ? 'Creating…'
-                              : 'Create new Pages project'),
-                        ),
-                      ],
-                    ] else ...[
-                      const _Label('VERCEL PROJECT'),
-                      if (_vercelProjects.isNotEmpty) ...[
-                        if (!_createVercelProject)
-                          _VercelProjectDropdown(
-                            projects: _vercelProjects,
-                            value: _vercelProject,
-                            onChanged: (value) {
-                              setState(() {
-                                _vercelProject = value;
-                                _createVercelProject = value == null;
-                                if (value != null) {
-                                  _name.text = value.name;
-                                }
-                                _result = null;
-                              });
-                              _remember('vercel', value?.id ?? 'new');
-                            },
-                          ),
-                        TextButton.icon(
-                          onPressed: _loadingVercel
-                              ? null
-                              : () {
-                                  setState(() {
-                                    _createVercelProject =
-                                        !_createVercelProject;
-                                    _result = null;
-                                  });
-                                  _remember(
-                                      'vercel',
-                                      _createVercelProject
-                                          ? 'new'
-                                          : (_vercelProject?.id ?? 'new'));
-                                },
-                          icon: Icon(
-                            _createVercelProject
-                                ? Icons.list_alt_rounded
-                                : Icons.add_rounded,
-                            size: 16,
-                          ),
-                          label: Text(
-                            _createVercelProject
-                                ? 'Select an existing project'
-                                : 'Create a new project instead',
-                          ),
-                        ),
-                      ],
-                      if (_createVercelProject)
-                        _Field(
-                          controller: _name,
-                          label: 'New project name',
-                          hint: 'my-project',
-                        ),
-                    ],
-                    const SizedBox(height: Sp.x3),
-                    const _Label('ENVIRONMENT'),
-                    Wrap(
-                      spacing: 7,
-                      children: [
-                        for (final value in const ['production', 'preview'])
-                          _TargetChoice(
-                            label: value == 'production'
-                                ? 'Production'
-                                : 'Preview',
-                            active: _environment == value,
-                            onTap: () => setState(() {
-                              _environment = value;
-                              _result = null;
-                            }),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
-                    if (activeError != null) ...[
-                      const SizedBox(height: 12),
-                      _ErrorNote(text: activeError),
-                    ],
-                    if (_busy) ...[
-                      const SizedBox(height: 12),
-                      _DeployProgressView(
-                        platform: _platform,
-                        runtime: _platform == IntegrationKind.cloudflare
-                            ? (_cloudflarePlan?.usesWorkers == true
-                                ? 'Cloudflare Workers'
-                                : 'Cloudflare Pages')
-                            : 'Vercel',
-                        progress: _progress,
-                      ),
-                    ],
-                    if (_result != null) ...[
-                      const SizedBox(height: 12),
-                      _DeploymentSuccess(
-                        result: _result!,
-                        refreshingLogs: _refreshingLogs,
-                        onRefreshLogs: (_result!.deploymentId ?? '').isEmpty
-                            ? null
-                            : _refreshLogs,
-                      ),
-                    ] else if (_failureLogs != null &&
-                        (_failureLogs!.trim().isNotEmpty ||
-                            (_lastDeploy?.deploymentId ?? '').isNotEmpty)) ...[
-                      const SizedBox(height: 12),
-                      _FailedDeployLogs(
-                        runtime: _failureRuntime ?? 'Deploy',
-                        logs: _failureLogs!,
-                        onRefreshLogs: (_lastDeploy?.deploymentId ?? '').isEmpty
-                            ? null
-                            : (_refreshingLogs ? null : _refreshLogs),
-                      ),
-                    ] else if (_lastDeploy != null &&
-                        (_lastDeploy!.logs.trim().isNotEmpty ||
-                            _lastDeploy!.deploymentId.isNotEmpty)) ...[
-                      const SizedBox(height: 12),
-                      _LastDeployCard(
-                        record: _lastDeploy!,
-                        onRefreshLogs: _lastDeploy!.deploymentId.isEmpty
-                            ? null
-                            : _refreshLogs,
-                        refreshingLogs: _refreshingLogs,
-                      ),
-                    ],
-                    const SizedBox(height: Sp.x4),
-                    EmberButton(
-                      label: _result == null ? 'Deploy' : 'Deployed',
-                      icon: Icons.rocket_launch_outlined,
-                      loading: _busy,
-                      onTap: _busy || _result != null ? null : _deploy,
+                    IconAction(
+                      icon: Icons.close_rounded,
+                      tooltip: 'Close',
+                      onTap: () => Navigator.of(context).pop(_result != null),
                     ),
                   ],
-                ],
+                ),
               ),
-            ),
-          ],
+              const Hairline(),
+              Padding(
+                padding: const EdgeInsets.all(Sp.page),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _PlatformPicker(
+                      value: _platform,
+                      onChanged: _selectPlatform,
+                    ),
+                    const SizedBox(height: Sp.x4),
+                    if ((_platform == IntegrationKind.vercel
+                            ? _accounts
+                            : _cfAccounts)
+                        .isEmpty)
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          EmptyState(
+                            icon: Icons.link_off_rounded,
+                            title: 'No ${_platform.label} account',
+                            body:
+                                'Connect ${_platform.label} once, then deploy '
+                                'this project without leaving Praxis.',
+                          ),
+                          const SizedBox(height: Sp.x3),
+                          EmberButton(
+                            label: 'Add ${_platform.label} account',
+                            icon: Icons.add_link_rounded,
+                            onTap: _addAccount,
+                          ),
+                        ],
+                      )
+                    else ...[
+                      if ((_platform == IntegrationKind.vercel
+                                  ? _accounts
+                                  : _cfAccounts)
+                              .length >
+                          1) ...[
+                        const _Label('ACCOUNT'),
+                        _AccountDropdown(
+                          accounts: _platform == IntegrationKind.vercel
+                              ? _accounts
+                              : _cfAccounts,
+                          value: _platform == IntegrationKind.vercel
+                              ? _account
+                              : _cfAccount,
+                          onChanged: (value) {
+                            setState(() {
+                              if (_platform == IntegrationKind.vercel) {
+                                _account = value;
+                                _vercelProjects = const [];
+                                _vercelProject = null;
+                                _createVercelProject = true;
+                              } else {
+                                _cfAccount = value;
+                                _projects = const [];
+                                _project = null;
+                                _workers = const [];
+                                _worker = null;
+                              }
+                              _result = null;
+                            });
+                            if (value != null) {
+                              if (_platform == IntegrationKind.vercel) {
+                                _loadVercelProjects(value);
+                              } else {
+                                _loadProjects(value);
+                                if (_cloudflarePlan?.usesWorkers == true) {
+                                  _loadWorkers(value);
+                                }
+                              }
+                            }
+                          },
+                        ),
+                        const SizedBox(height: Sp.x3),
+                      ],
+                      _DetailRow(
+                        label: 'Account',
+                        value:
+                            '@${_platform == IntegrationKind.vercel ? (_account?.username ?? '—') : (_cfAccount?.username ?? '—')}',
+                      ),
+                      if (_platform == IntegrationKind.cloudflare)
+                        _DetailRow(
+                          label: 'Account ID',
+                          value: _cfAccount?.accountId.isEmpty ?? true
+                              ? 'Auto-detected'
+                              : _cfAccount!.accountId,
+                        ),
+                      _DetailRow(
+                        label: 'Files',
+                        value: '$_fileCount project files',
+                      ),
+                      if (_platform == IntegrationKind.cloudflare) ...[
+                        _DetailRow(
+                          label: 'Runtime',
+                          value: _cloudflarePlan == null
+                              ? 'Checking…'
+                              : _cloudflarePlan!.usesWorkers
+                                  ? 'Cloudflare Workers'
+                                  : 'Cloudflare Pages',
+                        ),
+                        Text(
+                          _cloudflarePlan?.reason ??
+                              'Checking whether this project needs Workers or Pages.',
+                          style: Txt.meta.copyWith(fontSize: 10, height: 1.4),
+                        ),
+                        if (_cloudflarePlan?.usesWorkers == true) ...[
+                          Container(
+                            margin: const EdgeInsets.only(top: Sp.x2),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Pal.raised,
+                              borderRadius: Rd.sm,
+                              border: Border.all(color: Pal.line),
+                            ),
+                            child: Text(
+                              'Server projects deploy with wrangler deploy. A '
+                              'wrangler.toml or Wrangler JSON config is required. '
+                              'Pick an existing Worker to deploy to it; otherwise '
+                              'the name in the config is used.',
+                              style: Txt.meta.copyWith(height: 1.4),
+                            ),
+                          ),
+                          const SizedBox(height: Sp.x3),
+                          const _Label('WORKER'),
+                          if (_loadingWorkers)
+                            Text(
+                              'Loading existing Workers…',
+                              style: Txt.meta.copyWith(fontSize: 10),
+                            )
+                          else if (_workers.isNotEmpty)
+                            _WorkerDropdown(
+                              workers: _workers,
+                              value: _worker,
+                              onChanged: (value) {
+                                setState(() {
+                                  _worker = value;
+                                  _result = null;
+                                });
+                                _remember(
+                                    'cloudflare-worker', value?.name ?? 'new');
+                              },
+                            )
+                          else
+                            Text(
+                              _workersError == null
+                                  ? 'No existing Workers found. The config name '
+                                      'will be used.'
+                                  : 'Could not list Workers. The config name '
+                                      'will be used. Check that the token has '
+                                      'Workers Scripts: Read permission.',
+                              style: Txt.meta.copyWith(fontSize: 10),
+                            ),
+                          if (_worker != null)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: () {
+                                  setState(() {
+                                    _worker = null;
+                                    _result = null;
+                                  });
+                                  _remember('cloudflare-worker', 'new');
+                                },
+                                icon: const Icon(Icons.edit_outlined, size: 16),
+                                label:
+                                    const Text('Use the wrangler config name'),
+                              ),
+                            ),
+                        ],
+                        if (_cloudflarePlan?.usesWorkers != true) ...[
+                          const _Label('PAGES PROJECT (STATIC SITES)'),
+                          if (_projects.isEmpty)
+                            Text(
+                              'No Pages projects found. A server project can still '
+                              'deploy to Workers.',
+                              style: Txt.meta.copyWith(fontSize: 10),
+                            )
+                          else
+                            _ProjectDropdown(
+                              projects: _projects,
+                              value: _project,
+                              onChanged: (value) {
+                                setState(() {
+                                  _project = value;
+                                  _result = null;
+                                });
+                                if (value != null) {
+                                  _remember('cloudflare', value.name);
+                                }
+                              },
+                            ),
+                          const SizedBox(height: 2),
+                          TextButton.icon(
+                            onPressed:
+                                _creatingProject ? null : _createPagesProject,
+                            icon: const Icon(Icons.add_rounded, size: 16),
+                            label: Text(_creatingProject
+                                ? 'Creating…'
+                                : 'Create new Pages project'),
+                          ),
+                        ],
+                      ] else ...[
+                        const _Label('VERCEL PROJECT'),
+                        if (_vercelProjects.isNotEmpty) ...[
+                          if (!_createVercelProject)
+                            _VercelProjectDropdown(
+                              projects: _vercelProjects,
+                              value: _vercelProject,
+                              onChanged: (value) {
+                                setState(() {
+                                  _vercelProject = value;
+                                  _createVercelProject = value == null;
+                                  if (value != null) {
+                                    _name.text = value.name;
+                                  }
+                                  _result = null;
+                                });
+                                _remember('vercel', value?.id ?? 'new');
+                              },
+                            ),
+                          TextButton.icon(
+                            onPressed: _loadingVercel
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _createVercelProject =
+                                          !_createVercelProject;
+                                      _result = null;
+                                    });
+                                    _remember(
+                                        'vercel',
+                                        _createVercelProject
+                                            ? 'new'
+                                            : (_vercelProject?.id ?? 'new'));
+                                  },
+                            icon: Icon(
+                              _createVercelProject
+                                  ? Icons.list_alt_rounded
+                                  : Icons.add_rounded,
+                              size: 16,
+                            ),
+                            label: Text(
+                              _createVercelProject
+                                  ? 'Select an existing project'
+                                  : 'Create a new project instead',
+                            ),
+                          ),
+                        ],
+                        if (_createVercelProject)
+                          _Field(
+                            controller: _name,
+                            label: 'New project name',
+                            hint: 'my-project',
+                          ),
+                      ],
+                      const SizedBox(height: Sp.x3),
+                      const _Label('ENVIRONMENT'),
+                      Wrap(
+                        spacing: 7,
+                        children: [
+                          for (final value in const ['production', 'preview'])
+                            _TargetChoice(
+                              label: value == 'production'
+                                  ? 'Production'
+                                  : 'Preview',
+                              active: _environment == value,
+                              onTap: () => setState(() {
+                                _environment = value;
+                                _result = null;
+                              }),
+                            ),
+                        ],
+                      ),
+                      if (activeError != null) ...[
+                        const SizedBox(height: 12),
+                        _ErrorNote(text: activeError),
+                      ],
+                      if (_busy) ...[
+                        const SizedBox(height: 12),
+                        _DeployProgressView(
+                          platform: _platform,
+                          runtime: _platform == IntegrationKind.cloudflare
+                              ? (_cloudflarePlan?.usesWorkers == true
+                                  ? 'Cloudflare Workers'
+                                  : 'Cloudflare Pages')
+                              : 'Vercel',
+                          progress: _progress,
+                        ),
+                      ],
+                      if (_result != null) ...[
+                        const SizedBox(height: 12),
+                        _DeploymentSuccess(
+                          result: _result!,
+                          refreshingLogs: _refreshingLogs,
+                          onRefreshLogs: (_result!.deploymentId ?? '').isEmpty
+                              ? null
+                              : _refreshLogs,
+                        ),
+                      ] else if (_failureLogs != null &&
+                          (_failureLogs!.trim().isNotEmpty ||
+                              (_lastDeploy?.deploymentId ?? '')
+                                  .isNotEmpty)) ...[
+                        const SizedBox(height: 12),
+                        _FailedDeployLogs(
+                          runtime: _failureRuntime ?? 'Deploy',
+                          logs: _failureLogs!,
+                          onRefreshLogs:
+                              (_lastDeploy?.deploymentId ?? '').isEmpty
+                                  ? null
+                                  : (_refreshingLogs ? null : _refreshLogs),
+                        ),
+                      ] else if (_lastDeploy != null &&
+                          (_lastDeploy!.logs.trim().isNotEmpty ||
+                              _lastDeploy!.deploymentId.isNotEmpty)) ...[
+                        const SizedBox(height: 12),
+                        _LastDeployCard(
+                          record: _lastDeploy!,
+                          onRefreshLogs: _lastDeploy!.deploymentId.isEmpty
+                              ? null
+                              : _refreshLogs,
+                          refreshingLogs: _refreshingLogs,
+                        ),
+                      ],
+                      const SizedBox(height: Sp.x4),
+                      EmberButton(
+                        label: _result == null ? 'Deploy' : 'Deployed',
+                        icon: Icons.rocket_launch_outlined,
+                        loading: _busy,
+                        onTap: _busy || _result != null ? null : _deploy,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1715,6 +1829,51 @@ class _ProjectDropdown extends StatelessWidget {
               DropdownMenuItem(
                 value: project,
                 child: Text(project.name),
+              ),
+          ],
+          onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+}
+
+class _WorkerDropdown extends StatelessWidget {
+  const _WorkerDropdown({
+    required this.workers,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final List<CloudflareWorker> workers;
+  final CloudflareWorker? value;
+  final ValueChanged<CloudflareWorker?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.line),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<CloudflareWorker>(
+          value: value,
+          isExpanded: true,
+          hint: Text(
+            'Use the wrangler config name',
+            style: Txt.body.copyWith(fontSize: 13, color: Pal.textMuted),
+          ),
+          dropdownColor: Pal.raised,
+          icon: Icon(Icons.unfold_more_rounded, size: 17, color: Pal.textDim),
+          style: Txt.body.copyWith(fontSize: 13),
+          items: [
+            for (final worker in workers)
+              DropdownMenuItem(
+                value: worker,
+                child: Text(worker.name),
               ),
           ],
           onChanged: onChanged,

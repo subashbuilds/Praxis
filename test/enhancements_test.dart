@@ -212,6 +212,23 @@ void main() {
     expect(environment.output, contains('${temp.path}/.praxis/tmp'));
   });
 
+  test('package-manager caches are shared outside the project', () async {
+    if (Platform.isAndroid) return;
+    final temp = await Directory.systemTemp.createTemp('devnest_cache_');
+    final cache = await Directory.systemTemp.createTemp('devnest_shared_');
+    addTearDown(() => temp.delete(recursive: true));
+    addTearDown(() => cache.delete(recursive: true));
+    final shell = SystemShell(ProjectFs(temp), packageCacheRoot: cache);
+
+    final result = await shell.run(
+      'printf "%s\\n" "\$NPM_CONFIG_CACHE" "\$PUB_CACHE"',
+    );
+
+    expect(result.output, contains('${cache.path}/npm'));
+    expect(result.output, contains('${cache.path}/pub'));
+    expect(result.output, isNot(contains('${temp.path}/package-cache')));
+  });
+
   group('integration accounts', () {
     test('Cloudflare account id round-trips', () {
       const account = IntegrationAccount(

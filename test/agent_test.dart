@@ -107,6 +107,67 @@ void main() {
     expect(events.last.text, contains('Done'));
   });
 
+  test('connected integrations are visible without exposing tokens', () async {
+    var calls = 0;
+    String? requestBody;
+    final client = MockClient((request) async {
+      calls++;
+      requestBody = request.body;
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'I can see the connected accounts.'
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    final agent = Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      integrations: const Integrations(
+        accounts: [
+          IntegrationAccount(
+            id: 'gh-1',
+            kind: IntegrationKind.github,
+            label: 'Work GitHub',
+            username: 'octocat',
+            token: 'ghp_supersecret',
+          ),
+          IntegrationAccount(
+            id: 'cf-1',
+            kind: IntegrationKind.cloudflare,
+            label: 'Production',
+            username: 'team@example.test',
+            token: 'cf_supersecret',
+            accountId: '9108e7beac14c0240ab7cbd5bedb2ebb',
+          ),
+        ],
+        activeGithubId: 'gh-1',
+      ),
+      onEvent: (_) {},
+    );
+
+    await agent.run(history: const [], prompt: 'which accounts are connected?');
+
+    expect(calls, 1);
+    expect(requestBody, contains('Work GitHub'));
+    expect(requestBody, contains('@octocat'));
+    expect(requestBody, contains('9108e7beac14c0240ab7cbd5bedb2ebb'));
+    expect(requestBody, isNot(contains('ghp_supersecret')));
+    expect(requestBody, isNot(contains('cf_supersecret')));
+  });
+
   test('a read_file tool call returns file contents', () async {
     await fs.write('README.md', '# project');
     var calls = 0;

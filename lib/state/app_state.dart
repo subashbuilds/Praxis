@@ -292,7 +292,11 @@ class AppState extends ChangeNotifier {
 
   SystemShell systemShellFor(Project project) => _systemShells.putIfAbsent(
         project.id,
-        () => SystemShell(fsFor(project), linux: linux),
+        () => SystemShell(
+          fsFor(project),
+          linux: linux,
+          packageCacheRoot: Directory('${root.path}/package-cache'),
+        ),
       );
 
   /// The editor publishes the open path so context prefetch can include it.
@@ -1017,6 +1021,7 @@ class AppState extends ChangeNotifier {
       mode: agentMode,
       onIntegrationQuery: (service, action, target) =>
           _integrationStatus(project, service, action, target),
+      integrations: integrations,
       initialTodos: savedTodos,
       onTodosChanged: (next) => _setTodos(project, next),
       expectChanges: resumeFrom != null,
@@ -2639,6 +2644,15 @@ Continue the task. Do not repeat a write or destructive action that already comp
         client: httpClient,
       ).projects();
 
+  Future<List<CloudflareWorker>> cloudflareWorkers(
+    IntegrationAccount account,
+  ) =>
+      CloudflarePagesClient(
+        account.token,
+        accountId: account.accountId,
+        client: httpClient,
+      ).workers();
+
   Future<CloudflarePagesProject> createCloudflareProject(
     IntegrationAccount account, {
     required String name,
@@ -2819,6 +2833,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
     String projectUrl = '',
     String environment = 'production',
     String branch = 'main',
+    String workerName = '',
     void Function(DeployProgress)? onProgress,
   }) async {
     final fs = fsFor(project);
@@ -2828,6 +2843,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
         account,
         projectName: projectName,
         environment: environment,
+        workerName: workerName,
         onProgress: onProgress,
       );
     }
@@ -3116,6 +3132,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
     IntegrationAccount account, {
     required String projectName,
     required String environment,
+    String workerName = '',
     void Function(DeployProgress)? onProgress,
   }) async {
     final fs = fsFor(project);
@@ -3171,8 +3188,9 @@ Continue the task. Do not repeat a write or destructive action that already comp
       'Deploying',
       detail: 'Cloudflare Workers ($environment)',
     ));
+    final target = workerName.trim();
     final result = await shell.run(
-      'npx --yes wrangler deploy',
+      cloudflareWorkerDeployCommandFor(target),
       environment: shellEnv,
       timeout: const Duration(minutes: 15),
     );
@@ -3192,8 +3210,8 @@ Continue the task. Do not repeat a write or destructive action that already comp
       project,
       IntegrationResult(
         message: url == null
-            ? 'Deployed $projectName to Cloudflare Workers.'
-            : 'Deployed $projectName to Cloudflare Workers at $url.',
+            ? 'Deployed ${target.isEmpty ? projectName : target} to Cloudflare Workers.'
+            : 'Deployed ${target.isEmpty ? projectName : target} to Cloudflare Workers at $url.',
         url: url,
         runtime: 'Cloudflare Workers',
         logs: _boundedLog(output),

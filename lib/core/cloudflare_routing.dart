@@ -22,8 +22,21 @@ class CloudflareDeployPlan {
   bool get usesWorkers => surface == CloudflareDeploySurface.workers;
 }
 
-const cloudflareNpmInstallCommand = 'npm install --no-audit --no-fund';
+// Reuse the shared package cache before going to the registry. Without this,
+// every project downloads the same dependency tarballs again.
+const cloudflareNpmInstallCommand =
+    'npm install --prefer-offline --no-audit --no-fund';
 const cloudflareNpmBuildCommand = 'npm run build';
+const cloudflareWorkerDeployCommand = 'npx --yes wrangler deploy';
+
+/// Targets an existing Worker while still using the project's wrangler config
+/// for routes, bindings and Variables. Empty means use the config's own name.
+String cloudflareWorkerDeployCommandFor(String name) {
+  final target = name.trim();
+  if (target.isEmpty) return cloudflareWorkerDeployCommand;
+  final escaped = target.replaceAll("'", "'\\''");
+  return "$cloudflareWorkerDeployCommand --name '$escaped'";
+}
 
 const _staticOutputCandidates = [
   'out',

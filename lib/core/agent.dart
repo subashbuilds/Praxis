@@ -466,6 +466,7 @@ class Agent {
     this.linuxShell = false,
     this.toolApproval,
     this.onIntegrationQuery,
+    this.integrations = const Integrations(),
     this.initialTodos = const [],
     this.onTodosChanged,
     this.expectChanges = false,
@@ -515,6 +516,10 @@ class Agent {
 
   /// Reads connected deployment and CI data without exposing credentials.
   final AgentIntegrationQuery? onIntegrationQuery;
+
+  /// Connected accounts shown to the model by service and public identity.
+  /// Access tokens are deliberately never included in the prompt.
+  final Integrations integrations;
 
   final List<AgentTodo> initialTodos;
   final void Function(List<AgentTodo> todos)? onTodosChanged;
@@ -568,8 +573,9 @@ class Agent {
         'Read connected GitHub Actions, Cloudflare Pages/Workers or Vercel '
         'deployments, including status, URLs and failing job names. For '
         'Cloudflare, use action logs with target project or '
-        'project/deployment-id to fetch the real build log. Use this instead of '
-        'asking the user to paste logs. Never prints access tokens.',
+        'project/deployment-id to fetch the real build log. The connected '
+        'accounts are listed in the system prompt. Use this instead of asking '
+        'the user to paste logs or account details. Never prints access tokens.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -1163,6 +1169,7 @@ class Agent {
     }).join('\n');
     final fullShell = deviceShell != null;
     final parallelTools = providerSupportsParallelToolCalls(provider);
+    final integrationContext = _integrationContext();
     return '''
 You are Praxis, an AI coding agent running on the user's Android phone.
 You work on a real project folder on the device. The user sees your replies,
@@ -1218,6 +1225,7 @@ Environment:
 - A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
 - Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
+${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status to read deployments, workflows and build logs for these accounts. Never ask for a token.'}
 
 Context policy (the host enforces this automatically):
 - Below about 60% of the model window: do nothing.
@@ -1232,6 +1240,21 @@ ${skillIndex.isEmpty ? '' : '\nSkills available (use /skill-name to invoke one e
 ${todoContext.isEmpty ? '' : '\n$todoContext'}\n${projectEnv.isEmpty ? '' : '\nProject environment (values are available to build and shell commands; secret values are hidden from you):\n${projectEnv.map((entry) => entry.secret ? '- ${entry.name} (secret)' : '- ${entry.name}=${entry.value}').join('\n')}\nNever ask the user to paste a secret; use the variable name in commands.'}
 ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillText'}
 ''';
+  }
+
+  String _integrationContext() {
+    if (integrations.accounts.isEmpty) return '';
+    return integrations.accounts.map((account) {
+      final active = integrations.activeFor(account.kind)?.id == account.id;
+      final label = account.label.trim();
+      final username = account.username.trim();
+      final accountId = account.accountId.trim();
+      final identity = label.isNotEmpty
+          ? '$label${username.isEmpty ? '' : ' · @$username'}'
+          : (username.isEmpty ? 'connected' : '@$username');
+      return '- ${account.kind.label}${active ? ' (active)' : ''}: $identity'
+          '${accountId.isEmpty ? '' : ' · account $accountId'}';
+    }).join('\n');
   }
 
   /// `/name` always wins over keyword relevance. Slash alone is ignored by the

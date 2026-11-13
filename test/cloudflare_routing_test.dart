@@ -98,8 +98,13 @@ void main() {
     expect(hasNpmBuildScript(package), isTrue);
     expect(hasNpmBuildScript('{"scripts": {}}'), isFalse);
     expect(await staticOutputFolder(fs), 'dist');
-    expect(cloudflareNpmInstallCommand, 'npm install --no-audit --no-fund');
+    expect(cloudflareNpmInstallCommand,
+        'npm install --prefer-offline --no-audit --no-fund');
     expect(cloudflareNpmBuildCommand, 'npm run build');
+    expect(cloudflareWorkerDeployCommand, 'npx --yes wrangler deploy');
+    expect(cloudflareWorkerDeployCommandFor(''), 'npx --yes wrangler deploy');
+    expect(cloudflareWorkerDeployCommandFor('api-worker'),
+        "npx --yes wrangler deploy --name 'api-worker'");
     expect(
       (await planCloudflareDeploy(fs)).surface,
       CloudflareDeploySurface.pages,
