@@ -397,11 +397,6 @@ class _DeploySheetState extends State<_DeploySheet> {
   IntegrationAccount? _cfAccount;
   List<CloudflarePagesProject> _projects = const [];
   CloudflarePagesProject? _project;
-  List<CloudflareWorker> _workers = const [];
-  CloudflareWorker? _worker;
-  bool _loadingWorkers = false;
-  String? _workersError;
-  int _workersRequest = 0;
   List<VercelProject> _vercelProjects = const [];
   VercelProject? _vercelProject;
   bool _createVercelProject = true;
@@ -445,20 +440,6 @@ class _DeploySheetState extends State<_DeploySheet> {
       platform,
       value,
     ));
-  }
-
-  void _restoreWorkerChoice(List<CloudflareWorker> workers) {
-    final saved = _state.deployChoice(
-      _state.projectById(widget.project.id),
-      'cloudflare-worker',
-    );
-    if (saved == null || saved.isEmpty || saved == 'new') return;
-    for (final worker in workers) {
-      if (worker.name == saved) {
-        _worker = worker;
-        return;
-      }
-    }
   }
 
   void _restorePagesChoice(List<CloudflarePagesProject> projects) {
@@ -513,10 +494,7 @@ class _DeploySheetState extends State<_DeploySheet> {
       }
     });
     if (_account != null) await _loadVercelProjects(_account!);
-    if (_cfAccount != null) {
-      await _loadProjects(_cfAccount!);
-      if (cloudflarePlan.usesWorkers) await _loadWorkers(_cfAccount!);
-    }
+    if (_cfAccount != null) await _loadProjects(_cfAccount!);
   }
 
   Future<void> _loadVercelProjects(IntegrationAccount account) async {
@@ -618,41 +596,13 @@ class _DeploySheetState extends State<_DeploySheet> {
     }
   }
 
-  Future<void> _loadWorkers(IntegrationAccount account) async {
-    if (!mounted) return;
-    final request = ++_workersRequest;
-    setState(() {
-      _loadingWorkers = true;
-      _workersError = null;
-    });
-    try {
-      final workers = await _state.cloudflareWorkers(account);
-      if (!mounted ||
-          request != _workersRequest ||
-          _cfAccount?.id != account.id) {
-        return;
-      }
-      setState(() {
-        _workers = workers;
-        _workersError = null;
-        _restoreWorkerChoice(workers);
-      });
-    } catch (error) {
-      if (mounted && request == _workersRequest) {
-        setState(() => _workersError = '$error');
-      }
-    } finally {
-      if (mounted && request == _workersRequest) {
-        setState(() => _loadingWorkers = false);
-      }
-    }
-  }
-
   void _selectPlatform(IntegrationKind value) {
     setState(() {
       _platform = value;
       _result = null;
       _error = null;
+      _failureLogs = null;
+      _failureRuntime = null;
     });
     if (value == IntegrationKind.vercel &&
         _account != null &&
@@ -661,9 +611,6 @@ class _DeploySheetState extends State<_DeploySheet> {
     }
     if (value == IntegrationKind.cloudflare && _cfAccount != null) {
       if (_projects.isEmpty) _loadProjects(_cfAccount!);
-      if (_cloudflarePlan?.usesWorkers == true && _workers.isEmpty) {
-        _loadWorkers(_cfAccount!);
-      }
     }
   }
 
@@ -716,17 +663,16 @@ class _DeploySheetState extends State<_DeploySheet> {
               projectUrl: _project?.url ?? '',
               environment: _environment,
               branch: widget.project.branch,
-              workerName: _worker?.name ?? '',
               onProgress: _onDeployProgress,
             );
       if (mounted) {
         setState(() => _result = result);
-        if (_platform == IntegrationKind.cloudflare) {
-          _remember('cloudflare-worker', _worker?.name ?? 'new');
-          if (_worker == null) _remember('cloudflare', _project?.name ?? '');
-        } else {
-          _remember('vercel', selectedVercel?.id ?? 'new');
-        }
+        _remember(
+          _platform == IntegrationKind.cloudflare ? 'cloudflare' : 'vercel',
+          _platform == IntegrationKind.cloudflare
+              ? (_project?.name ?? '')
+              : (selectedVercel?.id ?? 'new'),
+        );
       }
     } catch (error) {
       if (error is IntegrationException) {
@@ -812,6 +758,10 @@ class _DeploySheetState extends State<_DeploySheet> {
     final platformError =
         _platform == IntegrationKind.cloudflare ? _cfError : _vercelError;
     final activeError = _error ?? platformError;
+    final lastDeploy = _lastDeploy != null &&
+            deployLogMatchesPlatform(_platform.name, _lastDeploy!.runtime)
+        ? _lastDeploy
+        : null;
     return AnimatedPadding(
       duration: Motion.fast,
       padding: EdgeInsets.only(bottom: insets),
@@ -907,19 +857,16 @@ class _DeploySheetState extends State<_DeploySheet> {
                                 _cfAccount = value;
                                 _projects = const [];
                                 _project = null;
-                                _workers = const [];
-                                _worker = null;
                               }
                               _result = null;
+                              _failureLogs = null;
+                              _failureRuntime = null;
                             });
                             if (value != null) {
                               if (_platform == IntegrationKind.vercel) {
                                 _loadVercelProjects(value);
                               } else {
                                 _loadProjects(value);
-                                if (_cloudflarePlan?.usesWorkers == true) {
-                                  _loadWorkers(value);
-                                }
                               }
                             }
                           },
@@ -956,76 +903,12 @@ class _DeploySheetState extends State<_DeploySheet> {
                               'Checking whether this project needs Workers or Pages.',
                           style: Txt.meta.copyWith(fontSize: 10, height: 1.4),
                         ),
-                        if (_cloudflarePlan?.usesWorkers == true) ...[
-                          Container(
-                            margin: const EdgeInsets.only(top: Sp.x2),
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: Pal.raised,
-                              borderRadius: Rd.sm,
-                              border: Border.all(color: Pal.line),
-                            ),
-                            child: Text(
-                              'Server projects deploy with wrangler deploy. A '
-                              'wrangler.toml or Wrangler JSON config is required. '
-                              'Pick an existing Worker to deploy to it; otherwise '
-                              'the name in the config is used.',
-                              style: Txt.meta.copyWith(height: 1.4),
-                            ),
-                          ),
-                          const SizedBox(height: Sp.x3),
-                          const _Label('WORKER'),
-                          if (_loadingWorkers)
-                            Text(
-                              'Loading existing Workers…',
-                              style: Txt.meta.copyWith(fontSize: 10),
-                            )
-                          else if (_workers.isNotEmpty)
-                            _WorkerDropdown(
-                              workers: _workers,
-                              value: _worker,
-                              onChanged: (value) {
-                                setState(() {
-                                  _worker = value;
-                                  _result = null;
-                                });
-                                _remember(
-                                    'cloudflare-worker', value?.name ?? 'new');
-                              },
-                            )
-                          else
-                            Text(
-                              _workersError == null
-                                  ? 'No existing Workers found. The config name '
-                                      'will be used.'
-                                  : 'Could not list Workers. The config name '
-                                      'will be used. Check that the token has '
-                                      'Workers Scripts: Read permission.',
-                              style: Txt.meta.copyWith(fontSize: 10),
-                            ),
-                          if (_worker != null)
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton.icon(
-                                onPressed: () {
-                                  setState(() {
-                                    _worker = null;
-                                    _result = null;
-                                  });
-                                  _remember('cloudflare-worker', 'new');
-                                },
-                                icon: const Icon(Icons.edit_outlined, size: 16),
-                                label:
-                                    const Text('Use the wrangler config name'),
-                              ),
-                            ),
-                        ],
-                        if (_cloudflarePlan?.usesWorkers != true) ...[
+                        if (_cloudflarePlan?.usesWorkers == false) ...[
                           const _Label('PAGES PROJECT (STATIC SITES)'),
                           if (_projects.isEmpty)
                             Text(
-                              'No Pages projects found. A server project can still '
-                              'deploy to Workers.',
+                              'No Pages projects found. Create one to deploy '
+                              'this static site.',
                               style: Txt.meta.copyWith(fontSize: 10),
                             )
                           else
@@ -1051,6 +934,9 @@ class _DeploySheetState extends State<_DeploySheet> {
                                 ? 'Creating…'
                                 : 'Create new Pages project'),
                           ),
+                        ] else ...[
+                          const SizedBox(height: Sp.x2),
+                          const _ErrorNote(text: cloudflareWorkersUnavailable),
                         ],
                       ] else ...[
                         const _Label('VERCEL PROJECT'),
@@ -1151,24 +1037,23 @@ class _DeploySheetState extends State<_DeploySheet> {
                         ),
                       ] else if (_failureLogs != null &&
                           (_failureLogs!.trim().isNotEmpty ||
-                              (_lastDeploy?.deploymentId ?? '')
-                                  .isNotEmpty)) ...[
+                              (lastDeploy?.deploymentId ?? '').isNotEmpty)) ...[
                         const SizedBox(height: 12),
                         _FailedDeployLogs(
                           runtime: _failureRuntime ?? 'Deploy',
                           logs: _failureLogs!,
                           onRefreshLogs:
-                              (_lastDeploy?.deploymentId ?? '').isEmpty
+                              (lastDeploy?.deploymentId ?? '').isEmpty
                                   ? null
                                   : (_refreshingLogs ? null : _refreshLogs),
                         ),
-                      ] else if (_lastDeploy != null &&
-                          (_lastDeploy!.logs.trim().isNotEmpty ||
-                              _lastDeploy!.deploymentId.isNotEmpty)) ...[
+                      ] else if (lastDeploy != null &&
+                          (lastDeploy.logs.trim().isNotEmpty ||
+                              lastDeploy.deploymentId.isNotEmpty)) ...[
                         const SizedBox(height: 12),
                         _LastDeployCard(
-                          record: _lastDeploy!,
-                          onRefreshLogs: _lastDeploy!.deploymentId.isEmpty
+                          record: lastDeploy,
+                          onRefreshLogs: lastDeploy.deploymentId.isEmpty
                               ? null
                               : _refreshLogs,
                           refreshingLogs: _refreshingLogs,
@@ -1179,7 +1064,12 @@ class _DeploySheetState extends State<_DeploySheet> {
                         label: _result == null ? 'Deploy' : 'Deployed',
                         icon: Icons.rocket_launch_outlined,
                         loading: _busy,
-                        onTap: _busy || _result != null ? null : _deploy,
+                        onTap: _busy ||
+                                _result != null ||
+                                (_platform == IntegrationKind.cloudflare &&
+                                    _cloudflarePlan?.usesWorkers == true)
+                            ? null
+                            : _deploy,
                       ),
                     ],
                   ],
@@ -1829,51 +1719,6 @@ class _ProjectDropdown extends StatelessWidget {
               DropdownMenuItem(
                 value: project,
                 child: Text(project.name),
-              ),
-          ],
-          onChanged: onChanged,
-        ),
-      ),
-    );
-  }
-}
-
-class _WorkerDropdown extends StatelessWidget {
-  const _WorkerDropdown({
-    required this.workers,
-    required this.value,
-    required this.onChanged,
-  });
-
-  final List<CloudflareWorker> workers;
-  final CloudflareWorker? value;
-  final ValueChanged<CloudflareWorker?> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11),
-      decoration: BoxDecoration(
-        color: Pal.raised,
-        borderRadius: Rd.sm,
-        border: Border.all(color: Pal.line),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<CloudflareWorker>(
-          value: value,
-          isExpanded: true,
-          hint: Text(
-            'Use the wrangler config name',
-            style: Txt.body.copyWith(fontSize: 13, color: Pal.textMuted),
-          ),
-          dropdownColor: Pal.raised,
-          icon: Icon(Icons.unfold_more_rounded, size: 17, color: Pal.textDim),
-          style: Txt.body.copyWith(fontSize: 13),
-          items: [
-            for (final worker in workers)
-              DropdownMenuItem(
-                value: worker,
-                child: Text(worker.name),
               ),
           ],
           onChanged: onChanged,

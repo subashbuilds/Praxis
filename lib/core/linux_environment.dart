@@ -606,6 +606,12 @@ class LinuxEnvironment extends ChangeNotifier {
           .timeout(const Duration(seconds: 3), onTimeout: () {});
     } on TimeoutException {
       process.kill(ProcessSignal.sigkill);
+      // Keep the output emitted before the kill; npm and framework builds
+      // usually explain the real failure in those final lines.
+      await outDone.future
+          .timeout(const Duration(seconds: 2), onTimeout: () {});
+      await errDone.future
+          .timeout(const Duration(seconds: 2), onTimeout: () {});
       output.write('\n[timed out after ${timeout.inSeconds}s]');
       exitCode = 124;
     } finally {

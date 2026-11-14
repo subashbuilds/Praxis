@@ -26,7 +26,7 @@ Grab the latest signed APK from [GitHub Releases](https://github.com/subashbuild
 - **Approvals only for destructive work.** Edits and ordinary commands run without interruption. Deleting or removing files requires approval, and the dialog keeps Cancel and Approve visible above a scrollable list of what will be removed.
 - **A real Alpine environment.** Settings → **Linux Environment** prepares Alpine 3.21.7 under proot, repairs incomplete rootfs links, installs Node.js, Python, PHP, or Go with `apk`, and provides an interactive shell with the project mounted at `/workspace`. The shell header reports guest CPU and RAM, and tapping the Alpine pill opens this page.
 - **A live preview.** Static web projects, Markdown, images and SVGs can be inspected without leaving the app.
-- **An Integrations page.** Connect GitHub, Vercel, Cloudflare, Expo (EAS), Tavily, and Supabase. GitHub drives commit, push, pull, branch, and pull-request actions; Vercel drives static deploys; Cloudflare deploys static sites to Pages and server projects to Workers. The agent can read connected workflow runs and deployment status with the `integration_status` tool, including failing job names, instead of asking for pasted logs. Every token stays on the device and can be removed from the page.
+- **An Integrations page.** Connect GitHub, Vercel, Cloudflare, Expo (EAS), Tavily, and Supabase. GitHub drives commit, push, pull, branch, and pull-request actions; Vercel drives static deploys; Cloudflare deploys static sites to Pages, while server projects are detected and reported as unsupported on-device. The agent can read connected workflow runs and deployment status with the `integration_status` tool, including failing job names, instead of asking for pasted logs. Every token stays on the device and can be removed from the page.
 - **Skills, with discovery.** Create or edit reusable instructions, import `.md` and `.txt` files, or discover public `SKILL.md` files through GitHub's free API. Global skills apply everywhere; project skills under `.praxis/skills/<name>/SKILL.md` still load for that project.
 - **Import without losing bytes.** Add files or merge a folder into an existing project. Android uses the system folder picker, copies the selected tree into app-private cache, then imports every child recursively. Existing folders merge, collisions are resolved one by one, and the imported tree expands immediately.
 - **Logs you can inspect and export.** Review model requests by task, including round counts, token usage when the provider reports it, and repeated calls. Export the aggregate as privacy-preserving JSON.
@@ -60,7 +60,7 @@ Open **Settings → Integrations** to connect services. The page is also availab
 | --- | --- |
 | GitHub | Repository sync, branches, commits, pushes, and pull requests |
 | Vercel | Static deployments |
-| Cloudflare | Pages deployments for static output and Workers deployments for server code |
+| Cloudflare | Pages deployments for static output; Workers server code requires a desktop or CI runner |
 | Expo (EAS) | Access-token storage for EAS builds |
 | Web Search (Tavily) | API-key storage for web search |
 | Supabase | Access-token storage and Management API check |
@@ -109,15 +109,15 @@ Open the **Tools** button in the shell header for two tabs:
 
 Environment entries are stored at `.praxis/environment.json` inside the project. Secret values never enter the conversation. The task checklist is stored at `.praxis/todos.json`, so it survives a paused run, a stop, or an app restart and is available to the next agent turn. A large text file is guarded by a preview and an **Open anyway** action, so tapping a multi-megabyte file does not freeze the editor.
 
-The deploy sheet shows the same decision before the upload starts, naming **Cloudflare Workers** or **Cloudflare Pages** and explaining why. The runtime stays visible during the deploy stages and in the success panel.
+The deploy sheet explains whether the project is static **Cloudflare Pages** output or contains server code. The runtime stays visible during the deploy stages and in the success panel.
 
-After a deployment, Praxis fetches the real build log from Cloudflare's Pages `history/logs` endpoint and shows it in the result, where it can be selected or copied. Workers deployments show the actual `wrangler deploy` output. The agent's `integration_status` tool can also fetch Pages build logs with `action: logs`; the target is a Pages project name or `project/deployment-id`.
+After a deployment, Praxis fetches the real build log from Cloudflare's Pages `history/logs` endpoint and shows it in the result, where it can be selected or copied. The agent's `integration_status` tool can also fetch Pages build logs with `action: logs`; the target is a Pages project name or `project/deployment-id`.
 
-The Cloudflare deploy path chooses the runtime from the project itself:
+The Cloudflare deploy path is Pages-only:
 
 - A static frontend is built if needed and uploaded to **Cloudflare Pages**.
-- Server code — API routes under `api/`, `pages/api/`, `app/api/`, a `server.*` entry, Express/Koa/Fastify/Nest/Hono, or an explicit `wrangler.toml` — deploys through **Workers** with `wrangler deploy`.
-- A Worker deploy needs a Wrangler config and a Cloudflare account ID. Without either, the deploy stops with that instruction instead of uploading a source tree that would return 404.
+- Server code — API routes under `api/`, `pages/api/`, `app/api/`, a `server.*` entry, Express/Koa/Fastify/Nest/Hono, or an explicit `wrangler.toml` — is detected, but Workers deployment is unavailable because Wrangler's workerd runtime requires glibc and cannot run in the app's Alpine (musl) environment.
+- Deploy server code from a desktop or CI runner, or provide static Pages output.
 
 ## Logs and export
 

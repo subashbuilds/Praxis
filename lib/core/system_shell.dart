@@ -5,6 +5,21 @@ import 'dart:io';
 import 'linux_environment.dart';
 import 'vfs.dart';
 
+/// Package installs and framework builds legitimately take longer than an
+/// ordinary shell command. A three-minute cap made npm look broken on phones.
+Duration shellTimeoutFor(String command) {
+  final lower = command.toLowerCase();
+  final installs = RegExp(
+    r'\b(npm|pnpm|yarn)\b[^\n]*\b(install|add|ci|i|update)\b',
+  ).hasMatch(lower);
+  final longBuild = lower.contains('npm run build') ||
+      lower.contains('npx ') ||
+      lower.contains('flutter build') ||
+      lower.contains('gradlew') ||
+      lower.contains('pod install');
+  return Duration(minutes: installs || longBuild ? 20 : 5);
+}
+
 class SystemShellResult {
   const SystemShellResult({
     required this.output,
@@ -82,8 +97,9 @@ class SystemShell {
     void Function(String chunk)? onStdout,
     void Function(String chunk)? onStderr,
     Map<String, String> environment = const {},
-    Duration timeout = const Duration(seconds: 120),
+    Duration? timeout,
   }) async {
+    final limit = timeout ?? shellTimeoutFor(raw);
     await fs.ensureRoot();
     await packageCacheRoot.create(recursive: true);
     final command = raw.trim();
@@ -125,7 +141,7 @@ class SystemShell {
         command,
         projectRoot: fs.rootPath,
         cwd: cwd,
-        timeout: timeout,
+        timeout: limit,
         environment: {..._packageCacheEnvironment(), ...environment},
         onStdout: onStdout,
         onStderr: onStderr,
@@ -211,7 +227,7 @@ class SystemShell {
 
     int exitCode;
     try {
-      exitCode = await done.future.timeout(timeout);
+      exitCode = await done.future.timeout(limit);
       // The process is gone, but its piped output may still be in flight.
       await outDone.future
           .timeout(const Duration(seconds: 5), onTimeout: () {});
@@ -219,7 +235,12 @@ class SystemShell {
           .timeout(const Duration(seconds: 5), onTimeout: () {});
     } on TimeoutException {
       process.kill(ProcessSignal.sigkill);
-      output.write('\n[timed out after ${timeout.inSeconds}s]');
+      // Capture output that was already in flight before the kill.
+      await outDone.future
+          .timeout(const Duration(seconds: 2), onTimeout: () {});
+      await errDone.future
+          .timeout(const Duration(seconds: 2), onTimeout: () {});
+      output.write('\n[timed out after ${limit.inSeconds}s]');
       exitCode = 124;
     } finally {
       _active = null;
@@ -246,10 +267,14 @@ class SystemShell {
   Future<SystemShellResult> _changeDirectory(String target) async {
     String next;
     try {
-      if (target.isEmpty || target == '~') {
+      if (target.isEmpty || target == '~' || target == '/workspace') {
         next = '';
       } else if (target == '-') {
         next = cwd;
+      } else if (target.startsWith('/workspace/')) {
+        // The Linux guest mounts the project at /workspace. The host path is
+        // different, so map the guest path back to the project root.
+        next = fs.normalize(target.substring('/workspace/'.length));
       } else if (target.startsWith('/')) {
         next = fs.normalize(target);
       } else {

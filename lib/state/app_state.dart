@@ -729,8 +729,9 @@ class AppState extends ChangeNotifier {
   Future<void> _persistChat(String projectId) async {
     final thread = _threads[projectId];
     if (thread == null) return;
-    final trimmed =
-        thread.length > 140 ? thread.sublist(thread.length - 140) : thread;
+    final trimmed = thread.length > 140
+        ? [...thread.take(20), ...thread.skip(thread.length - 120)]
+        : thread;
     await store.write(
       '$_kChatPrefix$projectId',
       jsonEncode(trimmed.map((entry) => entry.toJson()).toList()),
@@ -913,8 +914,18 @@ class AppState extends ChangeNotifier {
     String projectId,
     String raw, {
     List<String> attachments = const [],
-  }) =>
-      _runPrompt(projectId, raw, attachments: attachments);
+  }) async {
+    // A paused task must continue from its checkpoint. Sending a fresh prompt
+    // with only the recent transcript made the model restart the whole task.
+    if (attachments.isEmpty &&
+        !busy &&
+        hasResumableCheckpoint(projectId) &&
+        _looksLikeContinuePrompt(raw)) {
+      await resumeTask(projectId);
+      return;
+    }
+    await _runPrompt(projectId, raw, attachments: attachments);
+  }
 
   Future<void> _runPrompt(
     String projectId,
@@ -1002,6 +1013,7 @@ class AppState extends ChangeNotifier {
     );
     final pendingCalls = <String, AiToolCall>{};
     var checkpointError = '';
+    var pauseMessage = '';
     _queueCheckpoint(checkpoint);
     final savedTodos = await ProjectTodosStore.load(fsFor(project));
     _todos[projectId] = savedTodos;
@@ -1009,7 +1021,7 @@ class AppState extends ChangeNotifier {
     final agent = Agent(
       client: ai,
       provider: provider,
-      taskId: '$projectId-${started.microsecondsSinceEpoch}',
+      taskId: checkpoint.taskId,
       roundLog: roundLog,
       fs: fsFor(project),
       shell: shellFor(project),
@@ -1021,6 +1033,15 @@ class AppState extends ChangeNotifier {
       mode: agentMode,
       onIntegrationQuery: (service, action, target) =>
           _integrationStatus(project, service, action, target),
+      onPause: (message) {
+        pauseMessage = message;
+        checkpoint = checkpoint.copyWith(
+          pendingStep:
+              'Continue the original request from the last completed step.',
+          updatedAt: DateTime.now(),
+        );
+        _queueCheckpoint(checkpoint);
+      },
       integrations: integrations,
       initialTodos: savedTodos,
       onTodosChanged: (next) => _setTodos(project, next),
@@ -1167,18 +1188,20 @@ class AppState extends ChangeNotifier {
 
     try {
       await agent.run(
-        history: history.length > 14
-            ? history.sublist(history.length - 14)
-            : history,
+        history: history,
         prompt: modelPrompt,
         isCancelled: () => _cancelled,
       );
       if (!_cancelled) {
-        checkpoint = checkpoint.copyWith(
-          status: TaskCheckpointStatus.completed,
-          pendingStep: '',
-          updatedAt: DateTime.now(),
-        );
+        if (pauseMessage.isEmpty) {
+          checkpoint = checkpoint.copyWith(
+            status: TaskCheckpointStatus.completed,
+            pendingStep: '',
+            updatedAt: DateTime.now(),
+          );
+        } else {
+          checkpointError = pauseMessage;
+        }
       }
     } on AiCancelledException {
       // Stop is not an error. The finally block keeps the streamed text.
@@ -1288,8 +1311,24 @@ class AppState extends ChangeNotifier {
         history.add(AiTurn.assistant(entry.text, const []));
       }
     }
-    return history;
+    // Keep the opening request and its first answer even after a long
+    // conversation. Dropping them made a later "continue" look like a new
+    // task and discarded the original constraints.
+    const maxTurns = 24;
+    if (history.length <= maxTurns) return history;
+    final firstUser = history.indexWhere((turn) => turn.role == 'user');
+    if (firstUser < 0) return history.sublist(history.length - 16);
+    final firstEnd =
+        firstUser + 2 > history.length ? history.length : firstUser + 2;
+    var tailStart = history.length - (maxTurns - firstEnd);
+    if (tailStart < firstEnd) tailStart = firstEnd;
+    return [...history.take(firstEnd), ...history.skip(tailStart)];
   }
+
+  bool _looksLikeContinuePrompt(String raw) => RegExp(
+        r'^\s*(?:please\s+)?(continue|resume|keep going|go on|carry on)\b',
+        caseSensitive: false,
+      ).hasMatch(raw.trim());
 
   List<CheckpointTurn> _checkpointTurns(List<ChatEntry> thread) => [
         for (final entry
@@ -2644,15 +2683,6 @@ Continue the task. Do not repeat a write or destructive action that already comp
         client: httpClient,
       ).projects();
 
-  Future<List<CloudflareWorker>> cloudflareWorkers(
-    IntegrationAccount account,
-  ) =>
-      CloudflarePagesClient(
-        account.token,
-        accountId: account.accountId,
-        client: httpClient,
-      ).workers();
-
   Future<CloudflarePagesProject> createCloudflareProject(
     IntegrationAccount account, {
     required String name,
@@ -2833,18 +2863,14 @@ Continue the task. Do not repeat a write or destructive action that already comp
     String projectUrl = '',
     String environment = 'production',
     String branch = 'main',
-    String workerName = '',
     void Function(DeployProgress)? onProgress,
   }) async {
     final fs = fsFor(project);
-    if (await _needsWorker(fs)) {
-      return _deployWorker(
-        project,
-        account,
-        projectName: projectName,
-        environment: environment,
-        workerName: workerName,
-        onProgress: onProgress,
+    final plan = await planCloudflareDeploy(fs);
+    if (plan.usesWorkers) {
+      throw IntegrationException(
+        cloudflareWorkersUnavailable,
+        runtime: 'Cloudflare Workers',
       );
     }
     onProgress?.call(
@@ -3122,103 +3148,6 @@ Continue the task. Do not repeat a write or destructive action that already comp
     }
   }
 
-  /// Pages serves static output. Server code (API routes, Express, a Worker
-  /// entry) has to go through Workers, where its runtime actually exists.
-  Future<bool> _needsWorker(ProjectFs fs) async =>
-      (await planCloudflareDeploy(fs)).usesWorkers;
-
-  Future<IntegrationResult> _deployWorker(
-    Project project,
-    IntegrationAccount account, {
-    required String projectName,
-    required String environment,
-    String workerName = '',
-    void Function(DeployProgress)? onProgress,
-  }) async {
-    final fs = fsFor(project);
-    final entries = await fs.list(includeHidden: true);
-    final hasWrangler = entries.any((entry) => RegExp(
-          r'^wrangler\.(toml|jsonc?)$',
-          caseSensitive: false,
-        ).hasMatch(entry.path));
-    if (!hasWrangler) {
-      throw IntegrationException(
-          'This project contains server code that Pages cannot run. Add a '
-          'wrangler.toml (or Wrangler JSON config) for the Worker entry so it '
-          'can be deployed to Cloudflare Workers.');
-    }
-    var accountId = account.accountId.trim();
-    if (accountId.isEmpty) {
-      accountId = await CloudflarePagesClient(
-        account.token,
-        client: httpClient,
-      ).accountIdentifier();
-    }
-    onProgress?.call(const DeployProgress(
-      'Preparing',
-      detail: 'Checking the Wrangler config',
-    ));
-    final shell = systemShellFor(project);
-    final envEntries = await environmentFor(project);
-    final shellEnv = {
-      ...ProjectEnvStore.values(envEntries),
-      'CLOUDFLARE_API_TOKEN': account.token,
-      'CLOUDFLARE_ACCOUNT_ID': accountId,
-    };
-    if (await fs.exists('package.json') && !await fs.exists('node_modules')) {
-      onProgress?.call(const DeployProgress(
-        'Building',
-        detail: 'Installing dependencies',
-      ));
-      final install = await shell.run(
-        cloudflareNpmInstallCommand,
-        environment: shellEnv,
-        timeout: const Duration(minutes: 8),
-      );
-      if (install.exitCode != 0) {
-        final logs = maskSecretValues(install.output, envEntries);
-        throw IntegrationException(
-            'npm install failed (exit ${install.exitCode}). '
-            '${_tail(logs)}',
-            logs: _boundedLog(logs),
-            runtime: 'Cloudflare Workers');
-      }
-    }
-    onProgress?.call(DeployProgress(
-      'Deploying',
-      detail: 'Cloudflare Workers ($environment)',
-    ));
-    final target = workerName.trim();
-    final result = await shell.run(
-      cloudflareWorkerDeployCommandFor(target),
-      environment: shellEnv,
-      timeout: const Duration(minutes: 15),
-    );
-    if (result.exitCode != 0) {
-      final logs = maskSecretValues(result.output, envEntries);
-      throw IntegrationException(
-          'Worker deploy failed (exit ${result.exitCode}). '
-          '${_tail(logs)}',
-          logs: _boundedLog(logs),
-          runtime: 'Cloudflare Workers');
-    }
-    final url = RegExp(r'https://[a-zA-Z0-9._-]+\.workers\.dev')
-        .firstMatch(result.output)
-        ?.group(0);
-    final output = maskSecretValues(result.output.trim(), envEntries);
-    return _secureDeployResult(
-      project,
-      IntegrationResult(
-        message: url == null
-            ? 'Deployed ${target.isEmpty ? projectName : target} to Cloudflare Workers.'
-            : 'Deployed ${target.isEmpty ? projectName : target} to Cloudflare Workers at $url.',
-        url: url,
-        runtime: 'Cloudflare Workers',
-        logs: _boundedLog(output),
-      ),
-    );
-  }
-
   /// Pages Direct Upload serves the files it receives; it does not build a
   /// Node project. Build first and upload the static output, otherwise a
   /// Next/React source tree is published and every URL returns 404.
@@ -3250,22 +3179,24 @@ Continue the task. Do not repeat a write or destructive action that already comp
     final shell = systemShellFor(project);
     final envEntries = await environmentFor(project);
     final environment = ProjectEnvStore.values(envEntries);
-    onProgress?.call(const DeployProgress(
-      'Building',
-      detail: 'Installing dependencies',
-    ));
-    final install = await shell.run(
-      cloudflareNpmInstallCommand,
-      environment: environment,
-      timeout: const Duration(minutes: 8),
-    );
-    if (install.exitCode != 0) {
-      final logs = maskSecretValues(install.output, envEntries);
-      throw IntegrationException(
-        'npm install failed (exit ${install.exitCode}). ${_tail(logs)}',
-        logs: _boundedLog(logs),
-        runtime: 'Cloudflare Pages',
+    if (!await fs.exists('node_modules')) {
+      onProgress?.call(const DeployProgress(
+        'Building',
+        detail: 'Installing dependencies',
+      ));
+      final install = await shell.run(
+        cloudflareNpmInstallCommand,
+        environment: environment,
+        timeout: const Duration(minutes: 20),
       );
+      if (install.exitCode != 0) {
+        final logs = maskSecretValues(install.output, envEntries);
+        throw IntegrationException(
+          'npm install failed (exit ${install.exitCode}). ${_tail(logs)}',
+          logs: _boundedLog(logs),
+          runtime: 'Cloudflare Pages',
+        );
+      }
     }
     onProgress?.call(const DeployProgress(
       'Building',
@@ -3274,7 +3205,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
     final build = await shell.run(
       cloudflareNpmBuildCommand,
       environment: environment,
-      timeout: const Duration(minutes: 12),
+      timeout: const Duration(minutes: 20),
     );
     if (build.exitCode != 0) {
       final logs = maskSecretValues(build.output, envEntries);

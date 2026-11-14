@@ -68,6 +68,18 @@ class LastDeployLog {
   }
 }
 
+/// A project has one saved deploy record. Keep it scoped to the provider tab
+/// that produced it so a failed Workers deploy cannot appear under Vercel.
+bool deployLogMatchesPlatform(String platform, String runtime) {
+  final tab = platform.toLowerCase();
+  final value = runtime.toLowerCase();
+  if (tab == 'vercel') return value.contains('vercel');
+  if (tab == 'cloudflare') {
+    return value.contains('cloudflare') && !value.contains('workers');
+  }
+  return false;
+}
+
 class DeployLogStore {
   const DeployLogStore._();
 

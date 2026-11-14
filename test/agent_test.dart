@@ -168,6 +168,49 @@ void main() {
     expect(requestBody, isNot(contains('cf_supersecret')));
   });
 
+  test('the round limit reports a resumable pause', () async {
+    await fs.write('README.md', '# project');
+    final client = MockClient((_) async => http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': '',
+                  'tool_calls': [
+                    {
+                      'id': 'call_1',
+                      'type': 'function',
+                      'function': {
+                        'name': 'read_file',
+                        'arguments': jsonEncode({'path': 'README.md'}),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        ));
+
+    var pause = '';
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      maxRounds: 1,
+      onPause: (message) => pause = message,
+      onEvent: (_) {},
+    ).run(history: const [], prompt: 'inspect the project');
+
+    expect(pause, contains('Paused after 1 tool rounds'));
+    expect(pause, contains('continue'));
+  });
+
   test('a read_file tool call returns file contents', () async {
     await fs.write('README.md', '# project');
     var calls = 0;

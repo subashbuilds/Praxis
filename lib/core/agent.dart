@@ -235,10 +235,11 @@ const _baseAgentTools = <AiToolSpec>[
   AiToolSpec(
     name: 'run_command',
     description:
-        'Run a command in the device shell inside the project. This is the real /system/bin/sh, '
-        'not a file-ops imitation. Commands include ls, cat, grep, sed, awk, tar and any binary '
-        'installed on the phone. node, npm, git and python are not bundled by Praxis; check with '
-        'command -v before using them. Network commands work if curl or wget exists.',
+        'Run a command in the project shell. On Android this uses the Alpine '
+        'environment when available, otherwise /system/bin/sh. Run from the '
+        'project root and use relative paths; do not cd to a host path. The '
+        'result always includes cwd, exit and the captured output. Package '
+        'installs and builds may take several minutes.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -325,8 +326,9 @@ const _compoundTools = <AiToolSpec>[
     name: 'run_commands',
     description:
         'Run several shell commands sequentially in one call. Stops at the '
-        'first non-zero exit and returns every result. The user sees the full '
-        'command list for approval before anything runs.',
+        'first non-zero exit and returns every result, including its cwd, exit '
+        'code and output. The user sees the full command list for approval '
+        'before anything runs. Do not batch independent package installs.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -473,6 +475,7 @@ class Agent {
     this.repeatLimit = Phase1Flags.repeatLimit,
     this.maxRounds = 40,
     this.contextLimit = 128000,
+    this.onPause,
   });
 
   final AiClient client;
@@ -529,6 +532,11 @@ class Agent {
   final bool expectChanges;
   final int repeatLimit;
   final int maxRounds;
+
+  /// Called when a run stops at a resumable boundary, such as the round limit
+  /// or a repeated-call guard. The host keeps the checkpoint resumable so
+  /// "continue" can resume instead of starting the task over.
+  final void Function(String message)? onPause;
 
   /// The provider model's context window. Compaction is only attempted when
   /// the host knows a real limit.
@@ -655,6 +663,8 @@ class Agent {
     final seenCalls = <String>{};
     var requestIndex = 0;
     var previousToolFailed = false;
+    var readOnlyRounds = 0;
+    var readOnlyNudges = 0;
     var outcome = AgentOutcome.error;
 
     try {
@@ -810,22 +820,23 @@ class Agent {
 
           if (!mutated && wantsChange) {
             outcome = AgentOutcome.error;
-            onEvent(AgentEvent.error(
-              text.isEmpty
-                  ? 'The model stopped without changing a file and returned no '
-                      'text. This is usually an output-budget or tool-call '
-                      'failure; send “continue” to retry.'
-                  : 'The model stopped without changing a file. It said: “$text”\n'
-                      'Send “continue” to retry the edit.',
-            ));
+            final message = text.isEmpty
+                ? 'The model stopped without changing a file and returned no '
+                    'text. This is usually an output-budget or tool-call '
+                    'failure; send “continue” to retry.'
+                : 'The model stopped without changing a file. It said: “$text”\n'
+                    'Send “continue” to retry the edit.';
+            onEvent(AgentEvent.error(message));
+            onPause?.call(message);
             return;
           }
 
           if (text.isEmpty) {
             outcome = AgentOutcome.error;
-            onEvent(const AgentEvent.error(
-              'The model returned an empty reply. Send “continue” to retry.',
-            ));
+            const message =
+                'The model returned an empty reply. Send “continue” to retry.';
+            onEvent(const AgentEvent.error(message));
+            onPause?.call(message);
             return;
           }
           outcome = AgentOutcome.completed;
@@ -855,11 +866,11 @@ class Agent {
         }
         if (schemaStop) {
           outcome = AgentOutcome.loopDetected;
-          onEvent(const AgentEvent.error(
-            'Stopped: the model kept sending tool arguments that do not match '
-            'the schema. The error above names the expected shape. Send '
-            '“continue” to retry with a different approach.',
-          ));
+          const message = 'Stopped: the model kept sending tool arguments that '
+              'do not match the schema. The error above names the expected '
+              'shape. Send “continue” to retry with a different approach.';
+          onEvent(const AgentEvent.error(message));
+          onPause?.call(message);
           return;
         }
 
@@ -872,12 +883,13 @@ class Agent {
         }
         if (repeatedStop) {
           outcome = AgentOutcome.loopDetected;
-          onEvent(AgentEvent.error(
-            'Stopped: the model repeated the same ${calls.last.name} call '
-            '$repeatLimit times with identical arguments. This usually means '
-            'the edit or read did not give it the result it expected. Send '
-            '“continue” to retry with a different approach.',
-          ));
+          final message = 'Stopped: the model repeated the same '
+              '${calls.last.name} call $repeatLimit times with identical '
+              'arguments. This usually means the edit or read did not give it '
+              'the result it expected. Send “continue” to retry with a '
+              'different approach.';
+          onEvent(AgentEvent.error(message));
+          onPause?.call(message);
           return;
         }
 
@@ -956,11 +968,11 @@ class Agent {
             _editFailureCounts[key] = count;
             if (count >= repeatLimit) {
               outcome = AgentOutcome.loopDetected;
-              onEvent(AgentEvent.error(
-                'Stopped: the same ${call.name} failed $count times in a row. '
-                'Re-read the file or use a different edit. Send “continue” to '
-                'resume with a different approach.',
-              ));
+              final message = 'Stopped: the same ${call.name} failed $count '
+                  'times in a row. Re-read the file or use a different edit. '
+                  'Send “continue” to resume with a different approach.';
+              onEvent(AgentEvent.error(message));
+              onPause?.call(message);
               return;
             }
           }
@@ -975,11 +987,33 @@ class Agent {
           turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
         previousToolFailed = roundFailed;
+        final readOnlyRound = calls
+            .every((call) => Phase1Flags.readOnlyTools.contains(call.name));
+        if (readOnlyRound && !mutated) {
+          readOnlyRounds++;
+        } else {
+          readOnlyRounds = 0;
+        }
+        if (!_planMode &&
+            !mutated &&
+            readOnlyRounds >= 4 &&
+            readOnlyNudges < 2) {
+          readOnlyNudges++;
+          readOnlyRounds = 0;
+          turns.add(const AiTurn.user(
+            'DECISION POINT: you already have enough context. Do not issue '
+            'more exploration calls now. Make the first change with edit_file '
+            'or write_file using the files already read. Only read again if a '
+            'specific missing value blocks that edit, and batch all remaining '
+            'reads into one read_files call before editing.',
+          ));
+        }
       }
       outcome = AgentOutcome.loopDetected;
-      onEvent(AgentEvent.error(
-        'Paused after $maxRounds tool rounds. Send “continue” to keep going.',
-      ));
+      final message =
+          'Paused after $maxRounds tool rounds. Send “continue” to keep going.';
+      onEvent(AgentEvent.error(message));
+      onPause?.call(message);
     } on AiCancelledException {
       outcome = AgentOutcome.userCancelled;
       return;
@@ -1187,13 +1221,18 @@ How to work:
 - The project tree below is current. Skip list_files for simple edits. Read only
   the file you must change, then write it.
 ${parallelTools ? '- Batch independent reads and searches in one response so their results land together. Never batch a write with a read that depends on it.' : ''}
+- Decide in one pass. Before editing, put every file you need into one
+  read_files call, then make the first edit. When your reasoning says the plan
+  is clear, stop reading and call edit_file/write_file in that same round.
+  Never say the plan is clear and then keep exploring.
 - For more than one file, use the compound tools deliberately: one read_files '
   call for all reads, and one write_files call for all complete-file writes in '
   the same request. Do not issue separate read_file or write_file calls for '
   independent files. Use apply_patch only for partial edits across files.
 - read_file is paged. When it says "Next offset", use that offset to continue.
-  Never repeat a range you already received; if the needed code is in context,
-  act on it.
+  Never repeat a path or range you already received; if the needed code is in
+  context, act on it. After four read-only rounds, stop and write the first
+  supported change instead of reading more.
 - write_file replaces the whole file, so send complete contents. For an
   existing file, prefer edit_file with a unique old_text and the replacement
   new_text; this keeps large files inside the model's output budget.
@@ -1206,7 +1245,8 @@ Project files:
 $files
 
 Environment:
-- ${linuxShell ? 'The shell is a real Alpine Linux 3.21 environment running under proot. Use `apk add`, `apk del`, `apk update` and Alpine paths. `apt`, `apt-get` and Debian package names do not exist here. The project is bind-mounted at /workspace. Node, Python, PHP and Go are installed on demand from the Linux Environment screen; check `command -v name` first.' : fullShell ? 'run_command is the real device shell (/system/bin/sh) inside the project. The working directory is the project root. Use it for git, grep, archives, builds and any tool installed on the phone. Check `command -v name` first; Node, npm, Python and git are not bundled by Praxis.' : 'run_command is the file-ops shell; this test environment has no device binaries.'}
+- ${linuxShell ? 'The shell is a real Alpine Linux 3.21 environment running under proot. Use `apk add`, `apk del`, `apk update` and Alpine paths. `apt`, `apt-get` and Debian package names do not exist here. The project root is the current directory; `/workspace` is only an alias for it. Prefer relative paths and never use host paths. Node, Python, PHP and Go are installed on demand from the Linux Environment screen; check `command -v name` first. Wrangler/workerd cannot run here because workerd needs glibc and this environment uses musl; do not install Wrangler or OpenNext Cloudflare.' : fullShell ? 'run_command is the real device shell (/system/bin/sh) inside the project. The working directory is the project root. Use relative paths and do not cd to /workspace. Use it for git, grep, archives, builds and any tool installed on the phone. Check `command -v name` first; Node, npm, Python and git are not bundled by Praxis.' : 'run_command is the file-ops shell; this test environment has no device binaries.'}
+- npm rules: `npm install <package>` adds a package and may also install the existing dependency graph; `npm install` or `npm ci` installs the project. Allow several minutes. Exit 124 means the host stopped the command at its time limit, not that the code failed; read the captured output, narrow the command, and retry once instead of deleting node_modules. Never force-install or bypass peer-dependency errors without checking them.
 - Shell rules: run `cd` as its own command (the app tracks it for the next
   command); `cd x && command` stays inside that one command. Use POSIX tools
   such as `pwd`, `ls -la`, `cat`, `grep -R`, `find`, `wc`, `head`, `tail`, `sed`,
@@ -1687,7 +1727,7 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       final result = await deviceShell!.run(
         command,
         environment: environment,
-        timeout: const Duration(seconds: 180),
+        timeout: shellTimeoutFor(command),
       );
       final text = result.output.trim();
       final output = _boundedOutput(text);
@@ -1707,9 +1747,14 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
 
   String _boundedOutput(String text) {
     if (!flags.resultSizing || text.length <= 12000) return text;
-    final shown = text.substring(0, 12000);
-    return '$shown\n\n[${text.length - 12000} more characters omitted. '
-        'Re-run a narrower command to see the rest.]';
+    // Keep the tail as well as the head. npm and build tools put the actual
+    // failure at the end, and truncating only the end hid the useful error.
+    const headLength = 6000;
+    const tailLength = 6000;
+    final head = text.substring(0, headLength);
+    final tail = text.substring(text.length - tailLength);
+    final omitted = text.length - headLength - tailLength;
+    return '$head\n\n[$omitted characters omitted]\n\n$tail';
   }
 
   Future<_ToolOutcome> _runCommands(AiToolCall call) async {
@@ -2016,7 +2061,7 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     try {
       final result = await deviceShell!.run(
         command,
-        timeout: const Duration(seconds: 120),
+        timeout: const Duration(minutes: 10),
       );
       final output = _boundedOutput(result.output.trim());
       final status = result.exitCode == 0 ? 'passed' : 'failed';

@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:praxis/core/agent.dart';
 import 'package:praxis/core/ai.dart';
+import 'package:praxis/core/deploy_logs.dart';
 import 'package:praxis/core/diff.dart';
 import 'package:praxis/core/integrations.dart';
 import 'package:praxis/core/shell.dart';
@@ -207,9 +208,36 @@ void main() {
     final failure = await shell.run('false');
     expect(failure.exitCode, isNot(0));
 
+    final workspace = await shell.run('cd /workspace');
+    expect(workspace.exitCode, 0);
+    expect(shell.cwd, isEmpty);
+    final nestedWorkspace = await shell.run('cd /workspace/sub');
+    expect(nestedWorkspace.exitCode, 0);
+    expect(shell.cwd, 'sub');
+    await shell.run('cd /workspace');
+
     final environment = await shell.run('printf "%s\\n" "\$HOME" "\$TMPDIR"');
     expect(environment.output, contains(temp.path));
     expect(environment.output, contains('${temp.path}/.praxis/tmp'));
+  });
+
+  test('deploy records stay on the provider tab that made them', () {
+    expect(deployLogMatchesPlatform('vercel', 'Vercel'), isTrue);
+    expect(
+      deployLogMatchesPlatform('vercel', 'Cloudflare Workers'),
+      isFalse,
+    );
+    expect(deployLogMatchesPlatform('cloudflare', 'Cloudflare Pages'), isTrue);
+    expect(
+      deployLogMatchesPlatform('cloudflare', 'Cloudflare Workers'),
+      isFalse,
+    );
+  });
+
+  test('package installs get a long command timeout', () {
+    expect(shellTimeoutFor('npm install react'), const Duration(minutes: 20));
+    expect(shellTimeoutFor('npm run build'), const Duration(minutes: 20));
+    expect(shellTimeoutFor('ls -la'), const Duration(minutes: 5));
   });
 
   test('package-manager caches are shared outside the project', () async {

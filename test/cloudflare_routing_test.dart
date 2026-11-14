@@ -101,10 +101,7 @@ void main() {
     expect(cloudflareNpmInstallCommand,
         'npm install --prefer-offline --no-audit --no-fund');
     expect(cloudflareNpmBuildCommand, 'npm run build');
-    expect(cloudflareWorkerDeployCommand, 'npx --yes wrangler deploy');
-    expect(cloudflareWorkerDeployCommandFor(''), 'npx --yes wrangler deploy');
-    expect(cloudflareWorkerDeployCommandFor('api-worker'),
-        "npx --yes wrangler deploy --name 'api-worker'");
+    expect(cloudflareWorkersUnavailable, contains('workerd'));
     expect(
       (await planCloudflareDeploy(fs)).surface,
       CloudflareDeploySurface.pages,

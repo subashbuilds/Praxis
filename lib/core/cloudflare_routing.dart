@@ -20,6 +20,8 @@ class CloudflareDeployPlan {
   final bool hasPagesFunctions;
 
   bool get usesWorkers => surface == CloudflareDeploySurface.workers;
+
+  bool get deployable => surface == CloudflareDeploySurface.pages;
 }
 
 // Reuse the shared package cache before going to the registry. Without this,
@@ -27,16 +29,15 @@ class CloudflareDeployPlan {
 const cloudflareNpmInstallCommand =
     'npm install --prefer-offline --no-audit --no-fund';
 const cloudflareNpmBuildCommand = 'npm run build';
-const cloudflareWorkerDeployCommand = 'npx --yes wrangler deploy';
 
-/// Targets an existing Worker while still using the project's wrangler config
-/// for routes, bindings and Variables. Empty means use the config's own name.
-String cloudflareWorkerDeployCommandFor(String name) {
-  final target = name.trim();
-  if (target.isEmpty) return cloudflareWorkerDeployCommand;
-  final escaped = target.replaceAll("'", "'\\''");
-  return "$cloudflareWorkerDeployCommand --name '$escaped'";
-}
+/// Wrangler starts workerd even for a deploy, and workerd's Linux binaries
+/// require glibc. The on-device Linux environment is Alpine/musl, so Workers
+/// deployment cannot run here. Pages remains available for static output.
+const cloudflareWorkersUnavailable =
+    'Cloudflare Workers deployment is unavailable on Android because '
+    'Wrangler needs the workerd runtime, which requires glibc and cannot run '
+    'in the app\'s Alpine (musl) environment. Deploy a static Pages site, or '
+    'deploy server code from a desktop or CI runner.';
 
 const _staticOutputCandidates = [
   'out',
