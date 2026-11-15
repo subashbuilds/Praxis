@@ -386,7 +386,8 @@ class _DeploySheetState extends State<_DeploySheet> {
   late final AppState _state;
   late final TextEditingController _name;
   bool _loaded = false;
-  bool _busy = false;
+  DeployJob? _job;
+  String _jobSignature = '';
   String? _error;
   String? _cfError;
   String? _vercelError;
@@ -418,6 +419,7 @@ class _DeploySheetState extends State<_DeploySheet> {
     if (_loaded) return;
     _loaded = true;
     _state = AppScope.of(context);
+    _state.addListener(_onStateChanged);
     _name = TextEditingController(
       text: widget.project.name
           .toLowerCase()
@@ -429,8 +431,46 @@ class _DeploySheetState extends State<_DeploySheet> {
 
   @override
   void dispose() {
+    _state.removeListener(_onStateChanged);
     _name.dispose();
     super.dispose();
+  }
+
+  bool get _busy => _job?.running ?? false;
+
+  String _signatureFor(DeployJob job) => [
+        job.running,
+        job.progress?.stage,
+        job.progress?.detail,
+        job.result?.message,
+        job.result?.url,
+        job.result?.logs?.length,
+        job.error,
+        job.failureLogs?.length,
+        job.failureRuntime,
+        job.lastDeploy?.at.millisecondsSinceEpoch,
+        job.lastDeploy?.logs.length,
+      ].join('|');
+
+  /// AppState owns the deploy, so this listener is what brings progress back
+  /// after the sheet is closed and opened again.
+  void _onStateChanged() {
+    if (!mounted) return;
+    final job = _state.deployJobFor(widget.project.id);
+    if (job == null) return;
+    final signature = _signatureFor(job);
+    if (signature == _jobSignature) return;
+    _jobSignature = signature;
+    setState(() {
+      _job = job;
+      _platform = job.platform;
+      _progress = job.progress;
+      _result = job.result;
+      _error = job.error;
+      _failureLogs = job.failureLogs;
+      _failureRuntime = job.failureRuntime;
+      if (job.lastDeploy != null) _lastDeploy = job.lastDeploy;
+    });
   }
 
   void _remember(String platform, String value) {
@@ -479,6 +519,7 @@ class _DeploySheetState extends State<_DeploySheet> {
         await _state.fsFor(widget.project).list(includeHidden: true);
     final cloudflarePlan = await _state.cloudflareDeployPlan(widget.project);
     final lastDeploy = await _state.lastDeployLogFor(widget.project);
+    final activeJob = _state.deployJobFor(widget.project.id);
     if (!mounted) return;
     setState(() {
       _accounts = accounts;
@@ -491,6 +532,19 @@ class _DeploySheetState extends State<_DeploySheet> {
       _fileCount = entries.where((entry) => !entry.isDir).length;
       if (accounts.isEmpty && cfAccounts.isNotEmpty) {
         _platform = IntegrationKind.cloudflare;
+      }
+      if (activeJob != null) {
+        _job = activeJob;
+        _jobSignature = _signatureFor(activeJob);
+        _platform = activeJob.platform;
+        _progress = activeJob.progress;
+        _result = activeJob.result;
+        _error = activeJob.error;
+        _failureLogs = activeJob.failureLogs;
+        _failureRuntime = activeJob.failureRuntime;
+        if (activeJob.lastDeploy != null) {
+          _lastDeploy = activeJob.lastDeploy;
+        }
       }
     });
     if (_account != null) await _loadVercelProjects(_account!);
@@ -597,10 +651,17 @@ class _DeploySheetState extends State<_DeploySheet> {
   }
 
   void _selectPlatform(IntegrationKind value) {
+    if (_busy || value == _platform) return;
+    if (_job != null) {
+      _state.clearDeployJob(widget.project.id);
+      _job = null;
+      _jobSignature = '';
+    }
     setState(() {
       _platform = value;
       _result = null;
       _error = null;
+      _progress = null;
       _failureLogs = null;
       _failureRuntime = null;
     });
@@ -620,25 +681,33 @@ class _DeploySheetState extends State<_DeploySheet> {
     );
   }
 
-  void _onDeployProgress(DeployProgress progress) {
-    if (mounted) setState(() => _progress = progress);
-  }
-
-  Future<void> _deploy() async {
+  void _deploy() {
+    final platform = _platform;
     final selectedVercel = _createVercelProject ? null : _vercelProject;
     final name = selectedVercel?.name ?? _name.text.trim();
     if (name.isEmpty) {
       setState(() => _error = 'Choose a project or enter a new project name.');
       return;
     }
-    if (_platform == IntegrationKind.vercel && _account == null) return;
-    if (_platform == IntegrationKind.cloudflare && _cfAccount == null) {
+    if (platform == IntegrationKind.vercel && _account == null) return;
+    if (platform == IntegrationKind.cloudflare && _cfAccount == null) {
       setState(() => _error = 'Choose a Cloudflare account first.');
       return;
     }
     FocusScope.of(context).unfocus();
+    final project = _state.projectById(widget.project.id);
+    final account = _account;
+    final cfAccount = _cfAccount;
+    final pagesProject = _project;
+    final runtime = platform == IntegrationKind.vercel
+        ? 'Vercel'
+        : (_cloudflarePlan?.usesWorkers == true
+            ? 'Cloudflare Workers'
+            : 'Cloudflare Pages');
+    final job = DeployJob(platform: platform, runtime: runtime);
     setState(() {
-      _busy = true;
+      _job = job;
+      _jobSignature = _signatureFor(job);
       _error = null;
       _result = null;
       _progress = null;
@@ -646,70 +715,34 @@ class _DeploySheetState extends State<_DeploySheet> {
       _failureRuntime = null;
       _lastDeploy = null;
     });
-    try {
-      final result = _platform == IntegrationKind.vercel
-          ? await _state.deployToVercel(
-              _state.projectById(widget.project.id),
-              _account!,
+    _remember(
+      platform == IntegrationKind.cloudflare ? 'cloudflare' : 'vercel',
+      platform == IntegrationKind.cloudflare
+          ? (pagesProject?.name ?? '')
+          : (selectedVercel?.id ?? 'new'),
+    );
+    unawaited(_state.startDeploy(
+      project.id,
+      job,
+      (onProgress) => platform == IntegrationKind.vercel
+          ? _state.deployToVercel(
+              project,
+              account!,
               name: name,
               projectId: selectedVercel?.id,
               environment: _environment,
-              onProgress: _onDeployProgress,
+              onProgress: onProgress,
             )
-          : await _state.deployToCloudflare(
-              _state.projectById(widget.project.id),
-              _cfAccount!,
-              projectName: _project?.name ?? widget.project.name,
-              projectUrl: _project?.url ?? '',
+          : _state.deployToCloudflare(
+              project,
+              cfAccount!,
+              projectName: pagesProject?.name ?? widget.project.name,
+              projectUrl: pagesProject?.url ?? '',
               environment: _environment,
               branch: widget.project.branch,
-              onProgress: _onDeployProgress,
-            );
-      if (mounted) {
-        setState(() => _result = result);
-        _remember(
-          _platform == IntegrationKind.cloudflare ? 'cloudflare' : 'vercel',
-          _platform == IntegrationKind.cloudflare
-              ? (_project?.name ?? '')
-              : (selectedVercel?.id ?? 'new'),
-        );
-      }
-    } catch (error) {
-      if (error is IntegrationException) {
-        final logs = error.logs ?? '';
-        final deploymentId = error.deploymentId ?? '';
-        // Keep a failed deployment even when Cloudflare has not published its
-        // build log yet, so the refresh button has something to refresh.
-        if (logs.trim().isNotEmpty || deploymentId.isNotEmpty) {
-          try {
-            final failure = await _state.rememberDeployFailure(
-              _state.projectById(widget.project.id),
-              runtime: error.runtime ??
-                  (_platform == IntegrationKind.cloudflare
-                      ? (_cloudflarePlan?.usesWorkers == true
-                          ? 'Cloudflare Workers'
-                          : 'Cloudflare Pages')
-                      : 'Vercel'),
-              message: error.message,
-              logs: logs,
-              deploymentId: deploymentId,
-            );
-            if (mounted) {
-              setState(() {
-                _failureLogs = failure.logs;
-                _failureRuntime = failure.runtime;
-                _lastDeploy = failure;
-              });
-            }
-          } catch (_) {
-            // The error itself is still shown below.
-          }
-        }
-      }
-      if (mounted) setState(() => _error = '$error');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+              onProgress: onProgress,
+            ),
+    ));
   }
 
   Future<void> _refreshLogs() async {
@@ -727,6 +760,16 @@ class _DeploySheetState extends State<_DeploySheet> {
       );
       if (!mounted) return;
       final logs = record?.logs ?? '';
+      final job = _job;
+      if (job != null) {
+        job.lastDeploy = record;
+        if (logs.trim().isNotEmpty) {
+          if (job.result != null) {
+            job.result = job.result!.copyWith(logs: logs);
+          }
+          if (job.failureLogs != null) job.failureLogs = logs;
+        }
+      }
       setState(() {
         _lastDeploy = record;
         if (logs.trim().isNotEmpty) {

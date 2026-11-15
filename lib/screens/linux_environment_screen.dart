@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/linux_environment.dart';
+import '../core/package_cache.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
@@ -115,22 +116,14 @@ class _LinuxEnvironmentScreenState extends State<LinuxEnvironmentScreen> {
     await linux.reset();
   }
 
-  Future<void> _confirmClearCache(LinuxEnvironment linux) async {
-    final size = humanBytes(linux.snapshot.cacheBytes);
-    final confirmed = await showPraxisConfirm(
-      context,
-      title: 'Clear ${size == '0 B' ? 'package caches' : size}?',
-      body: 'Removes $size of downloaded apk archives and package-manager '
-          'caches only. Installed runtimes and project files remain.',
-      confirmLabel: 'Clear cache',
-      cancelLabel: 'Cancel',
-      icon: Icons.cleaning_services_outlined,
-      details: [
-        ConfirmDetail('Cached downloads', size),
-        const ConfirmDetail('Runtimes', 'Stay installed'),
-      ],
+  Future<void> _openPackageCache(LinuxEnvironment linux) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (_) => _PackageCacheSheet(linux: linux),
     );
-    if (confirmed) await linux.clearCache();
   }
 
   @override
@@ -165,7 +158,7 @@ class _LinuxEnvironmentScreenState extends State<LinuxEnvironmentScreen> {
                           onInstall: (runtime) => _install(linux, runtime),
                           onRemove: (runtime) => _remove(linux, runtime),
                           onReinstall: (runtime) => _reinstall(linux, runtime),
-                          onClearCache: () => _confirmClearCache(linux),
+                          onClearCache: () => _openPackageCache(linux),
                           onReset: () => _reset(linux),
                         );
                       },
@@ -1225,6 +1218,250 @@ class _MaintenanceRow extends StatelessWidget {
             Icon(Icons.chevron_right_rounded, size: 18, color: Pal.textDim),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _PackageCacheSheet extends StatefulWidget {
+  const _PackageCacheSheet({required this.linux});
+
+  final LinuxEnvironment linux;
+
+  @override
+  State<_PackageCacheSheet> createState() => _PackageCacheSheetState();
+}
+
+class _PackageCacheSheetState extends State<_PackageCacheSheet> {
+  List<CachedPackage> _packages = const [];
+  final Set<String> _removing = {};
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (!mounted) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final packages = await widget.linux.cachedPackages();
+      if (!mounted) return;
+      setState(() {
+        _packages = packages;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$error';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _remove(CachedPackage package) async {
+    if (_removing.contains(package.id)) return;
+    setState(() => _removing.add(package.id));
+    try {
+      await widget.linux.removeCachedPackage(package);
+      if (!mounted) return;
+      setState(() {
+        _packages = _packages.where((item) => item.id != package.id).toList();
+        _removing.remove(package.id);
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _removing.remove(package.id));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not remove ${package.name}: $error')),
+      );
+    }
+  }
+
+  Future<void> _clearAll() async {
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Clear all cached packages?',
+      body: 'Removes downloaded apk archives and npm/Python package caches. '
+          'Installed runtimes and project files remain.',
+      confirmLabel: 'Clear all',
+      cancelLabel: 'Cancel',
+      destructive: true,
+      icon: Icons.cleaning_services_outlined,
+    );
+    if (!confirmed || !mounted) return;
+    await widget.linux.clearCache();
+    if (mounted) await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.82,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SheetHandle(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.x3, Sp.x2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Cached packages',
+                            style: Txt.headline.copyWith(fontSize: 22)),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${humanBytes(widget.linux.snapshot.cacheBytes)} '
+                          'cached · delete one package or clear everything',
+                          style: Txt.meta.copyWith(fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconAction(
+                    icon: Icons.close_rounded,
+                    tooltip: 'Close',
+                    onTap: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ),
+            const Hairline(),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(Sp.x4),
+                child: Text(_error!, style: Txt.meta.copyWith(color: Pal.rose)),
+              )
+            else if (_loading)
+              const Padding(
+                padding: EdgeInsets.all(Sp.x5),
+                child: CircularProgressIndicator(),
+              )
+            else if (_packages.isEmpty)
+              Padding(
+                padding: const EdgeInsets.all(Sp.page),
+                child: Text(
+                  'No npm or Python package downloads are cached yet. '
+                  'Install a runtime and its packages, then check again.',
+                  style: Txt.bodySoft.copyWith(height: 1.5),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(horizontal: Sp.page),
+                  children: [
+                    for (final runtime in PackageCacheRuntime.values)
+                      if (_packages.any((item) => item.runtime == runtime)) ...[
+                        Padding(
+                          padding: const EdgeInsets.only(top: Sp.x3, bottom: 4),
+                          child: Text(
+                            runtime.label.toUpperCase(),
+                            style: Txt.overline.copyWith(fontSize: 9),
+                          ),
+                        ),
+                        for (final package in _packages.where(
+                          (item) => item.runtime == runtime,
+                        )) ...[
+                          _CachePackageRow(
+                            package: package,
+                            removing: _removing.contains(package.id),
+                            onRemove: () => _remove(package),
+                          ),
+                          const Hairline(),
+                        ],
+                      ],
+                  ],
+                ),
+              ),
+            if (!_loading)
+              Padding(
+                padding:
+                    const EdgeInsets.fromLTRB(Sp.page, Sp.x2, Sp.page, Sp.x3),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: EmberButton(
+                    label: 'Clear all caches',
+                    icon: Icons.delete_sweep_outlined,
+                    onTap: _clearAll,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CachePackageRow extends StatelessWidget {
+  const _CachePackageRow({
+    required this.package,
+    required this.removing,
+    required this.onRemove,
+  });
+
+  final CachedPackage package;
+  final bool removing;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 9),
+      child: Row(
+        children: [
+          GlyphBadge(
+            icon: package.runtime == PackageCacheRuntime.npm
+                ? Icons.javascript_rounded
+                : Icons.code_rounded,
+            color: package.runtime == PackageCacheRuntime.npm
+                ? Pal.amber
+                : Pal.sky,
+            size: 34,
+            iconSize: 17,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(package.name, style: Txt.title.copyWith(fontSize: 14)),
+                const SizedBox(height: 2),
+                Text(
+                  'v${package.version} · ${package.runtime.label}',
+                  style: Txt.meta.copyWith(fontSize: 9.5),
+                ),
+              ],
+            ),
+          ),
+          if (removing)
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            IconAction(
+              icon: Icons.delete_outline_rounded,
+              tooltip: 'Remove from cache',
+              onTap: onRemove,
+            ),
+        ],
       ),
     );
   }

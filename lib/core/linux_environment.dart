@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'native_paths.dart';
+import 'package_cache.dart';
 
 /// A runtime that can be installed into the Alpine rootfs with apk.
 enum LinuxRuntime { node, python, php, go }
@@ -911,6 +912,63 @@ class LinuxEnvironment extends ChangeNotifier {
     );
     await refresh();
   }
+
+  /// Lists package downloads that the shared npm and pip caches are holding.
+  /// A missing runtime simply contributes no rows.
+  Future<List<CachedPackage>> cachedPackages() async {
+    if (!ready) return const [];
+    final packages = <CachedPackage>[];
+    try {
+      final npm = await run(
+        'npm cache ls 2>/dev/null || true',
+        projectRoot: _lastProjectRoot ?? base.path,
+        timeout: const Duration(seconds: 30),
+      );
+      packages.addAll(parseNpmCache(npm.output));
+    } catch (_) {
+      // Node.js or npm may not be installed yet.
+    }
+    try {
+      final pip = await run(
+        'python3 -m pip cache list --format=abspath 2>/dev/null || true',
+        projectRoot: _lastProjectRoot ?? base.path,
+        timeout: const Duration(seconds: 30),
+      );
+      packages.addAll(parsePipCache(pip.output));
+    } catch (_) {
+      // Python may not be installed yet.
+    }
+    packages.sort((a, b) {
+      final runtime = a.runtime.index.compareTo(b.runtime.index);
+      return runtime != 0 ? runtime : a.name.compareTo(b.name);
+    });
+    return packages;
+  }
+
+  /// Removes every cache key belonging to one package without touching the
+  /// installed runtimes or the project's source files.
+  Future<void> removeCachedPackage(CachedPackage package) async {
+    if (!ready || package.keys.isEmpty) return;
+    for (final key in package.keys) {
+      if (package.runtime == PackageCacheRuntime.npm) {
+        await run(
+          'npm cache clean --force ${_shellQuote(key)} >/dev/null 2>&1 || true',
+          projectRoot: _lastProjectRoot ?? base.path,
+          timeout: const Duration(seconds: 30),
+        );
+      } else {
+        await run(
+          'python3 -m pip cache remove ${_shellQuote(key.split('/').last)} '
+          '>/dev/null 2>&1 || true',
+          projectRoot: _lastProjectRoot ?? base.path,
+          timeout: const Duration(seconds: 30),
+        );
+      }
+    }
+    await refresh();
+  }
+
+  String _shellQuote(String value) => "'${value.replaceAll("'", "'\\''")}'";
 
   Future<void> reset() async {
     cancel();

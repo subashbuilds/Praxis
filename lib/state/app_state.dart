@@ -19,6 +19,7 @@ import '../core/file_types.dart';
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
 import '../core/model_info.dart';
+import '../core/package_cache.dart';
 import '../core/agent_todos.dart';
 import '../core/project_env.dart';
 import '../core/project_search.dart';
@@ -76,6 +77,27 @@ class PullResult {
     ];
     return parts.isEmpty ? 'Already up to date' : parts.join(' · ');
   }
+}
+
+/// A deployment owned by AppState rather than the deploy sheet. Keeping it
+/// here means closing the sheet does not cancel the upload or lose its result.
+class DeployJob {
+  DeployJob({
+    required this.platform,
+    required this.runtime,
+    DateTime? startedAt,
+  }) : startedAt = startedAt ?? DateTime.now();
+
+  final IntegrationKind platform;
+  final String runtime;
+  final DateTime startedAt;
+  bool running = true;
+  DeployProgress? progress;
+  IntegrationResult? result;
+  String? error;
+  String? failureLogs;
+  String? failureRuntime;
+  LastDeployLog? lastDeploy;
 }
 
 class AppState extends ChangeNotifier {
@@ -155,6 +177,7 @@ class AppState extends ChangeNotifier {
   final Map<String, PushState> _pushStates = {};
   final Map<String, TaskCheckpoint> _checkpoints = {};
   final Map<String, List<AgentTodo>> _todos = {};
+  final Map<String, DeployJob> _deployJobs = {};
   QuotaTracker _quota = QuotaTracker();
   Future<void> _checkpointWrite = Future.value();
   Future<void> _todosWrite = Future.value();
@@ -2856,6 +2879,66 @@ Continue the task. Do not repeat a write or destructive action that already comp
     return record;
   }
 
+  DeployJob? deployJobFor(String projectId) => _deployJobs[projectId];
+
+  void clearDeployJob(String projectId) {
+    if (_deployJobs.remove(projectId) == null) return;
+    notifyListeners();
+  }
+
+  /// Starts a deploy that outlives the sheet that launched it. Progress and
+  /// the final result stay in AppState, so reopening the deploy page can pick
+  /// the job back up.
+  Future<void> startDeploy(
+    String projectId,
+    DeployJob job,
+    Future<IntegrationResult> Function(
+      void Function(DeployProgress) onProgress,
+    ) run,
+  ) async {
+    _deployJobs[projectId] = job;
+    notifyListeners();
+    try {
+      final result = await run((progress) {
+        job.progress = progress;
+        notifyListeners();
+      });
+      job.result = result;
+      job.running = false;
+      try {
+        job.lastDeploy = await lastDeployLogFor(projectById(projectId));
+      } catch (_) {
+        // The result itself is still enough to show a successful deploy.
+      }
+      notifyListeners();
+    } on IntegrationException catch (error) {
+      job.error = error.message;
+      job.failureRuntime = error.runtime ?? job.runtime;
+      final logs = error.logs ?? '';
+      final deploymentId = error.deploymentId ?? '';
+      if (logs.trim().isNotEmpty || deploymentId.isNotEmpty) {
+        try {
+          job.lastDeploy = await rememberDeployFailure(
+            projectById(projectId),
+            runtime: job.failureRuntime ?? job.runtime,
+            message: error.message,
+            logs: logs,
+            deploymentId: deploymentId,
+          );
+          job.failureLogs = job.lastDeploy?.logs ?? logs;
+        } catch (_) {
+          job.failureLogs = logs;
+        }
+      }
+      job.running = false;
+      notifyListeners();
+    } catch (error) {
+      job.error = '$error';
+      job.running = false;
+      notifyListeners();
+    }
+  }
+
   Future<IntegrationResult> deployToCloudflare(
     Project project,
     IntegrationAccount account, {
@@ -3151,6 +3234,38 @@ Continue the task. Do not repeat a write or destructive action that already comp
   /// Pages Direct Upload serves the files it receives; it does not build a
   /// Node project. Build first and upload the static output, otherwise a
   /// Next/React source tree is published and every URL returns 404.
+  static const _npmInstallMarker = '.praxis/npm-install.json';
+
+  Future<String> _npmInstallFingerprint(ProjectFs fs) async {
+    final packageJson = await fs.read('package.json');
+    final lock = await fs.exists('package-lock.json')
+        ? await fs.read('package-lock.json')
+        : '';
+    return TaskCheckpoint.digestText('$packageJson\n$lock');
+  }
+
+  Future<bool> _npmInstallIsCurrent(
+    ProjectFs fs,
+    String fingerprint,
+  ) async {
+    // A folder alone is not proof of a finished install. npm writes its own
+    // hidden lockfile at the end, and our marker records which manifest was
+    // installed. A timeout can leave a partial folder with neither.
+    String? markerFingerprint;
+    try {
+      final raw = jsonDecode(await fs.read(_npmInstallMarker));
+      if (raw is Map) markerFingerprint = raw['fingerprint'] as String?;
+    } catch (_) {
+      markerFingerprint = null;
+    }
+    return npmInstallReusable(
+      hasNodeModules: await fs.exists('node_modules'),
+      hasNpmLock: await fs.exists('node_modules/.package-lock.json'),
+      markerFingerprint: markerFingerprint,
+      fingerprint: fingerprint,
+    );
+  }
+
   Future<List<DeploymentFile>> _cloudflareFiles(
     Project project,
     void Function(DeployProgress)? onProgress,
@@ -3179,10 +3294,35 @@ Continue the task. Do not repeat a write or destructive action that already comp
     final shell = systemShellFor(project);
     final envEntries = await environmentFor(project);
     final environment = ProjectEnvStore.values(envEntries);
-    if (!await fs.exists('node_modules')) {
+    final installFingerprint = await _npmInstallFingerprint(fs);
+    if (!await _npmInstallIsCurrent(fs, installFingerprint)) {
+      // Remove a partial node_modules left by an earlier timeout before a
+      // clean install. Skipping this because the folder merely existed kept
+      // publishing builds with missing dependencies.
+      if (await fs.exists('node_modules')) {
+        onProgress?.call(const DeployProgress(
+          'Building',
+          detail: 'Removing incomplete node_modules',
+        ));
+        try {
+          await fs.delete('node_modules');
+        } catch (error) {
+          throw IntegrationException(
+            'Could not remove the incomplete node_modules folder. Delete it '
+            'and deploy again. $error',
+          );
+        }
+      }
+      if (await fs.exists(_npmInstallMarker)) {
+        try {
+          await fs.delete(_npmInstallMarker);
+        } catch (_) {
+          // A stale marker is harmless when node_modules is gone.
+        }
+      }
       onProgress?.call(const DeployProgress(
         'Building',
-        detail: 'Installing dependencies',
+        detail: 'Installing dependencies (clean install)',
       ));
       final install = await shell.run(
         cloudflareNpmInstallCommand,
@@ -3196,6 +3336,17 @@ Continue the task. Do not repeat a write or destructive action that already comp
           logs: _boundedLog(logs),
           runtime: 'Cloudflare Pages',
         );
+      }
+      try {
+        await fs.write(
+          _npmInstallMarker,
+          jsonEncode({
+            'fingerprint': installFingerprint,
+            'installedAt': DateTime.now().toIso8601String(),
+          }),
+        );
+      } catch (_) {
+        // A missing marker only causes a clean install on the next deploy.
       }
     }
     onProgress?.call(const DeployProgress(
@@ -3284,15 +3435,15 @@ Continue the task. Do not repeat a write or destructive action that already comp
     String model, {
     String? projectId,
   }) {
-    final events = projectId == null
-        ? usage.events
-        : usageEvents.where((event) => event.projectId == projectId);
-    for (final event in events) {
-      if (event.providerId == providerId && event.model == model) {
-        return event.promptTokens;
-      }
+    // usageEvents is append-only, so walking it forward returned the oldest
+    // request. The context meter must reflect the most recent request.
+    UsageEvent? latest;
+    for (final event in usageEvents) {
+      if (projectId != null && event.projectId != projectId) continue;
+      if (event.providerId != providerId || event.model != model) continue;
+      if (latest == null || event.at.isAfter(latest.at)) latest = event;
     }
-    return null;
+    return latest?.promptTokens;
   }
 
   int? contextLimitFor(String model) => contextWindowFor(model);
