@@ -10,12 +10,15 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/agent.dart';
+import '../core/background_jobs.dart';
 import '../core/cloudflare_routing.dart';
+import '../core/dependencies.dart';
 import '../core/deploy_logs.dart';
 import '../core/ai.dart';
 import '../core/diff.dart';
 import '../core/file_import.dart';
 import '../core/file_types.dart';
+import '../core/follow_ups.dart';
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
 import '../core/model_info.dart';
@@ -91,6 +94,7 @@ class DeployJob {
   final IntegrationKind platform;
   final String runtime;
   final DateTime startedAt;
+  String jobId = '';
   bool running = true;
   DeployProgress? progress;
   IntegrationResult? result;
@@ -109,7 +113,9 @@ class AppState extends ChangeNotifier {
     this.checkpointStore,
     this.linux,
     this.seedWelcome = true,
-  }) : httpClient = httpClient ?? http.Client();
+    BackgroundJobPlatform? backgroundJobs,
+  })  : httpClient = httpClient ?? http.Client(),
+        backgroundJobPlatform = backgroundJobs ?? BackgroundJobPlatform();
 
   static const _kProviders = 'praxis.providers';
   static const _kSkills = 'praxis.skills';
@@ -134,6 +140,7 @@ class AppState extends ChangeNotifier {
   final TaskCheckpointStore? checkpointStore;
   final LinuxEnvironment? linux;
   final bool seedWelcome;
+  final BackgroundJobPlatform backgroundJobPlatform;
 
   late final AiClient ai = AiClient(client: httpClient);
   late final RepoCloneService repoClone = RepoCloneService(client: httpClient);
@@ -178,6 +185,11 @@ class AppState extends ChangeNotifier {
   final Map<String, TaskCheckpoint> _checkpoints = {};
   final Map<String, List<AgentTodo>> _todos = {};
   final Map<String, DeployJob> _deployJobs = {};
+  late final BackgroundJobJournal _jobJournal = BackgroundJobJournal(store);
+  Future<void> _foregroundSync = Future.value();
+  String? _activeAgentJobId;
+  bool _foregroundServiceOn = false;
+  bool _jobsLoaded = false;
   QuotaTracker _quota = QuotaTracker();
   Future<void> _checkpointWrite = Future.value();
   Future<void> _todosWrite = Future.value();
@@ -259,6 +271,9 @@ class AppState extends ChangeNotifier {
     _loadUsage();
     _loadQuota();
     await _loadCheckpoints();
+    await _jobJournal.load();
+    _jobsLoaded = true;
+    _restoreDeployJobRecords();
     await linux?.restoreRuntimeState();
     _loadDrafts();
     await _restoreLiveDraft();
@@ -276,6 +291,136 @@ class AppState extends ChangeNotifier {
     }
     _ready = true;
     notifyListeners();
+  }
+
+  // ----------------------------------------------------------- background jobs
+
+  List<BackgroundJobRecord> get backgroundJobs =>
+      List.unmodifiable(_jobJournal.items);
+
+  List<BackgroundJobRecord> get runningBackgroundJobs =>
+      _jobJournal.items.where((job) => job.running).toList();
+
+  BackgroundJobRecord _startBackgroundJob({
+    required Project project,
+    required BackgroundJobKind kind,
+    required String title,
+    required String detail,
+    Map<String, dynamic> data = const {},
+  }) {
+    final now = DateTime.now();
+    final record = BackgroundJobRecord(
+      id: '${kind.name}-${now.microsecondsSinceEpoch}',
+      projectId: project.id,
+      projectName: project.name,
+      kind: kind,
+      title: title,
+      detail: detail,
+      startedAt: now,
+      updatedAt: now,
+      data: data,
+    );
+    _jobJournal.upsert(record);
+    _syncForegroundService();
+    notifyListeners();
+    return record;
+  }
+
+  void _updateBackgroundJob(
+    String id, {
+    String? detail,
+    BackgroundJobStatus? status,
+    bool persist = true,
+  }) {
+    final index = _jobJournal.items.indexWhere((job) => job.id == id);
+    if (index < 0) return;
+    final current = _jobJournal.items[index];
+    final next = current.copyWith(
+      detail: detail,
+      status: status,
+      updatedAt: DateTime.now(),
+    );
+    _jobJournal.upsert(next, persist: persist);
+    _syncForegroundService();
+    notifyListeners();
+  }
+
+  void _finishBackgroundJob(
+    String id, {
+    required BackgroundJobStatus status,
+    required String detail,
+  }) =>
+      _updateBackgroundJob(id, status: status, detail: detail);
+
+  void _syncForegroundService() {
+    final active = runningBackgroundJobs;
+    final title = active.length > 1
+        ? 'Praxis · ${active.length} jobs running'
+        : active.isNotEmpty
+            ? active.first.title
+            : '';
+    final detail = active.length > 1
+        ? active
+            .map((job) => job.detail.isEmpty ? job.title : job.detail)
+            .join(' · ')
+        : active.isNotEmpty
+            ? active.first.detail
+            : '';
+    _foregroundSync = _foregroundSync.then((_) async {
+      if (active.isEmpty) {
+        if (!_foregroundServiceOn) return;
+        await backgroundJobPlatform.stop();
+        _foregroundServiceOn = false;
+        return;
+      }
+      if (_foregroundServiceOn) {
+        await backgroundJobPlatform.update(title: title, detail: detail);
+      } else {
+        await backgroundJobPlatform.start(title: title, detail: detail);
+        _foregroundServiceOn = true;
+      }
+    });
+  }
+
+  Future<void> clearFinishedBackgroundJobs() async {
+    _jobJournal.clearFinished();
+    notifyListeners();
+    await _jobJournal.flush();
+  }
+
+  String _platformLabel(IntegrationKind platform) => switch (platform) {
+        IntegrationKind.github => 'GitHub',
+        IntegrationKind.vercel => 'Vercel',
+        IntegrationKind.cloudflare => 'Cloudflare Pages',
+        IntegrationKind.expo => 'Expo',
+        IntegrationKind.tavily => 'Tavily',
+        IntegrationKind.supabase => 'Supabase',
+      };
+
+  void _restoreDeployJobRecords() {
+    for (final record in _jobJournal.items) {
+      if (record.kind != BackgroundJobKind.deploy ||
+          record.status != BackgroundJobStatus.interrupted) {
+        continue;
+      }
+      if (_deployJobs.containsKey(record.projectId)) continue;
+      final platformName = '${record.data['platform'] ?? ''}';
+      final platform = IntegrationKind.values.firstWhere(
+        (value) => value.name == platformName,
+        orElse: () => IntegrationKind.vercel,
+      );
+      final job = DeployJob(
+        platform: platform,
+        runtime: '${record.data['runtime'] ?? ''}',
+        startedAt: record.startedAt,
+      )
+        ..jobId = record.id
+        ..running = false
+        ..error = record.detail.isEmpty
+            ? 'Praxis closed before this deployment finished.'
+            : record.detail;
+      _deployJobs[record.projectId] = job;
+    }
   }
 
   // ---------------------------------------------------------------- projects
@@ -473,6 +618,9 @@ class AppState extends ChangeNotifier {
     _shells.remove(project.id);
     _systemShells.remove(project.id);
     _pushStates.remove(project.id);
+    _jobJournal.items
+        .removeWhere((job) => job.projectId == project.id && !job.running);
+    if (_jobsLoaded) await _jobJournal.flush();
     await store.remove('$_kChatPrefix${project.id}');
     await _persistDrafts();
     notifyListeners();
@@ -1038,6 +1186,13 @@ class AppState extends ChangeNotifier {
     var checkpointError = '';
     var pauseMessage = '';
     _queueCheckpoint(checkpoint);
+    _activeAgentJobId = _startBackgroundJob(
+      project: project,
+      kind: BackgroundJobKind.agent,
+      title: 'Agent task',
+      detail: 'Working with ${provider.name}',
+      data: {'taskId': checkpoint.taskId},
+    ).id;
     final savedTodos = await ProjectTodosStore.load(fsFor(project));
     _todos[projectId] = savedTodos;
 
@@ -1104,6 +1259,14 @@ class AppState extends ChangeNotifier {
           tool: call.name,
           detail: detail,
         ));
+        final jobId = _activeAgentJobId;
+        if (jobId != null) {
+          _updateBackgroundJob(
+            jobId,
+            detail: 'Running ${call.name}',
+            persist: false,
+          );
+        }
         notifyListeners();
       },
       onReply: (reply, usedProvider) {
@@ -1314,6 +1477,25 @@ class AppState extends ChangeNotifier {
         text:
             '${_cancelled ? 'Stopped' : 'Ran'} for ${formatDuration(elapsed)}',
       ));
+      final finishedJobId = _activeAgentJobId;
+      _activeAgentJobId = null;
+      if (finishedJobId != null) {
+        if (interrupted || _cancelled) {
+          _finishBackgroundJob(
+            finishedJobId,
+            status: BackgroundJobStatus.interrupted,
+            detail: _cancelled
+                ? 'Stopped after ${formatDuration(elapsed)}. Resume is available.'
+                : 'Paused after ${formatDuration(elapsed)}. Resume is available.',
+          );
+        } else {
+          _finishBackgroundJob(
+            finishedJobId,
+            status: BackgroundJobStatus.completed,
+            detail: 'Finished in ${formatDuration(elapsed)}',
+          );
+        }
+      }
       busy = false;
       _activeProjectId = null;
       _chatPersistTimer?.cancel();
@@ -2896,11 +3078,29 @@ Continue the task. Do not repeat a write or destructive action that already comp
       void Function(DeployProgress) onProgress,
     ) run,
   ) async {
+    final project = projectById(projectId);
+    final record = _startBackgroundJob(
+      project: project,
+      kind: BackgroundJobKind.deploy,
+      title: 'Deploy · ${_platformLabel(job.platform)}',
+      detail: 'Preparing ${job.runtime}',
+      data: {'platform': job.platform.name, 'runtime': job.runtime},
+    );
+    job.jobId = record.id;
     _deployJobs[projectId] = job;
     notifyListeners();
     try {
       final result = await run((progress) {
         job.progress = progress;
+        if (job.jobId.isNotEmpty) {
+          _updateBackgroundJob(
+            job.jobId,
+            detail: progress.detail.isEmpty
+                ? progress.stage
+                : '${progress.stage} · ${progress.detail}',
+            persist: false,
+          );
+        }
         notifyListeners();
       });
       job.result = result;
@@ -2909,6 +3109,15 @@ Continue the task. Do not repeat a write or destructive action that already comp
         job.lastDeploy = await lastDeployLogFor(projectById(projectId));
       } catch (_) {
         // The result itself is still enough to show a successful deploy.
+      }
+      if (job.jobId.isNotEmpty) {
+        _finishBackgroundJob(
+          job.jobId,
+          status: BackgroundJobStatus.completed,
+          detail: result.message.isEmpty
+              ? 'Deployment finished'
+              : result.message,
+        );
       }
       notifyListeners();
     } on IntegrationException catch (error) {
@@ -2931,10 +3140,24 @@ Continue the task. Do not repeat a write or destructive action that already comp
         }
       }
       job.running = false;
+      if (job.jobId.isNotEmpty) {
+        _finishBackgroundJob(
+          job.jobId,
+          status: BackgroundJobStatus.failed,
+          detail: 'Deployment failed: ${error.message}',
+        );
+      }
       notifyListeners();
     } catch (error) {
       job.error = '$error';
       job.running = false;
+      if (job.jobId.isNotEmpty) {
+        _finishBackgroundJob(
+          job.jobId,
+          status: BackgroundJobStatus.failed,
+          detail: 'Deployment failed: $error',
+        );
+      }
       notifyListeners();
     }
   }
@@ -3266,6 +3489,12 @@ Continue the task. Do not repeat a write or destructive action that already comp
     );
   }
 
+  /// Exercises the production Pages preparation path, including its real
+  /// install, build, marker and output-folder checks.
+  @visibleForTesting
+  Future<List<DeploymentFile>> prepareCloudflareFilesForTest(Project project) =>
+      _cloudflareFiles(project, null);
+
   Future<List<DeploymentFile>> _cloudflareFiles(
     Project project,
     void Function(DeployProgress)? onProgress,
@@ -3402,6 +3631,227 @@ Continue the task. Do not repeat a write or destructive action that already comp
     );
   }
 
+  // ------------------------------------------------------------ dependencies
+
+  /// Dependency commands always run at the project root on their own shell.
+  /// Reusing the interactive shell would run npm in whatever subfolder the
+  /// user last entered and would race an agent command using that shell.
+  SystemShell _dependencyShell(Project project) => SystemShell(
+        fsFor(project),
+        linux: linux,
+        packageCacheRoot: Directory('${root.path}/package-cache'),
+      );
+
+  void _ensureDependencyToolsIdle() {
+    final deploying = runningBackgroundJobs
+        .any((job) => job.kind == BackgroundJobKind.deploy);
+    if (busy || deploying) {
+      throw StateError('Wait for the current agent or deploy job to finish.');
+    }
+  }
+
+  Future<DependencyReport> dependencyReport(Project project) async {
+    final nodeStatus = linux?.runtimes[LinuxRuntime.node];
+    final pythonStatus = linux?.runtimes[LinuxRuntime.python];
+    final nodeReady = linux == null
+        ? !Platform.isAndroid
+        : nodeStatus?.installed ?? false;
+    final pythonReady = linux == null
+        ? !Platform.isAndroid
+        : pythonStatus?.installed ?? false;
+    return inspectDependencies(
+      fsFor(project),
+      nodeProject: project.kind == ProjectKind.node,
+      pythonProject: project.kind == ProjectKind.python,
+      nodeRuntimeReady: nodeReady,
+      nodeRuntimeVersion: nodeStatus?.version ?? '',
+      pythonRuntimeReady: pythonReady,
+      pythonRuntimeVersion: pythonStatus?.version ?? '',
+    );
+  }
+
+  Future<DependencyAudit> auditDependencies(Project project) async {
+    _ensureDependencyToolsIdle();
+    final report = await dependencyReport(project);
+    if (report.ecosystem != DependencyEcosystem.node) {
+      return const DependencyAudit(
+        error: 'Registry checks are available for npm projects.',
+      );
+    }
+    final shell = _dependencyShell(project);
+    final entries = await environmentFor(project);
+    final environment = ProjectEnvStore.values(entries);
+    final outdated = await shell.run(
+      'npm outdated --json',
+      environment: environment,
+      timeout: const Duration(minutes: 2),
+    );
+    final audit = await shell.run(
+      'npm audit --json',
+      environment: environment,
+      timeout: const Duration(minutes: 4),
+    );
+    final parsedOutdated = parseNpmOutdated(outdated.output);
+    final parsedAudit = parseNpmAudit(audit.output);
+    var error = '';
+    if (outdated.exitCode != 0 && parsedOutdated.isEmpty) {
+      error = 'npm outdated could not complete (exit ${outdated.exitCode}).';
+    }
+    if (audit.exitCode != 0 && !parsedAudit.hasData) {
+      error = [
+        if (error.isNotEmpty) error,
+        'npm audit could not complete (exit ${audit.exitCode}).',
+      ].join(' ');
+    }
+    return DependencyAudit(
+      latest: parsedOutdated,
+      severities: parsedAudit.severities,
+      totalVulnerabilities: parsedAudit.totalVulnerabilities,
+      error: maskSecretValues(error, entries),
+      checkedAt: DateTime.now(),
+    );
+  }
+
+  Future<String> repairDependencies(Project project) async {
+    _ensureDependencyToolsIdle();
+    final report = await dependencyReport(project);
+    if (!report.hasEcosystem || report.repairCommand.isEmpty) {
+      throw StateError('No dependency install was found for this project.');
+    }
+    final fs = fsFor(project);
+    final shell = _dependencyShell(project);
+    final entries = await environmentFor(project);
+    final environment = ProjectEnvStore.values(entries);
+    if (report.ecosystem == DependencyEcosystem.node) {
+      if (await fs.exists('node_modules')) await fs.delete('node_modules');
+      if (await fs.exists(_npmInstallMarker)) await fs.delete(_npmInstallMarker);
+    }
+    final result = await shell.run(
+      report.repairCommand,
+      environment: environment,
+      timeout: const Duration(minutes: 20),
+    );
+    final output = maskSecretValues(result.output, entries);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Dependency install failed (exit ${result.exitCode}). ${_tail(output)}',
+      );
+    }
+    if (report.ecosystem == DependencyEcosystem.node &&
+        report.manager == 'npm' &&
+        await fs.exists('package.json')) {
+      try {
+        final fingerprint = await _npmInstallFingerprint(fs);
+        await fs.write(
+          _npmInstallMarker,
+          jsonEncode({
+            'fingerprint': fingerprint,
+            'installedAt': DateTime.now().toIso8601String(),
+          }),
+        );
+      } catch (_) {
+        // The install succeeded; a missing marker only causes a clean retry.
+      }
+    }
+    notifyListeners();
+    return output.trim().isEmpty
+        ? 'Dependencies installed with ${report.manager}.'
+        : 'Dependencies installed. ${_tail(output)}';
+  }
+
+  Future<String> repairDependencyCache(Project project) async {
+    _ensureDependencyToolsIdle();
+    final report = await dependencyReport(project);
+    if (report.cacheCommand.isEmpty) {
+      throw StateError('No package cache was found for this project.');
+    }
+    final entries = await environmentFor(project);
+    final result = await _dependencyShell(project).run(
+      report.cacheCommand,
+      environment: ProjectEnvStore.values(entries),
+      timeout: const Duration(minutes: 10),
+    );
+    final output = maskSecretValues(result.output, entries);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Cache repair failed (exit ${result.exitCode}). ${_tail(output)}',
+      );
+    }
+    return output.trim().isEmpty ? 'Package cache repaired.' : _tail(output);
+  }
+
+  Future<String> updateDependency(Project project, String package) async {
+    if (!isDependencyName(package)) {
+      throw ArgumentError('Use a valid package name.');
+    }
+    final report = await dependencyReport(project);
+    final command = switch (report.manager) {
+      'yarn' => 'yarn add $package@latest',
+      'pnpm' => 'pnpm add $package@latest',
+      'bun' => 'bun add $package@latest',
+      _ => 'npm install $package@latest --no-audit --no-fund',
+    };
+    return _runDependencyCommand(project, command);
+  }
+
+  Future<String> removeDependency(Project project, String package) async {
+    if (!isDependencyName(package)) {
+      throw ArgumentError('Use a valid package name.');
+    }
+    final report = await dependencyReport(project);
+    final command = switch (report.manager) {
+      'yarn' => 'yarn remove $package',
+      'pnpm' => 'pnpm remove $package',
+      'bun' => 'bun remove $package',
+      _ => 'npm uninstall $package --no-audit --no-fund',
+    };
+    return _runDependencyCommand(project, command);
+  }
+
+  Future<String> _runDependencyCommand(
+    Project project,
+    String command,
+  ) async {
+    _ensureDependencyToolsIdle();
+    final entries = await environmentFor(project);
+    final result = await _dependencyShell(project).run(
+      command,
+      environment: ProjectEnvStore.values(entries),
+      timeout: const Duration(minutes: 20),
+    );
+    final output = maskSecretValues(result.output, entries);
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Package change failed (exit ${result.exitCode}). ${_tail(output)}',
+      );
+    }
+    notifyListeners();
+    return output.trim().isEmpty ? 'Package change complete.' : _tail(output);
+  }
+
+  // ------------------------------------------------------------- follow-ups
+
+  Future<List<FollowUpSuggestion>> followUpSuggestions(Project project) async {
+    var changed = <String>[];
+    try {
+      changed = (await changesFor(project))
+          .map((change) => change.path)
+          .where((path) => !path.startsWith('.'))
+          .take(12)
+          .toList();
+    } catch (_) {
+      // A fresh project may not have a baseline yet; the other signals still
+      // produce useful suggestions.
+    }
+    return buildFollowUps(
+      project: project,
+      thread: threadOf(project.id),
+      changedFiles: changed,
+      todos: todosFor(project.id),
+      canPush: activeGithub != null,
+    );
+  }
+
   // ---------------------------------------------------------------- usage
 
   void _loadUsage() {
@@ -3493,6 +3943,12 @@ Continue the task. Do not repeat a write or destructive action that already comp
     _shells.clear();
     _systemShells.clear();
     _pushStates.clear();
+    _jobJournal.items.clear();
+    await _jobJournal.flush();
+    if (_foregroundServiceOn) {
+      await backgroundJobPlatform.stop();
+      _foregroundServiceOn = false;
+    }
     _clearLive();
     await roundLog?.clear();
     usageEvents.clear();
@@ -3526,6 +3982,14 @@ Continue the task. Do not repeat a write or destructive action that already comp
     autoNextProvider = false;
     await createProject('hello-praxis', ProjectKind.web, persistChat: false);
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _activeAgentJobId = null;
+    if (_foregroundServiceOn) unawaited(backgroundJobPlatform.stop());
+    if (_jobsLoaded) unawaited(_jobJournal.flush());
+    super.dispose();
   }
 }
 

@@ -14,6 +14,8 @@ import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
+import '../workspace/dependencies_sheet.dart';
+import '../workspace/jobs_sheet.dart';
 import 'push_sheet.dart';
 
 /// Git actions live in Files now: branch, export, commit/push and deploy.
@@ -202,6 +204,28 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
     _snack('Deployment sent.');
   }
 
+  Future<void> _showJobs() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      barrierColor: Colors.black.withOpacity(0.65),
+      builder: (_) => const JobsSheet(),
+    );
+  }
+
+  Future<void> _showDependencies() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      barrierColor: Colors.black.withOpacity(0.65),
+      builder: (_) => DependenciesSheet(project: widget.project),
+    );
+  }
+
   void _snack(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -307,6 +331,20 @@ class _ProjectActionsBarState extends State<ProjectActionsBar> {
               onTap: _pull,
             ),
           const SizedBox(width: 2),
+          IconAction(
+            icon: Icons.inventory_2_outlined,
+            tooltip: 'Dependencies',
+            size: 17,
+            onTap: _showDependencies,
+          ),
+          const SizedBox(width: 2),
+          IconAction(
+            icon: Icons.work_history_outlined,
+            tooltip: 'Background jobs',
+            size: 17,
+            onTap: _showJobs,
+          ),
+          const SizedBox(width: 4),
           _BarButton(
             icon: Icons.commit_rounded,
             label: _pending > 0 ? 'Push ($_pending)' : 'Push',

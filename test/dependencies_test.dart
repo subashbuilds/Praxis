@@ -1,0 +1,80 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:praxis/core/dependencies.dart';
+import 'package:praxis/core/vfs.dart';
+
+void main() {
+  test('node diagnosis finds mixed lockfiles, a partial install and versions',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_deps_');
+    addTearDown(() => temp.delete(recursive: true));
+    final fs = ProjectFs(temp);
+    await fs.ensureRoot();
+    await fs.write(
+      'package.json',
+      jsonEncode({
+        'name': 'demo',
+        'dependencies': {'left-pad': '^1.0.0', 'sharp': '^0.33.0'},
+      }),
+    );
+    await fs.write(
+      'package-lock.json',
+      jsonEncode({
+        'lockfileVersion': 3,
+        'packages': {
+          '': {'name': 'demo'},
+          'node_modules/left-pad': {'version': '1.3.0'},
+          'node_modules/sharp': {'version': '0.33.5'},
+        },
+      }),
+    );
+    await fs.write('yarn.lock', '# another manager');
+    await fs.write('node_modules/left-pad/index.js', 'partial');
+
+    final report = await inspectDependencies(
+      fs,
+      nodeProject: true,
+      nodeRuntimeReady: false,
+    );
+
+    expect(report.ecosystem, DependencyEcosystem.node);
+    expect(report.manager, 'npm');
+    expect(report.mixedManagers, isTrue);
+    expect(report.partialInstall, isTrue);
+    expect(report.repairCommand, 'npm ci --no-audit --no-fund');
+    expect(report.installed.map((item) => '${item.name}@${item.version}'),
+        containsAll(['left-pad@1.3.0', 'sharp@0.33.5']));
+    expect(report.installed.every((item) => item.direct), isTrue);
+    expect(report.nativePackages, contains('sharp'));
+    expect(
+      report.issues.map((issue) => issue.title),
+      containsAll(['Mixed lockfiles', 'Incomplete install']),
+    );
+    expect(
+      report.issues.any((issue) =>
+          issue.fix == DependencyFix.cleanInstall &&
+          issue.title == 'Incomplete install'),
+      isTrue,
+    );
+  });
+
+  test('parse registry output without trusting exit status', () {
+    final outdated = parseNpmOutdated(jsonEncode({
+      'left-pad': {'current': '1.0.0', 'latest': '1.3.0'},
+    }));
+    final audit = parseNpmAudit(jsonEncode({
+      'vulnerabilities': {
+        'left-pad': {'severity': 'high'},
+      },
+      'metadata': {
+        'vulnerabilities': {'total': 3},
+      },
+    }));
+
+    expect(outdated, {'left-pad': '1.3.0'});
+    expect(audit.severities, {'left-pad': 'high'});
+    expect(audit.totalVulnerabilities, 3);
+  });
+}

@@ -1,8 +1,11 @@
 package com.subash.praxis
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import io.flutter.embedding.android.FlutterActivity
@@ -16,9 +19,11 @@ class MainActivity : FlutterActivity() {
     }
 
     private var pendingFolderResult: MethodChannel.Result? = null
+    private var notificationPermissionAsked = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        configureBackgroundJobs(flutterEngine)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "praxis/native",
@@ -46,6 +51,64 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    /// Starts or updates the foreground service that keeps a long build, upload
+    /// or agent run alive while Praxis is in the background. The service is
+    /// deliberately not sticky: Dart cannot resume work after Android kills the
+    /// process, so the journal marks that job interrupted instead of showing a
+    /// notification for work that is no longer running.
+    private fun configureBackgroundJobs(flutterEngine: FlutterEngine) {
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "praxis/background_jobs",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start", "update" -> {
+                    askForNotificationPermission()
+                    val title = call.argument<String>("title") ?: "Praxis is working"
+                    val detail = call.argument<String>("detail") ?: ""
+                    val intent = Intent(this, BackgroundJobService::class.java).apply {
+                        action = BackgroundJobService.ACTION_START
+                        putExtra(BackgroundJobService.EXTRA_TITLE, title)
+                        putExtra(BackgroundJobService.EXTRA_DETAIL, detail)
+                    }
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                        result.success(null)
+                    } catch (error: Exception) {
+                        // A denied background start must not crash the running
+                        // action; the journal still records its result.
+                        result.error(
+                            "background_service",
+                            error.message ?: "Could not start the foreground service.",
+                            null,
+                        )
+                    }
+                }
+                "stop" -> {
+                    stopService(Intent(this, BackgroundJobService::class.java))
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun askForNotificationPermission() {
+        if (notificationPermissionAsked) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        notificationPermissionAsked = true
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4712)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

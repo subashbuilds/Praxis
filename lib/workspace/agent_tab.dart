@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../core/agent_todos.dart';
 import '../core/diff.dart';
+import '../core/follow_ups.dart';
 import '../core/task_checkpoint.dart';
 import '../models.dart';
 import '../state/app_state.dart';
@@ -78,6 +79,7 @@ class _AgentTabState extends State<AgentTab> {
   bool _showJumpToBottom = false;
   bool _draftRestored = false;
   bool _todosLoaded = false;
+  bool _loadingFollowUps = false;
   AppState? _state;
 
   @override
@@ -196,6 +198,53 @@ class _AgentTabState extends State<AgentTab> {
     setState(() => _attachments.addAll(paths));
   }
 
+  bool _hasCompletedRun(List<ChatEntry> thread) {
+    var found = false;
+    for (var index = thread.length - 1; index >= 0; index--) {
+      final entry = thread[index];
+      if (entry.role == ChatRole.user) return false;
+      if (entry.role == ChatRole.assistant && entry.text.trim().isNotEmpty) {
+        found = true;
+        break;
+      }
+    }
+    return found;
+  }
+
+  Future<void> _showFollowUps() async {
+    if (_loadingFollowUps) return;
+    setState(() => _loadingFollowUps = true);
+    try {
+      final suggestions =
+          await AppScope.of(context).followUpSuggestions(widget.project);
+      if (!mounted) return;
+      if (suggestions.isEmpty) return;
+      final prompt = await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Pal.surface,
+        barrierColor: Colors.black.withOpacity(0.65),
+        builder: (_) => _FollowUpsSheet(suggestions: suggestions),
+      );
+      if (prompt == null || !mounted) return;
+      _composer.text = prompt;
+      _composer.selection = TextSelection.collapsed(offset: prompt.length);
+      _state?.setPromptDraft(widget.project.id, prompt);
+      _scrollToEnd(force: true);
+      // Choosing a suggestion is an explicit send; nothing is proposed or run
+      // automatically after a task finishes.
+      unawaited(_send());
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not suggest next steps: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _loadingFollowUps = false);
+    }
+  }
+
   Future<void> _send() async {
     final text = _composer.text;
     if ((text.trim().isEmpty && _attachments.isEmpty) || _state?.busy == true) {
@@ -290,6 +339,11 @@ class _AgentTabState extends State<AgentTab> {
             checkpoint: state.checkpointFor(widget.project.id)!,
             onResume: () => state.resumeTask(widget.project.id),
             onDismiss: () => state.dismissCheckpoint(widget.project.id),
+          ),
+        if (!state.busy && _hasCompletedRun(thread))
+          _FollowUpBar(
+            loading: _loadingFollowUps,
+            onTap: _showFollowUps,
           ),
         _Composer(
           project: widget.project,
@@ -1427,6 +1481,153 @@ class _NumberedText extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _FollowUpBar extends StatelessWidget {
+  const _FollowUpBar({required this.loading, required this.onTap});
+
+  final bool loading;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Sp.x3, 0, Sp.x3, Sp.x1),
+      child: GestureDetector(
+        onTap: loading ? null : onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: 11),
+          decoration: BoxDecoration(
+            color: Pal.raised,
+            borderRadius: Rd.sm,
+            border: Border.all(color: Pal.line),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.auto_awesome_rounded, size: 15, color: Pal.ember),
+              const SizedBox(width: 7),
+              Text(
+                'Next steps',
+                style: Txt.label.copyWith(
+                  fontSize: 11.5,
+                  color: Pal.text,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'turn this result into the next task',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Txt.meta.copyWith(fontSize: 9),
+                ),
+              ),
+              if (loading)
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                )
+              else
+                Icon(Icons.arrow_forward_rounded, size: 14, color: Pal.textDim),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FollowUpsSheet extends StatelessWidget {
+  const _FollowUpsSheet({required this.suggestions});
+
+  final List<FollowUpSuggestion> suggestions;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x5),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SheetHandle(),
+            Text('What next?', style: Txt.headline),
+            const SizedBox(height: 4),
+            Text(
+              'Tap one to send it. Nothing runs unless you choose a suggestion.',
+              style: Txt.meta,
+            ),
+            const SizedBox(height: Sp.x4),
+            for (final suggestion in suggestions) ...[
+              GestureDetector(
+                onTap: () => Navigator.of(context).pop(suggestion.prompt),
+                behavior: HitTestBehavior.opaque,
+                child: Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(Sp.x3),
+                  decoration: BoxDecoration(
+                    color: Pal.raised,
+                    borderRadius: Rd.md,
+                    border: Border.all(color: Pal.line),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 28,
+                        height: 28,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Pal.ember.withOpacity(0.10),
+                          borderRadius: Rd.sm,
+                        ),
+                        child: Icon(Icons.north_east_rounded,
+                            size: 14, color: Pal.ember),
+                      ),
+                      const SizedBox(width: Sp.x3),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              suggestion.title,
+                              style: Txt.title.copyWith(fontSize: 13.5),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              suggestion.prompt,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.bodySoft.copyWith(fontSize: 11.5),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Icon(Icons.arrow_upward_rounded,
+                          size: 16, color: Pal.textDim),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 2),
+            Text(
+              'Suggestions come from the changed files, the open checklist and '
+              'this project type — no extra model request.',
+              style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
