@@ -3114,9 +3114,8 @@ Continue the task. Do not repeat a write or destructive action that already comp
         _finishBackgroundJob(
           job.jobId,
           status: BackgroundJobStatus.completed,
-          detail: result.message.isEmpty
-              ? 'Deployment finished'
-              : result.message,
+          detail:
+              result.message.isEmpty ? 'Deployment finished' : result.message,
         );
       }
       notifyListeners();
@@ -3653,12 +3652,10 @@ Continue the task. Do not repeat a write or destructive action that already comp
   Future<DependencyReport> dependencyReport(Project project) async {
     final nodeStatus = linux?.runtimes[LinuxRuntime.node];
     final pythonStatus = linux?.runtimes[LinuxRuntime.python];
-    final nodeReady = linux == null
-        ? !Platform.isAndroid
-        : nodeStatus?.installed ?? false;
-    final pythonReady = linux == null
-        ? !Platform.isAndroid
-        : pythonStatus?.installed ?? false;
+    final nodeReady =
+        linux == null ? !Platform.isAndroid : nodeStatus?.installed ?? false;
+    final pythonReady =
+        linux == null ? !Platform.isAndroid : pythonStatus?.installed ?? false;
     return inspectDependencies(
       fsFor(project),
       nodeProject: project.kind == ProjectKind.node,
@@ -3723,8 +3720,12 @@ Continue the task. Do not repeat a write or destructive action that already comp
     final entries = await environmentFor(project);
     final environment = ProjectEnvStore.values(entries);
     if (report.ecosystem == DependencyEcosystem.node) {
-      if (await fs.exists('node_modules')) await fs.delete('node_modules');
-      if (await fs.exists(_npmInstallMarker)) await fs.delete(_npmInstallMarker);
+      if (await fs.exists('node_modules')) {
+        await fs.delete('node_modules');
+      }
+      if (await fs.exists(_npmInstallMarker)) {
+        await fs.delete(_npmInstallMarker);
+      }
     }
     final result = await shell.run(
       report.repairCommand,
