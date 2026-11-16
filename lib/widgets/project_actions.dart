@@ -713,10 +713,48 @@ class _DeploySheetState extends State<_DeploySheet> {
     }
   }
 
-  void _addAccount() {
-    Navigator.of(context).push(
+  Future<void> _addAccount() async {
+    await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const IntegrationsScreen()),
     );
+    if (!mounted) return;
+    _refreshAccounts();
+  }
+
+  void _refreshAccounts() {
+    final accounts = _state.integrations.ofKind(IntegrationKind.vercel);
+    final cfAccounts = _state.integrations.ofKind(IntegrationKind.cloudflare);
+    final previousVercelId = _account?.id;
+    final previousCloudflareId = _cfAccount?.id;
+    final vercel =
+        _state.activeVercel ?? (accounts.isEmpty ? null : accounts.first);
+    final cloudflare =
+        _state.integrations.activeFor(IntegrationKind.cloudflare);
+    final vercelChanged = vercel?.id != previousVercelId;
+    final cloudflareChanged = cloudflare?.id != previousCloudflareId;
+    setState(() {
+      _accounts = accounts;
+      _cfAccounts = cfAccounts;
+      _account = vercel;
+      _cfAccount = cloudflare;
+      if (vercelChanged) {
+        _vercelProjects = const [];
+        _vercelProject = null;
+        _createVercelProject = true;
+        _vercelError = null;
+      }
+      if (cloudflareChanged) {
+        _projects = const [];
+        _project = null;
+        _cfError = null;
+      }
+    });
+    if (vercel != null && vercelChanged) {
+      unawaited(_loadVercelProjects(vercel));
+    }
+    if (cloudflare != null && cloudflareChanged) {
+      unawaited(_loadProjects(cloudflare));
+    }
   }
 
   void _deploy() {
@@ -914,51 +952,40 @@ class _DeploySheetState extends State<_DeploySheet> {
                         ],
                       )
                     else ...[
-                      if ((_platform == IntegrationKind.vercel
-                                  ? _accounts
-                                  : _cfAccounts)
-                              .length >
-                          1) ...[
-                        const _Label('ACCOUNT'),
-                        _AccountDropdown(
-                          accounts: _platform == IntegrationKind.vercel
-                              ? _accounts
-                              : _cfAccounts,
-                          value: _platform == IntegrationKind.vercel
-                              ? _account
-                              : _cfAccount,
-                          onChanged: (value) {
-                            setState(() {
-                              if (_platform == IntegrationKind.vercel) {
-                                _account = value;
-                                _vercelProjects = const [];
-                                _vercelProject = null;
-                                _createVercelProject = true;
-                              } else {
-                                _cfAccount = value;
-                                _projects = const [];
-                                _project = null;
-                              }
-                              _result = null;
-                              _failureLogs = null;
-                              _failureRuntime = null;
-                            });
-                            if (value != null) {
-                              if (_platform == IntegrationKind.vercel) {
-                                _loadVercelProjects(value);
-                              } else {
-                                _loadProjects(value);
-                              }
+                      const _Label('ACCOUNT'),
+                      _AccountDropdown(
+                        accounts: _platform == IntegrationKind.vercel
+                            ? _accounts
+                            : _cfAccounts,
+                        value: _platform == IntegrationKind.vercel
+                            ? _account
+                            : _cfAccount,
+                        onChanged: (value) {
+                          setState(() {
+                            if (_platform == IntegrationKind.vercel) {
+                              _account = value;
+                              _vercelProjects = const [];
+                              _vercelProject = null;
+                              _createVercelProject = true;
+                            } else {
+                              _cfAccount = value;
+                              _projects = const [];
+                              _project = null;
                             }
-                          },
-                        ),
-                        const SizedBox(height: Sp.x3),
-                      ],
-                      _DetailRow(
-                        label: 'Account',
-                        value:
-                            '@${_platform == IntegrationKind.vercel ? (_account?.username ?? '—') : (_cfAccount?.username ?? '—')}',
+                            _result = null;
+                            _failureLogs = null;
+                            _failureRuntime = null;
+                          });
+                          if (value != null) {
+                            if (_platform == IntegrationKind.vercel) {
+                              _loadVercelProjects(value);
+                            } else {
+                              _loadProjects(value);
+                            }
+                          }
+                        },
                       ),
+                      const SizedBox(height: Sp.x3),
                       if (_platform == IntegrationKind.cloudflare)
                         _DetailRow(
                           label: 'Account ID',
@@ -1853,6 +1880,20 @@ class _AccountDropdown extends StatelessWidget {
   final IntegrationAccount? value;
   final ValueChanged<IntegrationAccount?> onChanged;
 
+  String? _secondary(IntegrationAccount account) {
+    if (account.kind == IntegrationKind.cloudflare &&
+        account.accountId.isNotEmpty &&
+        account.accountId != account.displayName) {
+      return 'Account ${account.accountId}';
+    }
+    final label = account.label.trim();
+    final username = account.username.trim();
+    if (label.isNotEmpty && username.isNotEmpty && username != label) {
+      return '@$username';
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -1866,6 +1907,7 @@ class _AccountDropdown extends StatelessWidget {
         child: DropdownButton<IntegrationAccount>(
           value: value,
           isExpanded: true,
+          itemHeight: 56,
           dropdownColor: Pal.raised,
           icon: Icon(Icons.unfold_more_rounded, size: 17, color: Pal.textDim),
           style: Txt.body.copyWith(fontSize: 13),
@@ -1878,11 +1920,25 @@ class _AccountDropdown extends StatelessWidget {
                     Icon(Icons.account_circle_outlined,
                         size: 16, color: Pal.textDim),
                     const SizedBox(width: 7),
-                    Flexible(
-                      child: Text(
-                        account.displayName,
-                        overflow: TextOverflow.ellipsis,
-                        style: Txt.body.copyWith(fontSize: 13),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            account.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Txt.body.copyWith(fontSize: 13),
+                          ),
+                          if (_secondary(account) case final secondary?)
+                            Text(
+                              secondary,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.meta.copyWith(fontSize: 9.5),
+                            ),
+                        ],
                       ),
                     ),
                   ],

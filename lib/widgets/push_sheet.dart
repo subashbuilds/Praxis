@@ -110,7 +110,8 @@ class _PushSheetState extends State<PushSheet> {
     final accounts = state.integrations.ofKind(IntegrationKind.github);
     final account =
         state.activeGithub ?? (accounts.isEmpty ? null : accounts.first);
-    final parts = widget.project.repo.split('/');
+    final project = state.projectById(widget.project.id);
+    final parts = project.repo.split('/');
     _owner.text = push.owner.isNotEmpty
         ? push.owner
         : parts.length == 2
@@ -120,10 +121,25 @@ class _PushSheetState extends State<PushSheet> {
         ? push.repo
         : parts.length == 2
             ? parts.last
-            : widget.project.repo.isEmpty
+            : project.repo.isEmpty
                 ? ''
-                : widget.project.name;
-    _branch.text = widget.project.branch;
+                : project.name;
+    final pushRepo = push.owner.isEmpty || push.repo.isEmpty
+        ? ''
+        : '${push.owner}/${push.repo}';
+    final sameRepo =
+        pushRepo.isEmpty || project.repo.isEmpty || pushRepo == project.repo;
+    final projectBranch = project.branch.trim();
+    final projectHasTarget =
+        project.repo.isNotEmpty && projectBranch.isNotEmpty;
+    // Project metadata is the branch the user last chose. Fall back to the
+    // last push target only when the project has no recorded repository yet.
+    _branch.text =
+        sameRepo && !projectHasTarget && push.branch.trim().isNotEmpty
+            ? push.branch
+            : projectBranch.isNotEmpty
+                ? projectBranch
+                : push.branch;
     // Show the sheet before hashing a large project. The file list fills in
     // after the first frame instead of holding the sheet behind a spinner.
     setState(() {
@@ -135,7 +151,10 @@ class _PushSheetState extends State<PushSheet> {
     if (_targetReady) {
       await _loadBranches();
       if (widget.project.repo.isNotEmpty || push.owner.isNotEmpty) {
-        await _syncBaseline();
+        // The remote can move without a local edit. Refresh the tree on open
+        // unless local commits are waiting, where the cached baseline is the
+        // only correct comparison point.
+        await _syncBaseline(force: _pendingForTarget == 0);
       } else {
         unawaited(_refreshChanges());
       }
@@ -144,10 +163,43 @@ class _PushSheetState extends State<PushSheet> {
     }
   }
 
-  Future<void> _refreshChanges() async {
+  Future<void> _rememberTarget({String? branch}) async {
     final state = _state;
-    if (state == null) return;
-    final changes = await state.changesFor(widget.project);
+    if (state == null || !_targetReady) return;
+    final next = (branch ?? _branchText).trim();
+    if (next.isEmpty) return;
+    await state.updateProjectGit(
+      state.projectById(widget.project.id),
+      repo: '$_ownerText/$_repoText',
+      branch: next,
+    );
+  }
+
+  Future<List<RepoChange>> _targetChanges() {
+    final state = _state;
+    final account = _account;
+    if (state == null) return Future.value(const <RepoChange>[]);
+    if (account == null || !_targetReady) {
+      return state.changesFor(widget.project);
+    }
+    final owner = _ownerText;
+    final repo = _repoText;
+    final branch = _branchText;
+    return state.changesFor(
+      widget.project,
+      beforeText: (path) => state.githubFileText(
+        account,
+        owner: owner,
+        repo: repo,
+        branch: branch,
+        path: path,
+      ),
+    );
+  }
+
+  Future<void> _refreshChanges() async {
+    if (_state == null) return;
+    final changes = await _targetChanges();
     if (!mounted) return;
     setState(() {
       _changes = changes;
@@ -165,12 +217,32 @@ class _PushSheetState extends State<PushSheet> {
     try {
       final branches =
           await state.githubBranches(account, _ownerText, _repoText);
+      var next = _branch.text.trim();
+      if (branches.isNotEmpty && !branches.contains(next)) {
+        final projectBranch =
+            state.projectById(widget.project.id).branch.trim();
+        next = branches.contains(projectBranch)
+            ? projectBranch
+            : branches.contains('main')
+                ? 'main'
+                : '';
+        if (next.isEmpty) {
+          try {
+            final preferred =
+                await state.githubDefaultBranch(account, _ownerText, _repoText);
+            if (preferred != null && branches.contains(preferred)) {
+              next = preferred;
+            }
+          } catch (_) {
+            // The branch list is enough to pick a usable fallback.
+          }
+          next = next.isEmpty ? branches.first : next;
+        }
+      }
       if (!mounted) return;
       setState(() {
         _branches = branches;
-        if (_branch.text.trim().isEmpty && branches.isNotEmpty) {
-          _branch.text = branches.contains('main') ? 'main' : branches.first;
-        }
+        if (next.isNotEmpty) _branch.text = next;
       });
     } catch (_) {
       if (mounted) setState(() => _branches = const []);
@@ -197,7 +269,7 @@ class _PushSheetState extends State<PushSheet> {
     }
   }
 
-  Future<void> _syncBaseline() async {
+  Future<void> _syncBaseline({bool force = false}) async {
     final state = _state;
     final account = _account;
     if (state == null || account == null || !_targetReady || _syncing) return;
@@ -205,7 +277,7 @@ class _PushSheetState extends State<PushSheet> {
         _push.repo == _repoText &&
         _push.branch == _branchText &&
         _push.synced;
-    if (alreadyCompared) {
+    if (alreadyCompared && !force) {
       await _refreshChanges();
       if (!mounted) return;
       if (_compareNote == null) {
@@ -227,8 +299,9 @@ class _PushSheetState extends State<PushSheet> {
         owner: _ownerText,
         repo: _repoText,
         branch: _branchText,
+        force: force,
       );
-      final changes = await state.changesFor(widget.project);
+      final changes = await _targetChanges();
       if (!mounted) return;
       setState(() {
         _push = next;
@@ -243,6 +316,23 @@ class _PushSheetState extends State<PushSheet> {
                 : 'Compared with $_ownerText/$_repoText · $_branchText.';
       });
     } catch (error) {
+      if (!mounted) return;
+      if (_push.synced) {
+        // A failed refresh must not hide edits that the cached baseline can
+        // still identify. Diffs may be incomplete, but the file list stays.
+        try {
+          final cached = await state.changesFor(widget.project);
+          if (!mounted) return;
+          setState(() {
+            _changes = cached;
+            _selected
+              ..clear()
+              ..addAll(cached.map((change) => change.path));
+          });
+        } catch (_) {
+          // Keep the previous list if even the local scan fails.
+        }
+      }
       if (mounted) {
         setState(() => _compareNote =
             'Could not compare with GitHub, so new files cannot be identified yet. $error');
@@ -324,6 +414,7 @@ class _PushSheetState extends State<PushSheet> {
       _changes = const [];
       _selected.clear();
     });
+    await _rememberTarget(branch: chosen.defaultBranch);
     await _loadBranches();
     await _syncBaseline();
   }
@@ -395,6 +486,7 @@ class _PushSheetState extends State<PushSheet> {
         _changes = const [];
         _selected.clear();
       });
+      await _rememberTarget(branch: 'main');
       await _loadBranches();
       await _syncBaseline();
     } catch (error) {
@@ -466,6 +558,7 @@ class _PushSheetState extends State<PushSheet> {
     }
     if (chosen == _branchText) return;
     setState(() => _branch.text = chosen);
+    await _rememberTarget(branch: chosen);
     await _syncBaseline();
   }
 
@@ -518,6 +611,7 @@ class _PushSheetState extends State<PushSheet> {
     );
     controller.dispose();
     if (name == null || name.isEmpty || !mounted) return;
+    final from = _branchText;
     setState(() {
       _creatingBranch = true;
       _error = null;
@@ -529,7 +623,7 @@ class _PushSheetState extends State<PushSheet> {
         owner: _ownerText,
         repo: _repoText,
         branch: name,
-        from: _branchText,
+        from: from,
       );
       if (!mounted) return;
       setState(() {
@@ -537,8 +631,9 @@ class _PushSheetState extends State<PushSheet> {
         if (!_branches.contains(name)) {
           _branches = [..._branches, name];
         }
-        _status = 'Created $name from $_branchText.';
+        _status = 'Created $name from $from.';
       });
+      await _rememberTarget(branch: name);
       await _syncBaseline();
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
@@ -887,7 +982,9 @@ class _PushSheetState extends State<PushSheet> {
                           ),
                           if (!_syncing)
                             TextButton(
-                              onPressed: _syncBaseline,
+                              onPressed: () => _syncBaseline(
+                                force: _pendingForTarget == 0,
+                              ),
                               style: TextButton.styleFrom(
                                 padding:
                                     const EdgeInsets.symmetric(horizontal: 6),

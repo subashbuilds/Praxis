@@ -114,6 +114,35 @@ class GitHubSnapshot {
   final Map<String, String> hashes;
 }
 
+class GitHubTreeFile {
+  const GitHubTreeFile({
+    required this.path,
+    required this.sha,
+    required this.size,
+  });
+
+  final String path;
+  final String sha;
+  final int size;
+}
+
+/// A branch snapshot without downloading file contents. Hashes alone are
+/// enough to find every local change; only changed text files need a blob
+/// request for the diff preview.
+class GitHubTree {
+  const GitHubTree({
+    required this.headSha,
+    required this.treeSha,
+    required this.hashes,
+    required this.textFiles,
+  });
+
+  final String? headSha;
+  final String? treeSha;
+  final Map<String, String> hashes;
+  final List<GitHubTreeFile> textFiles;
+}
+
 class GitHubCommit {
   const GitHubCommit({
     required this.sha,
@@ -263,18 +292,19 @@ class GitHubClient {
     return repos;
   }
 
-  Future<GitHubSnapshot> snapshot(
+  /// Reads the branch tree and every blob id without downloading file bodies.
+  Future<GitHubTree> tree(
     String owner,
     String repo,
     String branch,
   ) async {
     final head = await headSha(owner, repo, branch);
     if (head == null) {
-      return const GitHubSnapshot(
+      return const GitHubTree(
         headSha: null,
         treeSha: null,
-        files: {},
         hashes: {},
+        textFiles: [],
       );
     }
     final treeResponse = await _client
@@ -285,11 +315,11 @@ class GitHubClient {
         )
         .timeout(const Duration(seconds: 45));
     if (treeResponse.statusCode == 404) {
-      return GitHubSnapshot(
+      return GitHubTree(
         headSha: head,
         treeSha: null,
-        files: const {},
         hashes: const {},
+        textFiles: const [],
       );
     }
     if (treeResponse.statusCode != 200) {
@@ -299,15 +329,15 @@ class GitHubClient {
     final treeBody = jsonDecode(treeResponse.body) as Map<String, dynamic>;
     final tree = treeBody['tree'];
     if (tree is! List) {
-      return GitHubSnapshot(
+      return GitHubTree(
         headSha: head,
         treeSha: treeBody['sha'] as String?,
-        files: const {},
         hashes: const {},
+        textFiles: const [],
       );
     }
     final hashes = <String, String>{};
-    final blobs = <Map<String, dynamic>>[];
+    final textFiles = <GitHubTreeFile>[];
     for (final item in tree) {
       if (item is! Map || item['type'] != 'blob') continue;
       final path = item['path'] as String? ?? '';
@@ -316,16 +346,32 @@ class GitHubClient {
       hashes[path] = sha;
       final size = item['size'] as int? ?? 0;
       if (size > 200000 || !classifyFile(path).isText) continue;
-      blobs.add(item.cast<String, dynamic>());
+      textFiles.add(GitHubTreeFile(path: path, sha: sha, size: size));
     }
-    final files = <String, String>{};
-    for (var offset = 0; offset < blobs.length; offset += 6) {
-      final chunk = blobs.skip(offset).take(6);
+    return GitHubTree(
+      headSha: head,
+      treeSha: treeBody['sha'] as String?,
+      hashes: hashes,
+      textFiles: textFiles,
+    );
+  }
+
+  /// Downloads only the requested text blobs. This keeps a comparison on a
+  /// large branch fast: unchanged files are identified by their tree sha.
+  Future<Map<String, String>> textFiles(
+    String owner,
+    String repo,
+    Iterable<GitHubTreeFile> files,
+  ) async {
+    final blobs = files.toList();
+    final result = <String, String>{};
+    for (var offset = 0; offset < blobs.length; offset += 10) {
+      final chunk = blobs.skip(offset).take(10);
       final results = await Future.wait(chunk.map((item) async {
         final response = await _client
             .get(
               Uri.parse(
-                  'https://api.github.com/repos/$owner/$repo/git/blobs/${item['sha']}'),
+                  'https://api.github.com/repos/$owner/$repo/git/blobs/${item.sha}'),
               headers: _headers,
             )
             .timeout(const Duration(seconds: 30));
@@ -335,26 +381,54 @@ class GitHubClient {
         final body = jsonDecode(response.body) as Map<String, dynamic>;
         final encoded = (body['content'] as String? ?? '').replaceAll('\n', '');
         try {
-          return MapEntry(
-            item['path'] as String? ?? '',
-            utf8.decode(base64Decode(encoded)),
-          );
+          return MapEntry(item.path, utf8.decode(base64Decode(encoded)));
         } catch (_) {
           return const MapEntry<String, String?>('', null);
         }
       }));
       for (final entry in results) {
         if (entry.key.isNotEmpty && entry.value != null) {
-          files[entry.key] = entry.value!;
+          result[entry.key] = entry.value!;
         }
       }
     }
+    return result;
+  }
+
+  Future<GitHubSnapshot> snapshot(
+    String owner,
+    String repo,
+    String branch,
+  ) async {
+    final tree = await this.tree(owner, repo, branch);
     return GitHubSnapshot(
-      headSha: head,
-      treeSha: treeBody['sha'] as String?,
-      files: files,
-      hashes: hashes,
+      headSha: tree.headSha,
+      treeSha: tree.treeSha,
+      files: await textFiles(owner, repo, tree.textFiles),
+      hashes: tree.hashes,
     );
+  }
+
+  /// Reads one text file at a branch. Used to fill in a diff when the sparse
+  /// baseline does not contain the previous contents of a changed file.
+  Future<String?> fileText(
+    String owner,
+    String repo,
+    String path,
+    String ref,
+  ) async {
+    final encodedPath = path.split('/').map(Uri.encodeComponent).join('/');
+    final uri = Uri.parse(
+        'https://api.github.com/repos/$owner/$repo/contents/$encodedPath?ref=${Uri.encodeComponent(ref)}');
+    final response = await _client.get(uri, headers: _headers).timeout(
+          const Duration(seconds: 30),
+        );
+    if (response.statusCode == 404) return null;
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          _error(response, 'Could not read $path from GitHub'));
+    }
+    return decodeUtf8(response.bodyBytes, allowEmpty: true);
   }
 
   Future<void> createBranch({

@@ -684,8 +684,14 @@ class Agent {
         await _compactIfNeeded(turns, system, current);
 
         AiReply reply;
-        var switches = 0;
+        // There is no fixed switch ceiling: a provider may have any number of
+        // saved keys. Attempt identities detect a cycle instead, so every key
+        // is tried before a provider switch and a failing chain cannot loop.
+        final attemptedProviders = <String>{};
+        String attemptKey(ProviderConfig config) =>
+            '${config.id}|${config.keyIndex}|${config.model}';
         while (true) {
+          attemptedProviders.add(attemptKey(current));
           final requestedAt = DateTime.now();
           final thisRound = requestIndex++;
           final requestProvider = current;
@@ -726,13 +732,13 @@ class Agent {
             // provider outage, rejected model). Offer the next key or another
             // configured provider in every case instead of stopping before
             // the user can choose a working one.
-            if (handler == null || switches >= 3) {
+            if (handler == null) {
               outcome =
                   error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
               rethrow;
             }
             final next = await handler(current, error);
-            if (next == null) {
+            if (next == null || attemptedProviders.contains(attemptKey(next))) {
               outcome =
                   error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
               rethrow;
@@ -745,7 +751,6 @@ class Agent {
               ));
             }
             current = next;
-            switches++;
             continue;
           }
           _lastPromptTokens = reply.usage?.promptTokens ?? 0;

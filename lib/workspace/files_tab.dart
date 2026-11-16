@@ -639,6 +639,7 @@ class _FilesTabState extends State<FilesTab> {
         final children = await AppScope.of(context).fsFor(widget.project).list(
               path: entry.path,
               recursive: false,
+              includeHidden: true,
             );
         if (!mounted || _lastData == null) return;
         final unique = <String, FileEntry>{

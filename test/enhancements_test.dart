@@ -188,6 +188,89 @@ void main() {
     expect(events.last.text, 'Recovered.');
   });
 
+  test('every saved key is tried before switching providers', () async {
+    final auths = <String>[];
+    final attempts = <String>[];
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      auths.add(request.headers['Authorization'] ?? '');
+      if (calls <= 5) {
+        return http.Response(
+          jsonEncode({
+            'error': {'message': 'quota exceeded for this key'},
+          }),
+          429,
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': 'Recovered.'},
+            },
+          ],
+        }),
+        200,
+      );
+    });
+    final temp = await Directory.systemTemp.createTemp('devnest_all_keys_');
+    addTearDown(() => temp.delete(recursive: true));
+    final fs = ProjectFs(temp);
+    final events = <AgentEvent>[];
+    const fallback = ProviderConfig(
+      id: 'fallback',
+      name: 'Fallback',
+      icon: 'x',
+      baseUrl: 'https://example.test/v1',
+      model: 'm',
+      flavor: ApiFlavor.openai,
+      keys: ['fallback-key'],
+    );
+
+    await Agent(
+      client: AiClient(client: client),
+      provider: const ProviderConfig(
+        id: 'primary',
+        name: 'Primary',
+        icon: 'x',
+        baseUrl: 'https://example.test/v1',
+        model: 'm',
+        flavor: ApiFlavor.openai,
+        keys: ['key-1', 'key-2', 'key-3', 'key-4', 'key-5'],
+      ),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+      onProviderLimit: (current, error) async {
+        attempts.add('${current.id}:${current.keyIndex}');
+        if (current.hasMoreKeys) {
+          return current.copyWith(keyIndex: current.keyIndex + 1);
+        }
+        return fallback;
+      },
+    ).run(history: const [], prompt: 'hello');
+
+    expect(calls, 6);
+    expect(attempts, [
+      'primary:0',
+      'primary:1',
+      'primary:2',
+      'primary:3',
+      'primary:4',
+    ]);
+    expect(auths, [
+      'Bearer key-1',
+      'Bearer key-2',
+      'Bearer key-3',
+      'Bearer key-4',
+      'Bearer key-5',
+      'Bearer fallback-key',
+    ]);
+    expect(events.last.text, 'Recovered.');
+  });
+
   test('the device shell runs real commands in the project folder', () async {
     if (Platform.isAndroid) return;
     final temp = await Directory.systemTemp.createTemp('devnest_sh_');

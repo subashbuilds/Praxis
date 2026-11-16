@@ -2379,6 +2379,24 @@ query CurrentUser {
   ) =>
       GitHubClient(account.token, client: httpClient).branches(owner, repo);
 
+  Future<String?> githubDefaultBranch(
+    IntegrationAccount account,
+    String owner,
+    String repo,
+  ) =>
+      GitHubClient(account.token, client: httpClient)
+          .defaultBranch(owner, repo);
+
+  Future<String?> githubFileText(
+    IntegrationAccount account, {
+    required String owner,
+    required String repo,
+    required String branch,
+    required String path,
+  }) =>
+      GitHubClient(account.token, client: httpClient)
+          .fileText(owner, repo, path, branch);
+
   Future<List<GitHubRepo>> githubRepositories(IntegrationAccount account) =>
       GitHubClient(account.token, client: httpClient).repositories();
 
@@ -2404,20 +2422,39 @@ query CurrentUser {
     required String owner,
     required String repo,
     required String branch,
+    bool force = false,
   }) async {
     final current = await pushStateFor(project);
     final sameTarget = current.owner == owner &&
         current.repo == repo &&
         current.branch == branch;
-    if (sameTarget && current.synced) return current;
-    final snapshot = await GitHubClient(account.token, client: httpClient)
-        .snapshot(owner, repo, branch);
+    if (sameTarget && current.synced && !force) return current;
+    final client = GitHubClient(account.token, client: httpClient);
+    final tree = await client.tree(owner, repo, branch);
+    final local = await fsFor(project).localSnapshot();
+    final baseline = <String, String>{};
+    final needed = <GitHubTreeFile>[];
+    for (final file in tree.textFiles) {
+      final remoteHash = tree.hashes[file.path];
+      final localHash = local.hashes[file.path];
+      if (localHash == null || localHash == remoteHash) continue;
+      // Only a file that differs locally needs its old text for a diff. Every
+      // unchanged file is dropped from the stored baseline, which keeps
+      // push.json small and branch switches fast.
+      final cached = current.baseline[file.path];
+      if (cached != null && current.hashes[file.path] == remoteHash) {
+        baseline[file.path] = cached;
+      } else {
+        needed.add(file);
+      }
+    }
+    baseline.addAll(await client.textFiles(owner, repo, needed));
     final next = current.copyWith(
       owner: owner,
       repo: repo,
       branch: branch,
-      baseline: snapshot.files,
-      hashes: snapshot.hashes,
+      baseline: baseline,
+      hashes: tree.hashes,
       synced: true,
     );
     return savePushState(project, next);
@@ -2437,7 +2474,10 @@ query CurrentUser {
     return state;
   }
 
-  Future<List<RepoChange>> changesFor(Project project) async {
+  Future<List<RepoChange>> changesFor(
+    Project project, {
+    Future<String?> Function(String path)? beforeText,
+  }) async {
     final state = await pushStateFor(project);
     final current = await fsFor(project).localSnapshot();
     final paths = <String>{
@@ -2451,14 +2491,22 @@ query CurrentUser {
       final localHash = current.hashes[path];
       if (localHash == null) continue;
       var remoteHash = state.hashes[path];
-      final before = state.baseline[path];
+      var before = state.baseline[path];
       if (remoteHash == null && before != null) {
         remoteHash = gitBlobSha(utf8.encode(before));
       }
       if (remoteHash == localHash) continue;
       final after = current.texts[path];
       final isBinary = after == null;
-      final diff = isBinary ? null : computeDiff(before ?? '', after);
+      if (before == null && remoteHash != null && beforeText != null) {
+        try {
+          before = await beforeText(path);
+        } catch (_) {
+          // A missing preview must not hide a real local change.
+        }
+      }
+      final canDiff = !isBinary && (before != null || remoteHash == null);
+      final diff = canDiff ? computeDiff(before ?? '', after) : null;
       changes.add(RepoChange(
         path: path,
         status: before == null && remoteHash == null
