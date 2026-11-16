@@ -43,6 +43,13 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-
+
       - name: Install dependencies
         run: flutter pub get
 
@@ -69,6 +76,10 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/gradle/wrapper/gradle-wrapper.properties
 
       - name: Set up Flutter ${{ env.FLUTTER_VERSION }}
         uses: subosito/flutter-action@v2
@@ -77,8 +88,32 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-
+
       # The runner image ships an Android SDK, but not necessarily the
-      # platform/build-tools versions this project compiles against.
+      # platform/build-tools versions this project compiles against. Cache the
+      # exact pieces so every run does not download the NDK again.
+      - name: Locate Android SDK
+        run: |
+          set -euo pipefail
+          SDK_PATH="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          test -n "$SDK_PATH"
+          echo "ANDROID_SDK_PATH=$SDK_PATH" >> "$GITHUB_ENV"
+
+      - name: Cache Android SDK packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_SDK_PATH }}/platforms/${{ env.ANDROID_PLATFORM }}
+            ${{ env.ANDROID_SDK_PATH }}/build-tools/${{ env.ANDROID_BUILD_TOOLS }}
+            ${{ env.ANDROID_SDK_PATH }}/ndk/27.0.12077973
+          key: android-sdk-${{ runner.os }}-${{ env.ANDROID_PLATFORM }}-${{ env.ANDROID_BUILD_TOOLS }}-ndk-27.0.12077973
+
       - name: Install Android SDK packages
         run: |
           set -euo pipefail

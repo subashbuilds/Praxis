@@ -232,9 +232,8 @@ class _AgentTabState extends State<AgentTab> {
       _composer.selection = TextSelection.collapsed(offset: prompt.length);
       _state?.setPromptDraft(widget.project.id, prompt);
       _scrollToEnd(force: true);
-      // Choosing a suggestion is an explicit send; nothing is proposed or run
-      // automatically after a task finishes.
-      unawaited(_send());
+      // A suggestion only fills the composer. The user edits it and decides
+      // when to send, so nothing runs from a tap alone.
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1561,7 +1560,7 @@ class _FollowUpsSheet extends StatelessWidget {
             Text('What next?', style: Txt.headline),
             const SizedBox(height: 4),
             Text(
-              'Tap one to send it. Nothing runs unless you choose a suggestion.',
+              'Tap one to add it to the prompt, then edit or send it yourself.',
               style: Txt.meta,
             ),
             const SizedBox(height: Sp.x4),

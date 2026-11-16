@@ -56,6 +56,13 @@ typedef ConfirmPrompt = Future<bool> Function(
   String acceptLabel,
 );
 
+/// Asks the user which configured provider and model to use after every key
+/// on the current provider has failed. Returning null stops the run.
+typedef ProviderChoicePrompt = Future<ProviderChoice?> Function(
+  ProviderConfig current,
+  List<ProviderConfig> providers,
+);
+
 class PullResult {
   const PullResult({
     required this.updated,
@@ -169,6 +176,7 @@ class AppState extends ChangeNotifier {
   /// Set by the agent tab while it is on screen. Without it a limit stops the
   /// run instead of guessing.
   LimitPrompt? limitPrompt;
+  ProviderChoicePrompt? providerChoicePrompt;
   ConfirmPrompt? confirmPrompt;
 
   bool _cancelled = false;
@@ -1694,10 +1702,14 @@ class AppState extends ChangeNotifier {
         }
       }
       if (nextIndex >= 0) {
+        final reason = error.isLimit
+            ? 'is rate-limited or out of credit'
+            : 'returned an error';
         final allowed = autoNextKey ||
             await (limitPrompt?.call(
-                  'Key limit reached',
-                  '${current.name} (key ${current.keyIndex + 1}) reports this key is rate-limited or out of credit.\n\n'
+                  error.isLimit ? 'Key limit reached' : 'Key request failed',
+                  '${current.name} (key ${current.keyIndex + 1}) $reason.\n\n'
+                      '${error.message}\n\n'
                       'Use key ${nextIndex + 1} of ${current.keys.length}?',
                   'Use key ${nextIndex + 1}',
                 ) ??
@@ -1707,7 +1719,7 @@ class AppState extends ChangeNotifier {
         _replaceProvider(next);
         _clearLive();
         _addNote(
-          '${current.name} (key ${current.keyIndex + 1}) reached its limit. Using key ${nextIndex + 1}.',
+          '${current.name} (key ${current.keyIndex + 1}) ${error.isLimit ? 'reached its limit' : 'failed'}. Using key ${nextIndex + 1}.',
         );
         await _persistProviders();
         notifyListeners();
@@ -1715,35 +1727,37 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    ProviderConfig? candidate;
-    for (final provider in providers) {
-      if (provider.id == current.id) continue;
-      if (provider.isConfigured) {
-        candidate = provider;
-        break;
-      }
-    }
-    if (candidate == null) return null;
+    final candidates = configuredProviders
+        .where((provider) => provider.id != current.id)
+        .toList();
+    if (candidates.isEmpty) return null;
 
-    // Provider fallback always needs consent for this task: providers differ
-    // in data handling and capabilities, so it is never silent.
-    final allowed = await (limitPrompt?.call(
-          'Provider limit reached',
-          '${current.name} has no usable keys left.\n\n'
-              'Continue on ${candidate.name} (${candidate.model})? '
-              'This is only for the current task; no default provider is changed.',
-          'Continue on ${candidate.name}',
-        ) ??
-        Future.value(false));
-    if (!allowed) return null;
-    activeProviderId = candidate.id;
+    ProviderChoice? choice;
+    if (autoNextProvider) {
+      final provider = candidates.first;
+      choice = ProviderChoice(provider, provider.model);
+    } else {
+      choice = await providerChoicePrompt?.call(current, candidates);
+    }
+    if (choice == null) return null;
+
+    // The picker chooses one provider and model for this task. Keep every
+    // other provider exactly as it was, and only change the active model when
+    // the user picked a different one.
+    var next = choice.provider;
+    if (choice.model.trim().isNotEmpty && choice.model != next.model) {
+      next = next.copyWith(model: choice.model);
+      _replaceProvider(next);
+      await _persistProviders();
+    }
+    activeProviderId = next.id;
     _clearLive();
     _addNote(
-      '${current.name}${current.keys.length > 1 ? ' (all keys)' : ''} reached its limit. Switched to ${candidate.name} (key ${candidate.keyIndex + 1}).',
+      '${current.name}${current.keys.length > 1 ? ' (all keys)' : ''} could not complete the request. Switched to ${next.name} (${next.model}).',
     );
-    await store.write(_kActiveProvider, candidate.id);
+    await store.write(_kActiveProvider, next.id);
     notifyListeners();
-    return candidate;
+    return next;
   }
 
   TaskCheckpoint? checkpointFor(String projectId) => _checkpoints[projectId];
@@ -2191,8 +2205,8 @@ Continue the task. Do not repeat a write or destructive action that already comp
       IntegrationKind.cloudflare =>
         await _verifyCloudflareToken(trimmed, trimmedAccountId),
       IntegrationKind.supabase => await _verifySupabaseToken(trimmed),
-      IntegrationKind.expo => 'Expo',
-      IntegrationKind.tavily => 'Tavily',
+      IntegrationKind.expo => await _verifyExpoToken(trimmed),
+      IntegrationKind.tavily => await _verifyTavilyToken(trimmed),
     };
     final account = IntegrationAccount(
       id: '${kind.name}-${DateTime.now().microsecondsSinceEpoch}',
@@ -2248,7 +2262,88 @@ Continue the task. Do not repeat a write or destructive action that already comp
       throw IntegrationException(
           'Cloudflare rejected that Account ID or API token.');
     }
-    return accountId;
+    // Store the account's display name, not the raw 32-character id. If the
+    // token cannot read account details, the integration still shows a human
+    // label and keeps the id as secondary metadata.
+    final name = await CloudflarePagesClient(
+      token,
+      accountId: accountId,
+      client: httpClient,
+    ).accountName();
+    return name.trim().isEmpty ? 'Cloudflare' : name.trim();
+  }
+
+  /// Tavily's usage endpoint validates the key without spending search
+  /// credits. It returns real account usage when the key is valid.
+  Future<String> _verifyTavilyToken(String token) async {
+    final response = await httpClient.get(
+      Uri.parse('https://api.tavily.com/usage'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      },
+    ).timeout(const Duration(seconds: 25));
+    if (response.statusCode == 401 ||
+        response.statusCode == 403 ||
+        response.statusCode == 422) {
+      throw IntegrationException('Tavily rejected that API key.');
+    }
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          'Tavily returned HTTP ${response.statusCode} while checking the key.');
+    }
+    final body = jsonDecode(response.body);
+    final plan = body is Map ? body['account'] : null;
+    final planName = plan is Map ? '${plan['current_plan'] ?? ''}'.trim() : '';
+    return planName.isEmpty ? 'Tavily' : 'Tavily · $planName';
+  }
+
+  /// Expo has no public versioned REST auth endpoint; its own EAS CLI uses the
+  /// GraphQL `meActor` query with a bearer token. A robot token may expose a
+  /// firstName instead of a username, so both are accepted.
+  Future<String> _verifyExpoToken(String token) async {
+    const query = '''
+query CurrentUser {
+  meActor {
+    __typename
+    id
+    ... on UserActor { username }
+    ... on Robot { firstName }
+    ... on PartnerActor { username }
+  }
+}
+''';
+    final response = await httpClient
+        .post(
+          Uri.parse('https://api.expo.dev/graphql'),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: jsonEncode({'query': query}),
+        )
+        .timeout(const Duration(seconds: 25));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw IntegrationException('Expo rejected that access token.');
+    }
+    if (response.statusCode != 200) {
+      throw IntegrationException(
+          'Expo returned HTTP ${response.statusCode} while checking the token.');
+    }
+    final body = jsonDecode(response.body);
+    if (body is! Map || body['errors'] is List) {
+      throw IntegrationException(
+          'Expo rejected that access token or returned no account.');
+    }
+    final data = body['data'];
+    final actor = data is Map ? data['meActor'] : null;
+    if (actor is! Map) {
+      throw IntegrationException(
+          'Expo returned no account for that access token.');
+    }
+    final name = ('${actor['username'] ?? actor['firstName'] ?? ''}').trim();
+    return name.isEmpty ? 'Expo' : name;
   }
 
   Future<String> _verifySupabaseToken(String token) async {
@@ -2268,7 +2363,7 @@ Continue the task. Do not repeat a write or destructive action that already comp
     }
     final body = jsonDecode(response.body);
     final count = body is List ? body.length : 0;
-    return count == 0 ? 'Supabase' : '$count projects';
+    return count == 0 ? 'Supabase' : 'Supabase · $count projects';
   }
 
   Future<String> testGithubToken(String token) =>
@@ -3276,50 +3371,117 @@ Continue the task. Do not repeat a write or destructive action that already comp
             return 'GitHub is not connected. Ask the user to connect it in '
                 'Integrations.';
           }
-          final repo = (target.contains('/') ? target : project.repo)
-              .replaceAll('.git', '')
-              .trim();
+          final resolved = _githubRunTarget(target, project.repo);
+          final repo = resolved.$1;
           if (repo.isEmpty) {
-            return 'No GitHub repository is linked to this project.';
+            return 'No GitHub repository is linked to this project. Pass '
+                'owner/repo or open the repository first.';
           }
           final headers = {
             'Authorization': 'Bearer ${account.token}',
             'Accept': 'application/vnd.github+json',
           };
           if (action == 'logs') {
-            if (!RegExp(r'^\d+$').hasMatch(target)) {
-              return 'Pass the numeric GitHub Actions run id as target.';
+            var runId = resolved.$2;
+            if (runId.isEmpty) {
+              // The agent should not need a run id from the user. Resolve the
+              // latest run for the project repository and use its jobs.
+              final latest = await httpClient.get(
+                Uri.parse('https://api.github.com/repos/$repo/actions/runs'
+                    '?per_page=1'),
+                headers: headers,
+              );
+              if (latest.statusCode != 200) {
+                return 'GitHub returned ${latest.statusCode} while looking '
+                    'for the latest workflow run in $repo.';
+              }
+              final latestBody = jsonDecode(latest.body);
+              final runs =
+                  latestBody is Map ? latestBody['workflow_runs'] : null;
+              if (runs is! List || runs.isEmpty) {
+                return 'No workflow runs found for $repo. Start a workflow or '
+                    'pass an Actions run URL as target.';
+              }
+              final first = runs.whereType<Map>().isEmpty
+                  ? null
+                  : runs.whereType<Map>().first;
+              runId = '${first?['id'] ?? ''}'.trim();
+              if (runId.isEmpty) {
+                return 'GitHub returned a workflow run without an id for '
+                    '$repo.';
+              }
             }
-            final response = await httpClient.get(
+            final jobsResponse = await httpClient.get(
               Uri.parse(
-                  'https://api.github.com/repos/$repo/actions/runs/$target/jobs'),
+                  'https://api.github.com/repos/$repo/actions/runs/$runId/jobs'),
               headers: headers,
             );
-            if (response.statusCode != 200) {
-              return 'GitHub returned ${response.statusCode} for run $target.';
+            if (jobsResponse.statusCode == 404) {
+              return 'No workflow run $runId exists in $repo. Pass a run id or '
+                  'a full github.com Actions run URL.';
             }
-            final decoded = jsonDecode(response.body);
-            final jobs = decoded is Map ? decoded['jobs'] : null;
-            if (jobs is! List || jobs.isEmpty) {
-              return 'No jobs for run $target.';
+            if (jobsResponse.statusCode != 200) {
+              return 'GitHub returned ${jobsResponse.statusCode} for run '
+                  '$runId in $repo.';
             }
-            return 'GitHub Actions jobs for $repo run $target:\n${jobs.map(
-              (job) {
-                final map = job as Map;
-                final steps = map['steps'];
-                final failed = steps is List
-                    ? steps
-                        .whereType<Map>()
-                        .where((step) =>
-                            step['conclusion'] == 'failure' ||
-                            step['conclusion'] == 'timed_out')
-                        .map((step) => step['name'])
-                        .join(', ')
-                    : '';
-                return '- ${map['name']} [${map['status']}/${map['conclusion']}]'
-                    '${failed.isEmpty ? '' : ' failed: $failed'}';
-              },
-            ).join('\n')}';
+            final decoded = jsonDecode(jobsResponse.body);
+            final rawJobs = decoded is Map ? decoded['jobs'] : null;
+            final jobs =
+                rawJobs is List ? rawJobs.whereType<Map>().toList() : <Map>[];
+            if (jobs.isEmpty) {
+              return 'No jobs for run $runId in $repo yet.';
+            }
+            final summary = jobs.map((job) {
+              final steps = job['steps'];
+              final failed = steps is List
+                  ? steps
+                      .whereType<Map>()
+                      .where((step) =>
+                          step['conclusion'] == 'failure' ||
+                          step['conclusion'] == 'timed_out')
+                      .map((step) => step['name'])
+                      .join(', ')
+                  : '';
+              return '- ${job['name']} [${job['status']}/${job['conclusion']}]'
+                  '${failed.isEmpty ? '' : ' failed: $failed'}';
+            }).join('\n');
+
+            // Download the failing job logs through the Actions API. When no
+            // job has failed (a queued or successful run), fetch the first
+            // job so the agent still sees real output instead of only names.
+            var logJobs = jobs
+                .where((job) =>
+                    job['conclusion'] == 'failure' ||
+                    job['conclusion'] == 'timed_out')
+                .toList();
+            if (logJobs.isEmpty) logJobs = jobs.take(1).toList();
+            final entries = await environmentFor(project);
+            final logs = StringBuffer();
+            for (final job in logJobs.take(2)) {
+              final jobId = '${job['id'] ?? ''}'.trim();
+              if (jobId.isEmpty) continue;
+              final logResponse = await httpClient.get(
+                Uri.parse(
+                    'https://api.github.com/repos/$repo/actions/jobs/$jobId/logs'),
+                headers: headers,
+              );
+              if (logResponse.statusCode == 200 &&
+                  logResponse.body.trim().isNotEmpty) {
+                final masked = maskSecretLog(
+                  logResponse.body,
+                  entries,
+                  maxChars: 6000,
+                );
+                logs.write(
+                    '\n\nLogs for ${job['name']} (job $jobId):\n$masked');
+              } else if (logResponse.statusCode == 404 ||
+                  logResponse.statusCode == 410) {
+                logs.write('\n\nLogs for ${job['name']} are not available yet '
+                    '(HTTP ${logResponse.statusCode}).');
+              }
+            }
+            return 'GitHub Actions run $runId in $repo:\n$summary'
+                '${logs.isEmpty ? '\n\nNo job logs were available yet. The run may still be queued.' : logs}';
           }
           final response = await httpClient.get(
             Uri.parse(
@@ -3451,6 +3613,49 @@ Continue the task. Do not repeat a write or destructive action that already comp
     } catch (error) {
       return 'Integration request failed: $error';
     }
+  }
+
+  /// Resolves a GitHub Actions target into an owner/repo and an optional run
+  /// id. It accepts a bare run id, owner/repo, a full Actions run URL, or a
+  /// relative owner/repo/actions/runs/id path. An empty run id means "latest".
+  (String, String) _githubRunTarget(String raw, String fallbackRepo) {
+    final target = raw.trim();
+    String clean(String value) =>
+        value.replaceAll(RegExp(r'\.git$'), '').trim();
+    final fallback = clean(fallbackRepo);
+    if (target.isEmpty) return (fallback, '');
+
+    final absoluteRun = RegExp(
+      r'(?:api\.github\.com/repos/|github\.com/)([^/\s]+)/([^/\s?#]+)/actions/runs/(\d+)',
+    ).firstMatch(target);
+    if (absoluteRun != null) {
+      return (
+        '${absoluteRun.group(1)}/${clean(absoluteRun.group(2)!)}',
+        absoluteRun.group(3)!
+      );
+    }
+    final relativeRun = RegExp(
+      r'^([^/\s]+)/([^/\s]+)/actions/runs/(\d+)',
+    ).firstMatch(target);
+    if (relativeRun != null) {
+      return (
+        '${relativeRun.group(1)}/${clean(relativeRun.group(2)!)}',
+        relativeRun.group(3)!
+      );
+    }
+    if (RegExp(r'^\d+$').hasMatch(target)) return (fallback, target);
+    final runOnly = RegExp(r'/actions/runs/(\d+)').firstMatch(target);
+    if (runOnly != null) return (fallback, runOnly.group(1)!);
+    if (target.startsWith('http')) {
+      final repoUrl =
+          RegExp(r'github\.com/([^/\s]+)/([^/\s?#]+)').firstMatch(target);
+      if (repoUrl != null) {
+        return ('${repoUrl.group(1)}/${clean(repoUrl.group(2)!)}', '');
+      }
+      return (fallback, '');
+    }
+    if (target.contains('/')) return (clean(target), '');
+    return (fallback, '');
   }
 
   /// Pages Direct Upload serves the files it receives; it does not build a

@@ -8,6 +8,26 @@ import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import 'ui.dart';
 
+/// Shown after the current provider has exhausted every saved key. It lists
+/// every other configured provider with the models its owner kept, so the user
+/// chooses where to continue instead of approving an opaque switch.
+Future<ProviderChoice?> showProviderFallbackSheet(
+  BuildContext context, {
+  required ProviderConfig current,
+  required List<ProviderConfig> providers,
+}) {
+  return showModalBottomSheet<ProviderChoice>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: Pal.surface,
+    builder: (_) => _ProviderFallbackSheet(
+      current: current,
+      providers: providers,
+    ),
+  );
+}
+
 /// The model switcher behind the project header. It lists only the providers
 /// the user has configured, and only the models they chose to keep.
 Future<void> showModelSheet(BuildContext context) {
@@ -209,6 +229,149 @@ class _ModelSheet extends StatelessWidget {
                     style: Txt.meta,
                   ),
                 ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProviderFallbackSheet extends StatelessWidget {
+  const _ProviderFallbackSheet({
+    required this.current,
+    required this.providers,
+  });
+
+  final ProviderConfig current;
+  final List<ProviderConfig> providers;
+
+  List<(ProviderConfig, String)> get _models {
+    final result = <(ProviderConfig, String)>[];
+    for (final provider in providers) {
+      final models = <String>{
+        ...provider.selectedModels,
+        if (provider.selectedModels.isEmpty) ...provider.models,
+        if (provider.model.trim().isNotEmpty) provider.model,
+      };
+      for (final model in models) {
+        if (model.trim().isEmpty) continue;
+        result.add((provider, model));
+      }
+    }
+    return result;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final models = _models;
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.78,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SheetHandle(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x3),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Choose another provider',
+                    style: Txt.headline.copyWith(fontSize: 22),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    '${current.name} could not complete this request with any '
+                    'saved key. Pick a provider and model to continue this task.',
+                    style: Txt.bodySoft,
+                  ),
+                ],
+              ),
+            ),
+            if (models.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(Sp.page),
+                child: EmptyState(
+                  icon: Icons.key_off_outlined,
+                  title: 'No other model is ready',
+                  body: 'Add another provider key in Settings, then retry.',
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(horizontal: Sp.page),
+                  itemCount: models.length,
+                  separatorBuilder: (_, __) => const Hairline(),
+                  itemBuilder: (context, index) {
+                    final (provider, model) = models[index];
+                    return InkWell(
+                      onTap: () => Navigator.of(context)
+                          .pop(ProviderChoice(provider, model)),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: SvgPicture.asset(
+                                provider.icon,
+                                colorFilter: ColorFilter.mode(
+                                  Pal.text,
+                                  BlendMode.srcIn,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: Sp.x3),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    model,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Txt.code.copyWith(fontSize: 11.5),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    '${provider.name} · '
+                                    '${provider.keys.length} '
+                                    '${provider.keys.length == 1 ? 'key' : 'keys'}',
+                                    style: Txt.meta.copyWith(fontSize: 9.5),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              Icons.chevron_right_rounded,
+                              size: 17,
+                              color: Pal.textDim,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            Padding(
+              padding:
+                  const EdgeInsets.fromLTRB(Sp.page, Sp.x3, Sp.page, Sp.x3),
+              child: SizedBox(
+                width: double.infinity,
+                child: GhostButton(
+                  label: 'Stop this task',
+                  icon: Icons.stop_circle_outlined,
+                  onTap: () => Navigator.of(context).pop(),
+                ),
               ),
             ),
           ],

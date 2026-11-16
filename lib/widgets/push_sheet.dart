@@ -205,7 +205,17 @@ class _PushSheetState extends State<PushSheet> {
         _push.repo == _repoText &&
         _push.branch == _branchText &&
         _push.synced;
-    if (alreadyCompared) return;
+    if (alreadyCompared) {
+      await _refreshChanges();
+      if (!mounted) return;
+      if (_compareNote == null) {
+        setState(() => _compareNote = _changes.isEmpty
+            ? 'Working tree is clean against $_ownerText/$_repoText · '
+                '$_branchText.'
+            : 'New edits are ready to commit.');
+      }
+      return;
+    }
     setState(() {
       _syncing = true;
       _compareNote = null;

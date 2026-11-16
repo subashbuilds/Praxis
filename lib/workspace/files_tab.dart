@@ -81,7 +81,7 @@ class _FilesTabState extends State<FilesTab> {
     // a portfolio with thousands of files never blocks the first frame.
     final fs = state.fsFor(widget.project);
     final files = <FileEntry>[
-      ...await fs.list(recursive: false),
+      ...await fs.list(recursive: false, includeHidden: true),
     ];
     // A refresh should not collapse folders the user is already inside.
     _loadedDirs
@@ -90,7 +90,11 @@ class _FilesTabState extends State<FilesTab> {
     for (final path in _expanded) {
       if (path.isEmpty) continue;
       try {
-        files.addAll(await fs.list(path: path, recursive: false));
+        files.addAll(await fs.list(
+          path: path,
+          recursive: false,
+          includeHidden: true,
+        ));
         _loadedDirs.add(path);
       } catch (_) {
         // A deleted folder is dropped from the next tree.

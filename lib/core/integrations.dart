@@ -868,6 +868,51 @@ class CloudflarePagesClient {
 
   Future<String> login() async => (await _account()).$2;
 
+  /// Resolves the account name for display. A token scoped to Pages may not
+  /// be allowed to list every account, so both the single-account and list
+  /// endpoints are attempted and an empty result falls back to the caller.
+  Future<String> accountName() async {
+    final configured = accountId.trim();
+    if (configured.isNotEmpty) {
+      try {
+        final response = await _client
+            .get(
+              Uri.parse(
+                  'https://api.cloudflare.com/client/v4/accounts/$configured'),
+              headers: _headers,
+            )
+            .timeout(const Duration(seconds: 20));
+        if (response.statusCode == 200) {
+          final body = jsonDecode(response.body);
+          final result = body is Map ? body['result'] : null;
+          final name = result is Map ? '${result['name'] ?? ''}'.trim() : '';
+          if (name.isNotEmpty) return name;
+        }
+      } catch (_) {}
+    }
+    try {
+      final response = await _client
+          .get(Uri.parse('https://api.cloudflare.com/client/v4/accounts'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 20));
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body);
+        final result = body is Map ? body['result'] : null;
+        if (result is List) {
+          Map? match;
+          for (final item in result.whereType<Map>()) {
+            if (configured.isEmpty || '${item['id'] ?? ''}' == configured) {
+              match = item;
+              break;
+            }
+          }
+          if (match != null) return '${match['name'] ?? ''}'.trim();
+        }
+      }
+    } catch (_) {}
+    return '';
+  }
+
   /// Resolves the account id when the saved account did not record one.
   Future<String> accountIdentifier() async => (await _account()).$1;
 

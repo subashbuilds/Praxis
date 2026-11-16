@@ -6,6 +6,7 @@ import 'state/app_state.dart';
 import 'theme/app_theme.dart';
 import 'theme/tokens.dart';
 import 'widgets/confirm_dialog.dart';
+import 'widgets/model_sheet.dart';
 
 class PraxisApp extends StatefulWidget {
   const PraxisApp({super.key, required this.state});
@@ -40,6 +41,15 @@ class _PraxisAppState extends State<PraxisApp> {
         confirmLabel: accept,
         cancelLabel: 'Stop',
         icon: Icons.bolt_outlined,
+      );
+    };
+    state.providerChoicePrompt = (current, providers) async {
+      final context = _navigatorKey.currentContext;
+      if (context == null) return null;
+      return showProviderFallbackSheet(
+        context,
+        current: current,
+        providers: providers,
       );
     };
     state.confirmPrompt = (title, body, accept) async {

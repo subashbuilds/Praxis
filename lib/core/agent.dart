@@ -88,8 +88,9 @@ class AgentEvent {
   final bool ok;
 }
 
-/// Called when a provider says a key is out of quota. Returning a config with
-/// another key or provider retries the same round; returning null stops.
+/// Called when a key fails, whether from quota or another provider error.
+/// Returning a config with another key or provider retries the same round;
+/// returning null stops.
 typedef ProviderLimitHandler = Future<ProviderConfig?> Function(
   ProviderConfig current,
   AiProviderException error,
@@ -579,7 +580,11 @@ class Agent {
     name: 'integration_status',
     description:
         'Read connected GitHub Actions, Cloudflare Pages/Workers or Vercel '
-        'deployments, including status, URLs and failing job names. For '
+        'deployments, including status, URLs and logs. For GitHub, action '
+        'workflows lists recent runs. Action logs accepts a run id, a full '
+        'github.com Actions run URL, or owner/repo; omit target to use the '
+        'latest run for the project repository. It downloads the failing job '
+        'logs itself, so never ask the user for a numeric run id. For '
         'Cloudflare, use action logs with target project or '
         'project/deployment-id to fetch the real build log. The connected '
         'accounts are listed in the system prompt. Use this instead of asking '
@@ -598,7 +603,9 @@ class Agent {
         'target': {
           'type': 'string',
           'description':
-              'Optional owner/repo, Cloudflare project or Vercel deployment id.',
+              'For GitHub logs: a run id, full Actions run URL, or owner/repo. '
+                  'For Cloudflare: project or project/deployment-id. For Vercel: '
+                  'optional deployment id.',
         },
       },
       'required': ['service', 'action'],
@@ -715,7 +722,11 @@ class Agent {
               ),
             );
             final handler = onProviderLimit;
-            if (!error.isLimit || handler == null || switches >= 3) {
+            // A key can fail for reasons other than quota (invalid key,
+            // provider outage, rejected model). Offer the next key or another
+            // configured provider in every case instead of stopping before
+            // the user can choose a working one.
+            if (handler == null || switches >= 3) {
               outcome =
                   error.isLimit ? AgentOutcome.quotaError : AgentOutcome.error;
               rethrow;
@@ -1265,7 +1276,7 @@ Environment:
 - A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
 - Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
-${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status to read deployments, workflows and build logs for these accounts. Never ask for a token.'}
+${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status to read deployments, workflows and build logs for these accounts. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. It downloads the failing job logs for you; never ask the user for a numeric run id first. Never ask for a token.'}
 
 Context policy (the host enforces this automatically):
 - Below about 60% of the model window: do nothing.

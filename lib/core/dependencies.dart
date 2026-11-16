@@ -223,11 +223,17 @@ Future<DependencyReport> _inspectNode(
     ));
   }
 
-  final lockJson = await _firstReadable(fs, [
-    'package-lock.json',
-    'npm-shrinkwrap.json',
+  // The hidden lock is npm's record of what is physically installed. Prefer
+  // it over the root lock, which can describe a newer or older resolution.
+  // The root lock is the fallback when node_modules is absent or incomplete.
+  final hiddenLock = await _firstReadable(fs, [
     'node_modules/.package-lock.json',
   ]);
+  final rootLock = await _firstReadable(fs, [
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+  ]);
+  final lockJson = hiddenLock.trim().isNotEmpty ? hiddenLock : rootLock;
   final marker = await _readNpmMarker(fs);
   if (hasNodeModules && lockJson.isNotEmpty) {
     final lockText = await _firstReadable(fs, [

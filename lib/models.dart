@@ -293,6 +293,15 @@ class ProviderConfig {
   }
 }
 
+/// A provider and model chosen from the fallback picker after every key on the
+/// current provider has failed.
+class ProviderChoice {
+  const ProviderChoice(this.provider, this.model);
+
+  final ProviderConfig provider;
+  final String model;
+}
+
 /// Every preset is a real endpoint that needs the user's own key (except
 /// Ollama, which talks to a server on the user's network). There is no
 /// bundled "free" model: without a key there is nothing to call.

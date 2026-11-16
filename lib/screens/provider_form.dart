@@ -49,7 +49,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     _keys = (stored.isEmpty ? [''] : stored)
         .map((key) => TextEditingController(text: key))
         .toList();
-    _reveal = List<bool>.filled(_keys.length, false);
+    _reveal = List<bool>.filled(_keys.length, false, growable: true);
     _models = List<String>.from(widget.provider.models);
     _selected = Set<String>.from(widget.provider.selectedModels);
     _keyIndex = stored.isEmpty

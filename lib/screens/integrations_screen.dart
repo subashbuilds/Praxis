@@ -449,7 +449,7 @@ class _ConnectedService extends StatelessWidget {
                           if (account.kind == IntegrationKind.cloudflare &&
                               account.accountId.isNotEmpty)
                             Text(
-                              'Account ID ${account.accountId}',
+                              'Cloudflare · ${account.accountId}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: Txt.meta.copyWith(fontSize: 8.5),

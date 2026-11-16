@@ -907,9 +907,29 @@ class LinuxEnvironment extends ChangeNotifier {
   Future<void> clearCache() async {
     if (!ready) return;
     await run(
-      'rm -rf /var/cache/apk/* /root/.cache/* /root/.npm/* /tmp/*',
+      'for dir in /var/cache/apk /root/.cache /root/.npm /tmp; do '
+      '[ -d "\$dir" ] || continue; '
+      'find "\$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} \\; 2>/dev/null '
+      '|| true; '
+      'done',
       projectRoot: _lastProjectRoot ?? base.path,
     );
+    // refresh() is skipped while another sample is running. Update the cache
+    // figure here so the sheet cannot keep showing bytes that were deleted.
+    final previous = snapshot;
+    snapshot = LinuxSnapshot(
+      diskBytes: previous.diskBytes,
+      cacheBytes: await _cacheSize(),
+      projectBytes: previous.projectBytes,
+      projectCount: previous.projectCount,
+      ramUsedBytes: previous.ramUsedBytes,
+      ramTotalBytes: previous.ramTotalBytes,
+      load1: previous.load1,
+      cpuPercent: previous.cpuPercent,
+      processes: previous.processes,
+      measuredAt: DateTime.now(),
+    );
+    notifyListeners();
     await refresh();
   }
 
