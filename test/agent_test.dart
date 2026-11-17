@@ -493,7 +493,7 @@ void main() {
     final events = <AgentEvent>[];
     await Agent(
       client: AiClient(client: client),
-      provider: provider().copyWith(toolCallLimit: 3),
+      provider: provider().copyWith(dailyLimit: 3),
       fs: fs,
       shell: Shell(fs),
       skills: const [],

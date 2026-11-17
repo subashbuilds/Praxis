@@ -696,7 +696,6 @@ class Agent {
     var previousToolFailed = false;
     var readOnlyRounds = 0;
     var readOnlyNudges = 0;
-    var toolCallsThisRun = 0;
     var outcome = AgentOutcome.error;
 
     try {
@@ -916,10 +915,10 @@ class Agent {
         }
 
         // Repeated-call detection only applies to providers the user gave a
-        // tool-call limit. Without a limit the agent keeps working instead of
+        // request limit. Without a limit the agent keeps working instead of
         // stopping mid-task on a repeated read or edit.
         var repeatedStop = false;
-        if (flags.loopGuards && current.toolCallLimit > 0) {
+        if (flags.loopGuards && current.dailyLimit > 0) {
           for (final call in calls) {
             final signature = '${call.name}:${jsonEncode(call.arguments)}';
             final count = (_signatureCounts[signature] ?? 0) + 1;
@@ -934,18 +933,6 @@ class Agent {
               'arguments. This usually means the edit or read did not give it '
               'the result it expected. Send “continue” to retry with a '
               'different approach.';
-          onEvent(AgentEvent.error(message));
-          onPause?.call(message);
-          return;
-        }
-
-        if (flags.loopGuards &&
-            current.toolCallLimit > 0 &&
-            toolCallsThisRun >= current.toolCallLimit) {
-          outcome = AgentOutcome.loopDetected;
-          final message =
-              'Paused at the ${current.toolCallLimit} tool-call limit for '
-              '${current.name}. Send “continue” to keep going.';
           onEvent(AgentEvent.error(message));
           onPause?.call(message);
           return;
@@ -1018,7 +1005,7 @@ class Agent {
             mutated = true;
           }
           if (flags.loopGuards &&
-              current.toolCallLimit > 0 &&
+              current.dailyLimit > 0 &&
               result.failed &&
               const {'edit_file', 'write_file', 'write_files', 'apply_patch'}
                   .contains(call.name)) {
@@ -1045,7 +1032,6 @@ class Agent {
           ));
           turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
-        toolCallsThisRun += calls.length;
         previousToolFailed = roundFailed;
         final readOnlyRound = calls
             .every((call) => Phase1Flags.readOnlyTools.contains(call.name));

@@ -271,9 +271,9 @@ void main() {
     expect(events.last.text, 'Recovered.');
   });
 
-  test('repeated calls are only stopped when the provider sets a tool limit',
+  test('repeated calls are only stopped when the provider sets a limit',
       () async {
-    Future<List<AgentEvent>> run({required int toolCallLimit}) async {
+    Future<List<AgentEvent>> run({required int dailyLimit}) async {
       var calls = 0;
       final client = MockClient((request) async {
         calls++;
@@ -331,7 +331,7 @@ void main() {
           model: 'm',
           flavor: ApiFlavor.openai,
           keys: const ['key'],
-          toolCallLimit: toolCallLimit,
+          dailyLimit: dailyLimit,
         ),
         fs: fs,
         shell: Shell(fs),
@@ -341,14 +341,14 @@ void main() {
       return events;
     }
 
-    final unlimited = await run(toolCallLimit: 0);
+    final unlimited = await run(dailyLimit: 0);
     expect(unlimited.last.text, 'Finished reading.');
     expect(
       unlimited.any((event) => event.text.contains('repeated the same')),
       isFalse,
     );
 
-    final limited = await run(toolCallLimit: 3);
+    final limited = await run(dailyLimit: 3);
     expect(
       limited.any((event) => event.text.contains('repeated the same')),
       isTrue,
