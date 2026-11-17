@@ -579,33 +579,54 @@ class Agent {
   static const _integrationTool = AiToolSpec(
     name: 'integration_status',
     description:
-        'Read connected GitHub Actions, Cloudflare Pages/Workers or Vercel '
-        'deployments, including status, URLs and logs. For GitHub, action '
-        'workflows lists recent runs. Action logs accepts a run id, a full '
-        'github.com Actions run URL, or owner/repo; omit target to use the '
-        'latest run for the project repository. It downloads the failing job '
-        'logs itself, so never ask the user for a numeric run id. For '
+        'Read connected GitHub Actions, Cloudflare Pages/Workers, Vercel, '
+        'Supabase or Expo data, including status, URLs and logs. For GitHub, '
+        'action workflows lists recent runs. Action logs accepts a run id, a '
+        'full github.com Actions run URL, or owner/repo; omit target to use '
+        'the latest run for the project repository. It downloads the failing '
+        'job logs itself, so never ask the user for a numeric run id. For '
         'Cloudflare, use action logs with target project or '
-        'project/deployment-id to fetch the real build log. The connected '
-        'accounts are listed in the system prompt. Use this instead of asking '
-        'the user to paste logs or account details. Never prints access tokens.',
+        'project/deployment-id to fetch the real build log. For Supabase, '
+        'action projects lists the account projects and target filters by name '
+        'or project ref. For Expo, action projects lists apps and action builds '
+        'reads EAS builds for the app id in app.json or the target. For Tavily, '
+        'action search runs a real web search and target is the query. The '
+        'connected accounts are listed in the system prompt. Use this instead '
+        'of asking the user to paste logs or account details. Never prints '
+        'access tokens.',
     parameters: {
       'type': 'object',
       'properties': {
         'service': {
           'type': 'string',
-          'enum': ['github', 'cloudflare', 'vercel'],
+          'enum': [
+            'github',
+            'cloudflare',
+            'vercel',
+            'supabase',
+            'expo',
+            'tavily'
+          ],
         },
         'action': {
           'type': 'string',
-          'enum': ['workflows', 'deployments', 'logs'],
+          'enum': [
+            'workflows',
+            'deployments',
+            'logs',
+            'projects',
+            'builds',
+            'search',
+          ],
         },
         'target': {
           'type': 'string',
           'description':
               'For GitHub logs: a run id, full Actions run URL, or owner/repo. '
                   'For Cloudflare: project or project/deployment-id. For Vercel: '
-                  'optional deployment id.',
+                  'optional deployment id. For Supabase: optional project name '
+                  'or ref. For Expo: optional EAS project id. For Tavily: the '
+                  'search query.',
         },
       },
       'required': ['service', 'action'],
@@ -662,7 +683,10 @@ class Agent {
     }
     if (flags.compoundTools) await _detectVerificationCommand();
     var current = provider;
-    var mutated = false;
+    // A resumed task already changed files before the interruption. Treat it
+    // as mutated so the "you have not changed a file yet" nudge cannot force
+    // the model to restart work that is already on disk.
+    var mutated = skipActionFingerprints.isNotEmpty;
     var completionNudges = 0;
     var limitNudges = 0;
     final log = roundLog;
@@ -672,6 +696,7 @@ class Agent {
     var previousToolFailed = false;
     var readOnlyRounds = 0;
     var readOnlyNudges = 0;
+    var toolCallsThisRun = 0;
     var outcome = AgentOutcome.error;
 
     try {
@@ -890,12 +915,17 @@ class Agent {
           return;
         }
 
+        // Repeated-call detection only applies to providers the user gave a
+        // tool-call limit. Without a limit the agent keeps working instead of
+        // stopping mid-task on a repeated read or edit.
         var repeatedStop = false;
-        for (final call in calls) {
-          final signature = '${call.name}:${jsonEncode(call.arguments)}';
-          final count = (_signatureCounts[signature] ?? 0) + 1;
-          _signatureCounts[signature] = count;
-          if (flags.loopGuards && count >= repeatLimit) repeatedStop = true;
+        if (flags.loopGuards && current.toolCallLimit > 0) {
+          for (final call in calls) {
+            final signature = '${call.name}:${jsonEncode(call.arguments)}';
+            final count = (_signatureCounts[signature] ?? 0) + 1;
+            _signatureCounts[signature] = count;
+            if (count >= repeatLimit) repeatedStop = true;
+          }
         }
         if (repeatedStop) {
           outcome = AgentOutcome.loopDetected;
@@ -904,6 +934,18 @@ class Agent {
               'arguments. This usually means the edit or read did not give it '
               'the result it expected. Send “continue” to retry with a '
               'different approach.';
+          onEvent(AgentEvent.error(message));
+          onPause?.call(message);
+          return;
+        }
+
+        if (flags.loopGuards &&
+            current.toolCallLimit > 0 &&
+            toolCallsThisRun >= current.toolCallLimit) {
+          outcome = AgentOutcome.loopDetected;
+          final message =
+              'Paused at the ${current.toolCallLimit} tool-call limit for '
+              '${current.name}. Send “continue” to keep going.';
           onEvent(AgentEvent.error(message));
           onPause?.call(message);
           return;
@@ -976,6 +1018,7 @@ class Agent {
             mutated = true;
           }
           if (flags.loopGuards &&
+              current.toolCallLimit > 0 &&
               result.failed &&
               const {'edit_file', 'write_file', 'write_files', 'apply_patch'}
                   .contains(call.name)) {
@@ -1002,6 +1045,7 @@ class Agent {
           ));
           turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
+        toolCallsThisRun += calls.length;
         previousToolFailed = roundFailed;
         final readOnlyRound = calls
             .every((call) => Phase1Flags.readOnlyTools.contains(call.name));
@@ -1281,7 +1325,7 @@ Environment:
 - A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
 - Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
-${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status to read deployments, workflows and build logs for these accounts. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. It downloads the failing job logs for you; never ask the user for a numeric run id first. Never ask for a token.'}
+${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status for these accounts: service "github", "cloudflare" or "vercel" for deployments, workflows and build logs; service "supabase" with action "projects" for database projects; service "expo" with action "projects" or "builds" for EAS apps and builds; service "tavily" with action "search" and the query as target for live web search. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. It downloads the failing job logs for you; never ask the user for a numeric run id first. Never ask for a token.'}
 
 Context policy (the host enforces this automatically):
 - Below about 60% of the model window: do nothing.

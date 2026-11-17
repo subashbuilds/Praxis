@@ -1792,7 +1792,7 @@ class AppState extends ChangeNotifier {
     await _runPrompt(
       projectId,
       _resumeSummary(checkpoint, const []),
-      historyOverride: const [],
+      historyOverride: _historyFor(thread),
       skipActionFingerprints: skip,
       resumeFrom: checkpoint,
       recordUserMessage: false,
@@ -1873,7 +1873,7 @@ $externalText
 Remaining step: ${checkpoint.pendingStep.isEmpty ? 'Continue the original request from the last completed step.' : checkpoint.pendingStep}
 Git branch: ${checkpoint.gitBranch.isEmpty ? 'unknown' : checkpoint.gitBranch}
 
-Continue the task. Do not repeat a write or destructive action that already completed. Use the current files on disk, not assumptions from before the interruption.'''
+Continue seamlessly from the remaining step. Do not restart the task from the beginning and do not repeat a write or destructive action that already completed. Use the current files on disk, not assumptions from before the interruption.'''
         .trim();
   }
 
@@ -3655,12 +3655,284 @@ query CurrentUser {
           }
           return 'Vercel deployments:\n${deployments.whereType<Map>().take(8).map((item) => '- ${item['name']} [${item['state']}] '
               'https://${item['url']}').join('\n')}';
+        case 'tavily':
+          return _tavilyStatus(target);
+        case 'supabase':
+          return _supabaseStatus(target);
+        case 'expo':
+          return action == 'builds'
+              ? _expoBuildsStatus(project, target)
+              : _expoProjectsStatus();
         default:
           return 'Unknown integration service: $service.';
       }
     } catch (error) {
       return 'Integration request failed: $error';
     }
+  }
+
+  Future<String> _tavilyStatus(String rawQuery) async {
+    final account = integrations.activeFor(IntegrationKind.tavily);
+    if (account == null) {
+      return 'Tavily is not connected. Ask the user to connect it in '
+          'Integrations.';
+    }
+    final query = rawQuery.trim();
+    if (query.isEmpty) return 'Pass the web search query as target.';
+    final response = await httpClient
+        .post(
+          Uri.parse('https://api.tavily.com/search'),
+          headers: {
+            'Authorization': 'Bearer ${account.token}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: jsonEncode({
+            'query': query,
+            'search_depth': 'basic',
+            'max_results': 5,
+            'include_answer': false,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return 'Tavily rejected the saved API key. Ask the user to reconnect it '
+          'in Integrations.';
+    }
+    if (response.statusCode != 200) {
+      return 'Tavily returned ${response.statusCode} for this search.';
+    }
+    final decoded = jsonDecode(response.body);
+    final results = decoded is Map ? decoded['results'] : null;
+    if (results is! List || results.isEmpty) {
+      return 'Tavily returned no results for "$query".';
+    }
+    final lines = results.whereType<Map>().take(5).map((item) {
+      final title = '${item['title'] ?? ''}'.trim();
+      final url = '${item['url'] ?? ''}'.trim();
+      final content = '${item['content'] ?? ''}'.trim();
+      final excerpt =
+          content.length > 500 ? '${content.substring(0, 500)}…' : content;
+      return '- ${title.isEmpty ? url : title}\n  $url\n  $excerpt';
+    }).join('\n');
+    return 'Tavily results for "$query":\n$lines';
+  }
+
+  Future<String> _supabaseStatus(String rawTarget) async {
+    final account = integrations.activeFor(IntegrationKind.supabase);
+    if (account == null) {
+      return 'Supabase is not connected. Ask the user to connect it in '
+          'Integrations.';
+    }
+    final response = await httpClient.get(
+      Uri.parse('https://api.supabase.com/v1/projects'),
+      headers: {
+        'Authorization': 'Bearer ${account.token}',
+        'Accept': 'application/json',
+      },
+    ).timeout(const Duration(seconds: 30));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return 'Supabase rejected the saved access token. Ask the user to '
+          'reconnect it in Integrations.';
+    }
+    if (response.statusCode != 200) {
+      return 'Supabase returned ${response.statusCode} while listing projects.';
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      return 'Supabase returned an unexpected project list.';
+    }
+    final wanted = rawTarget.trim().toLowerCase();
+    final projects = decoded.whereType<Map>().where((item) {
+      if (wanted.isEmpty) return true;
+      final ref = '${item['ref'] ?? ''}'.toLowerCase();
+      final name = '${item['name'] ?? ''}'.toLowerCase();
+      return ref == wanted ||
+          name == wanted ||
+          ref.contains(wanted) ||
+          name.contains(wanted);
+    }).toList();
+    if (projects.isEmpty) {
+      return 'No Supabase project matched "${rawTarget.trim()}".';
+    }
+    final lines = projects.take(12).map((item) {
+      final database = item['database'];
+      final host = database is Map ? '${database['host'] ?? ''}'.trim() : '';
+      return '- ${item['name'] ?? 'project'} (ref ${item['ref'] ?? '?'}) '
+          '· ${item['region'] ?? ''} · ${item['status'] ?? ''}'
+          '${host.isEmpty ? '' : ' · $host'}';
+    }).join('\n');
+    return 'Supabase projects:\n$lines';
+  }
+
+  Future<(dynamic, String)> _expoGraphql(
+    IntegrationAccount account,
+    Map<String, dynamic> payload,
+  ) async {
+    final response = await httpClient
+        .post(
+          Uri.parse('https://api.expo.dev/graphql'),
+          headers: {
+            'Authorization': 'Bearer ${account.token}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      return (
+        null,
+        'Expo rejected the saved access token. Ask the user to reconnect it '
+            'in Integrations.'
+      );
+    }
+    if (response.statusCode != 200) {
+      return (null, 'Expo returned ${response.statusCode}.');
+    }
+    final decoded = jsonDecode(response.body);
+    final errors = decoded is Map ? decoded['errors'] : null;
+    if (errors is List && errors.isNotEmpty) {
+      final message = errors
+          .whereType<Map>()
+          .map((item) => '${item['message'] ?? ''}'.trim())
+          .where((item) => item.isNotEmpty)
+          .join('; ');
+      return (
+        null,
+        'Expo returned an error: '
+            '${message.isEmpty ? 'unknown GraphQL error' : message}.'
+      );
+    }
+    return (decoded, '');
+  }
+
+  Future<String> _expoBuildsStatus(Project project, String rawAppId) async {
+    final account = integrations.activeFor(IntegrationKind.expo);
+    if (account == null) {
+      return 'Expo is not connected. Ask the user to connect it in '
+          'Integrations.';
+    }
+    final appId = rawAppId.trim().isNotEmpty
+        ? rawAppId.trim()
+        : await _easProjectId(project);
+    if (appId.isEmpty) {
+      return 'No EAS project id is configured. Add extra.eas.projectId to '
+          'app.json or pass the project id as target.';
+    }
+    const query = r'''query Builds($appId: String!, $limit: Int!) {
+  app {
+    byId(appId: $appId) {
+      id
+      name
+      slug
+      builds(limit: $limit, offset: 0) {
+        id
+        platform
+        status
+        createdAt
+        error { message }
+        artifacts { buildUrl }
+      }
+    }
+  }
+}''';
+    final result = await _expoGraphql(account, {
+      'query': query,
+      'variables': {'appId': appId, 'limit': 8},
+    });
+    final decoded = result.$1;
+    if (decoded == null) return result.$2;
+    final data = decoded is Map ? decoded['data'] : null;
+    final appQuery = data is Map ? data['app'] : null;
+    final app = appQuery is Map ? appQuery['byId'] : null;
+    if (app is! Map) return 'No Expo app matched project id $appId.';
+    final builds = app['builds'];
+    if (builds is! List || builds.isEmpty) {
+      return 'No EAS builds found for ${app['slug'] ?? appId} yet.';
+    }
+    final lines = builds.whereType<Map>().take(8).map((build) {
+      final error = build['error'];
+      final errorMessage =
+          error is Map ? '${error['message'] ?? ''}'.trim() : '';
+      final artifacts = build['artifacts'];
+      final buildUrl =
+          artifacts is Map ? '${artifacts['buildUrl'] ?? ''}'.trim() : '';
+      return '- ${build['id']} · ${build['platform'] ?? ''} '
+          '· ${build['status'] ?? ''} · ${build['createdAt'] ?? ''}'
+          '${buildUrl.isEmpty ? '' : ' · $buildUrl'}'
+          '${errorMessage.isEmpty ? '' : ' · failed: $errorMessage'}';
+    }).join('\n');
+    return 'EAS builds for ${app['name'] ?? appId} '
+        '(${app['slug'] ?? appId}):\n$lines';
+  }
+
+  Future<String> _expoProjectsStatus() async {
+    final account = integrations.activeFor(IntegrationKind.expo);
+    if (account == null) {
+      return 'Expo is not connected. Ask the user to connect it in '
+          'Integrations.';
+    }
+    const query = r'''query {
+  meActor {
+    __typename
+    ... on UserActor { username }
+    ... on Robot { firstName }
+    ... on PartnerActor { username }
+    accounts {
+      id
+      name
+      apps {
+        id
+        name
+        slug
+      }
+    }
+  }
+}''';
+    final result = await _expoGraphql(account, {'query': query});
+    final decoded = result.$1;
+    if (decoded == null) return result.$2;
+    final data = decoded is Map ? decoded['data'] : null;
+    final actor = data is Map ? data['meActor'] : null;
+    final accounts = actor is Map ? actor['accounts'] : null;
+    if (accounts is! List || accounts.isEmpty) {
+      return 'No Expo accounts were found for this token.';
+    }
+    final lines = <String>[];
+    for (final item in accounts.whereType<Map>()) {
+      final name = '${item['name'] ?? 'account'}'.trim();
+      final apps = item['apps'];
+      if (apps is! List || apps.isEmpty) {
+        lines.add('- $name: no apps');
+        continue;
+      }
+      for (final app in apps.whereType<Map>()) {
+        lines.add('- $name: ${app['name'] ?? 'app'} '
+            '(slug ${app['slug'] ?? '?'}, id ${app['id'] ?? '?'})');
+      }
+    }
+    if (lines.isEmpty) return 'No Expo apps were found for this token.';
+    return 'Expo accounts and projects:\n${lines.join('\n')}';
+  }
+
+  /// Reads the EAS project id from the project's Expo config so the agent can
+  /// query builds without the user pasting it.
+  Future<String> _easProjectId(Project project) async {
+    for (final name in const ['app.json', 'app.config.json']) {
+      try {
+        final raw = await fsFor(project).read(name);
+        final decoded = jsonDecode(raw);
+        if (decoded is! Map) continue;
+        final extra = decoded['extra'];
+        final eas = extra is Map ? extra['eas'] : null;
+        final id = eas is Map ? eas['projectId'] : null;
+        if (id is String && id.trim().isNotEmpty) return id.trim();
+      } catch (_) {
+        // A missing or non-JSON config is normal for non-Expo projects.
+      }
+    }
+    return '';
   }
 
   /// Resolves a GitHub Actions target into an owner/repo and an optional run

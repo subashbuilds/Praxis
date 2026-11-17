@@ -131,6 +131,101 @@ void main() {
     );
   });
 
+  test('resume keeps the earlier conversation instead of restarting', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_resume_keep_');
+    addTearDown(() => temp.delete(recursive: true));
+    final store = MemoryStore();
+    final checkpoints = MemoryTaskCheckpointStore();
+
+    final setup = AppState(
+      root: temp,
+      store: store,
+      checkpointStore: checkpoints,
+      seedWelcome: false,
+    );
+    await setup.init();
+    final project = await setup.createProject('resume-keep', ProjectKind.blank);
+    setup.dispose();
+
+    await checkpoints.save(TaskCheckpoint(
+      taskId: 'resume-keep-task',
+      projectId: project.id,
+      providerId: 'test',
+      providerName: 'Test',
+      model: 'test-model',
+      originalPrompt: 'Implement the saved feature.',
+      createdAt: DateTime.now().subtract(const Duration(minutes: 3)),
+      updatedAt: DateTime.now(),
+      status: TaskCheckpointStatus.resumable,
+      completed: const ['created lib/main.dart'],
+      pendingStep:
+          'Continue the original request from the last completed step.',
+      changedFiles: const {'lib/main.dart': 'digest'},
+    ));
+
+    final requests = <Map<String, dynamic>>[];
+    final client = MockClient((request) async {
+      requests.add((jsonDecode(request.body) as Map).cast<String, dynamic>());
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'Finished the remaining step.',
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    final state = AppState(
+      root: temp,
+      store: store,
+      checkpointStore: checkpoints,
+      seedWelcome: false,
+      httpClient: client,
+    );
+    addTearDown(state.dispose);
+    await state.init();
+    await state.saveProvider(const ProviderConfig(
+      id: 'test',
+      name: 'Test',
+      icon: 'x',
+      baseUrl: 'https://example.test/v1',
+      model: 'test-model',
+      flavor: ApiFlavor.openai,
+      keys: ['key'],
+    ));
+
+    final thread = state.threadOf(project.id);
+    thread.add(ChatEntry(
+      id: 'earlier-user',
+      role: ChatRole.user,
+      text: 'Implement the saved feature.',
+      at: DateTime.now().subtract(const Duration(minutes: 2)),
+    ));
+    thread.add(ChatEntry(
+      id: 'earlier-assistant',
+      role: ChatRole.assistant,
+      text: 'Created lib/main.dart with the first step.',
+      at: DateTime.now().subtract(const Duration(minutes: 1)),
+    ));
+
+    await state.send(project.id, 'continue');
+
+    final contents = (requests.first['messages'] as List)
+        .whereType<Map>()
+        .map((message) => '${message['content']}')
+        .toList();
+    expect(contents, contains('Created lib/main.dart with the first step.'));
+    expect(contents.any((message) => message.contains('RESUME TASK')), isTrue);
+    expect(contents, isNot(contains('continue')));
+  });
+
   test('a deploy job and its progress remain after the caller detaches',
       () async {
     final temp = await Directory.systemTemp.createTemp('praxis_deploy_job_');

@@ -173,6 +173,7 @@ class ProviderConfig {
     this.isCustom = false,
     this.hint = '',
     this.dailyLimit = 0,
+    this.toolCallLimit = 0,
   });
 
   final String id;
@@ -199,6 +200,11 @@ class ProviderConfig {
   /// limits are never guessed or hardcoded.
   final int dailyLimit;
 
+  /// Maximum tool calls allowed in one run. Zero means no cap and disables the
+  /// repeated-call guards, so providers the user did not limit keep working
+  /// without being stopped mid-task.
+  final int toolCallLimit;
+
   String get apiKey {
     if (keys.isEmpty) return '';
     final index = keyIndex.clamp(0, keys.length - 1);
@@ -223,6 +229,7 @@ class ProviderConfig {
     List<String>? selectedModels,
     bool? requiresKey,
     int? dailyLimit,
+    int? toolCallLimit,
   }) =>
       ProviderConfig(
         id: id,
@@ -239,6 +246,7 @@ class ProviderConfig {
         isCustom: isCustom,
         hint: hint,
         dailyLimit: dailyLimit ?? this.dailyLimit,
+        toolCallLimit: toolCallLimit ?? this.toolCallLimit,
       );
 
   Map<String, dynamic> toJson() => {
@@ -256,6 +264,7 @@ class ProviderConfig {
         'isCustom': isCustom,
         'hint': hint,
         'dailyLimit': dailyLimit,
+        'toolCallLimit': toolCallLimit,
       };
 
   static List<String> _strings(Object? raw) =>
@@ -289,6 +298,7 @@ class ProviderConfig {
       isCustom: json['isCustom'] as bool? ?? false,
       hint: json['hint'] as String? ?? '',
       dailyLimit: (json['dailyLimit'] as int? ?? 0).clamp(0, 100000),
+      toolCallLimit: (json['toolCallLimit'] as int? ?? 0).clamp(0, 1000),
     );
   }
 }

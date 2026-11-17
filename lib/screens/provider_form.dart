@@ -20,6 +20,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
   late final TextEditingController _model;
   late final TextEditingController _baseUrl;
   late final TextEditingController _dailyLimit;
+  late final TextEditingController _toolCallLimit;
   late final TextEditingController _search;
   late final List<TextEditingController> _keys;
   late final List<bool> _reveal;
@@ -43,6 +44,11 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
       text:
           widget.provider.dailyLimit > 0 ? '${widget.provider.dailyLimit}' : '',
     );
+    _toolCallLimit = TextEditingController(
+      text: widget.provider.toolCallLimit > 0
+          ? '${widget.provider.toolCallLimit}'
+          : '',
+    );
     _search = TextEditingController();
     final stored =
         widget.provider.keys.where((key) => key.trim().isNotEmpty).toList();
@@ -63,6 +69,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
     _model.dispose();
     _baseUrl.dispose();
     _dailyLimit.dispose();
+    _toolCallLimit.dispose();
     _search.dispose();
     for (final controller in _keys) {
       controller.dispose();
@@ -89,6 +96,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
         models: _models,
         selectedModels: _selected.toList()..sort(),
         dailyLimit: int.tryParse(_dailyLimit.text.trim()) ?? 0,
+        toolCallLimit: int.tryParse(_toolCallLimit.text.trim()) ?? 0,
       );
 
   void _addKey() {
@@ -239,6 +247,7 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
       models: _models,
       selectedModels: _selected.toList()..sort(),
       dailyLimit: int.tryParse(_dailyLimit.text.trim()) ?? 0,
+      toolCallLimit: int.tryParse(_toolCallLimit.text.trim()) ?? 0,
     );
     await state.saveProvider(provider);
     if (activate) await state.setActiveProvider(provider.id);
@@ -429,6 +438,24 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
             Text(
               'Requests are counted on this device and reset at local '
               'midnight. Leave blank if your provider has no daily request cap.',
+              style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _toolCallLimit,
+              style: Txt.code.copyWith(fontSize: 12),
+              cursorColor: Pal.ember,
+              keyboardType: TextInputType.number,
+              decoration: appField(
+                'No limit',
+                label: 'Tool call limit (per run)',
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              'A run pauses after this many tool calls so you can continue. '
+              'Repeated identical calls are also stopped only when this limit '
+              'is set. Leave blank to let the agent work without interruption.',
               style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
             ),
             if (_selected.isNotEmpty) ...[

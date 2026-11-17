@@ -271,6 +271,90 @@ void main() {
     expect(events.last.text, 'Recovered.');
   });
 
+  test('repeated calls are only stopped when the provider sets a tool limit',
+      () async {
+    Future<List<AgentEvent>> run({required int toolCallLimit}) async {
+      var calls = 0;
+      final client = MockClient((request) async {
+        calls++;
+        if (calls <= 3) {
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [
+                      {
+                        'id': 'call_$calls',
+                        'type': 'function',
+                        'function': {
+                          'name': 'read_file',
+                          'arguments': jsonEncode({'path': 'note.txt'}),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': 'Finished reading.',
+                },
+              },
+            ],
+          }),
+          200,
+        );
+      });
+      final temp = await Directory.systemTemp.createTemp('devnest_repeat_');
+      addTearDown(() => temp.delete(recursive: true));
+      final fs = ProjectFs(temp);
+      await fs.write('note.txt', 'hello');
+      final events = <AgentEvent>[];
+      await Agent(
+        client: AiClient(client: client),
+        provider: ProviderConfig(
+          id: 'custom',
+          name: 'Custom',
+          icon: 'x',
+          baseUrl: 'https://example.test/v1',
+          model: 'm',
+          flavor: ApiFlavor.openai,
+          keys: const ['key'],
+          toolCallLimit: toolCallLimit,
+        ),
+        fs: fs,
+        shell: Shell(fs),
+        skills: const [],
+        onEvent: events.add,
+      ).run(history: const [], prompt: 'look at note.txt');
+      return events;
+    }
+
+    final unlimited = await run(toolCallLimit: 0);
+    expect(unlimited.last.text, 'Finished reading.');
+    expect(
+      unlimited.any((event) => event.text.contains('repeated the same')),
+      isFalse,
+    );
+
+    final limited = await run(toolCallLimit: 3);
+    expect(
+      limited.any((event) => event.text.contains('repeated the same')),
+      isTrue,
+    );
+  });
+
   test('the device shell runs real commands in the project folder', () async {
     if (Platform.isAndroid) return;
     final temp = await Directory.systemTemp.createTemp('devnest_sh_');
