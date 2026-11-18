@@ -58,7 +58,7 @@ jobs:
           cache: true
 
       - name: Cache pub packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock') }}
@@ -100,8 +100,26 @@ jobs:
           test -n "$SDK_PATH"
           echo "ANDROID_SDK_PATH=$SDK_PATH" >> "$GITHUB_ENV"
 
+      # The runner image creates these SDK folders as root, but actions/cache
+      # extracts the archive as the runner user. Extracting over a root-owned
+      # folder cannot set its timestamps or modes, so tar exits with "Cannot
+      # utime: Operation not permitted" and the whole restore is discarded.
+      # Hand the cached folders to the runner before restoring.
+      - name: Take ownership of cached SDK folders
+        run: |
+          set -euo pipefail
+          for folder in \
+            "${ANDROID_SDK_PATH}/platforms/${ANDROID_PLATFORM}" \
+            "${ANDROID_SDK_PATH}/build-tools/${ANDROID_BUILD_TOOLS}" \
+            "${ANDROID_SDK_PATH}/ndk/27.0.12077973"; do
+            [ -d "$folder" ] || continue
+            if [ "$(stat -c %u "$folder")" != "$(id -u)" ]; then
+              sudo chown -R "$(id -u):$(id -g)" "$folder"
+            fi
+          done
+
       - name: Cache Android SDK packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ env.ANDROID_SDK_PATH }}/platforms/${{ env.ANDROID_PLATFORM }}
