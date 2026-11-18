@@ -1027,8 +1027,8 @@ class Agent {
             detail: _detail(call),
             text: result.text,
             patch: result.diff?.toJson() ?? '',
-            added: result.diff?.added ?? 0,
-            removed: result.diff?.removed ?? 0,
+            added: result.addedLines,
+            removed: result.removedLines,
           ));
           turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
@@ -1871,8 +1871,10 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       return const _ToolOutcome(
           'Error: at most 8 files can be written at once.');
     }
-    final written = <String>[];
+    final lines = <String>[];
     var total = 0;
+    var added = 0;
+    var removed = 0;
     for (final item in raw) {
       if (item is! Map) {
         return const _ToolOutcome('Error: every file must be an object.');
@@ -1882,14 +1884,25 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       if (path.isEmpty) {
         return const _ToolOutcome('Error: every file needs a path.');
       }
+      var before = '';
+      try {
+        before = await fs.exists(path) ? await fs.read(path) : '';
+      } on FsError {
+        before = '';
+      }
       final bytes = await fs.write(path, content);
+      final diff = computeDiff(before, content);
       total += bytes;
-      written.add(path);
+      added += diff.added;
+      removed += diff.removed;
+      lines.add('- $path (+${diff.added} -${diff.removed})');
     }
     return _ToolOutcome(
-      'Wrote $total bytes to ${written.length} files in one call:\n'
-      '${written.map((path) => '- $path').join('\n')}'
+      'Wrote $total bytes to ${lines.length} files in one call '
+      '(+$added -$removed):\n${lines.join('\n')}'
       '${await _verificationSuffix()}',
+      added: added,
+      removed: removed,
     );
   }
 
@@ -2338,9 +2351,17 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
 }
 
 class _ToolOutcome {
-  const _ToolOutcome(this.text, {this.diff});
+  const _ToolOutcome(this.text, {this.diff, this.added = 0, this.removed = 0});
   final String text;
   final FileDiff? diff;
+
+  /// Change totals for tools that write several files and so have no single
+  /// file diff to count them from.
+  final int added;
+  final int removed;
+
+  int get addedLines => diff?.added ?? added;
+  int get removedLines => diff?.removed ?? removed;
 
   /// Used only to classify the next round as a retry. The text is never parsed
   /// for logging; it is already the agent's sanitized tool result.

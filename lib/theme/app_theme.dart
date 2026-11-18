@@ -133,11 +133,13 @@ ThemeData buildAppTheme({required bool dark}) {
       linearTrackColor: Pal.overlay,
       circularTrackColor: Pal.overlay,
     ),
-    // Every screen opens with the same quiet fade and lift, so a tap never
-    // swaps the page in without a transition.
+    // Android keeps its platform transition so the Android 14 predictive back
+    // gesture still previews the outgoing screen. Every other platform opens
+    // with the same quiet fade and lift, so a tap never swaps the page in
+    // without a transition.
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
-        TargetPlatform.android: _PraxisPageTransitionsBuilder(),
+        TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
         TargetPlatform.iOS: _PraxisPageTransitionsBuilder(),
         TargetPlatform.macOS: _PraxisPageTransitionsBuilder(),
         TargetPlatform.windows: _PraxisPageTransitionsBuilder(),

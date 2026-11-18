@@ -7,6 +7,7 @@ import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/confirm_dialog.dart';
+import '../widgets/press_pulse.dart';
 import '../widgets/project_kind_mark.dart';
 import '../widgets/ui.dart';
 import 'settings.dart';
@@ -269,10 +270,9 @@ class _ProjectCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final kind = project.kind;
-    return GestureDetector(
+    return PressPulse(
       onTap: onTap,
       onLongPress: onMenu,
-      behavior: HitTestBehavior.opaque,
       child: Container(
         padding: const EdgeInsets.all(Sp.x3 + 2),
         decoration: BoxDecoration(

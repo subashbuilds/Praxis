@@ -17,6 +17,7 @@ import '../theme/tokens.dart';
 import '../widgets/project_actions.dart';
 import '../widgets/confirm_dialog.dart';
 import '../widgets/file_glyph.dart';
+import '../widgets/press_pulse.dart';
 import '../widgets/ui.dart';
 
 class FilesTab extends StatefulWidget {
@@ -874,7 +875,7 @@ class _FilesTabState extends State<FilesTab> {
                             .where((path) => path.startsWith('${entry.path}/'))
                             .length
                         : 0;
-                    return InkWell(
+                    return PressPulse(
                       onTap: () => _open(entry),
                       onLongPress: () => _showActions(entry),
                       child: Padding(
