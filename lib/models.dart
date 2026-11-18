@@ -115,6 +115,7 @@ class Project {
     required this.createdAt,
     this.repo = '',
     this.branch = 'main',
+    this.pinned = false,
   });
 
   final String id;
@@ -126,13 +127,23 @@ class Project {
   final String repo;
   final String branch;
 
-  Project copyWith({String? repo, String? branch}) => Project(
+  /// A pinned project stays above the others however recently they changed.
+  final bool pinned;
+
+  Project copyWith({
+    String? name,
+    String? repo,
+    String? branch,
+    bool? pinned,
+  }) =>
+      Project(
         id: id,
-        name: name,
+        name: name ?? this.name,
         kind: kind,
         createdAt: createdAt,
         repo: repo ?? this.repo,
         branch: branch ?? this.branch,
+        pinned: pinned ?? this.pinned,
       );
 
   Map<String, dynamic> toJson() => {
@@ -142,6 +153,7 @@ class Project {
         'createdAt': createdAt.toIso8601String(),
         'repo': repo,
         'branch': branch,
+        'pinned': pinned,
       };
 
   static Project fromJson(Map<String, dynamic> json) => Project(
@@ -152,6 +164,7 @@ class Project {
             DateTime.now(),
         repo: json['repo'] as String? ?? '',
         branch: json['branch'] as String? ?? 'main',
+        pinned: json['pinned'] as bool? ?? false,
       );
 }
 

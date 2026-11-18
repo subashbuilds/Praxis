@@ -2,6 +2,31 @@ import 'package:flutter/material.dart';
 
 import 'tokens.dart';
 
+/// A quiet page transition: the new screen fades in while lifting a few
+/// pixels, so opening a screen reads as motion without drawing attention.
+class _PraxisPageTransitionsBuilder extends PageTransitionsBuilder {
+  const _PraxisPageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final curved = animation.drive(CurveTween(curve: Curves.easeOutCubic));
+    return FadeTransition(
+      opacity: curved.drive(Tween<double>(begin: 0, end: 1)),
+      child: SlideTransition(
+        position: curved.drive(
+            Tween<Offset>(begin: const Offset(0, 0.024), end: Offset.zero)),
+        child: child,
+      ),
+    );
+  }
+}
+
 ThemeData buildAppTheme({required bool dark}) {
   Pal.use(dark ? Brightness.dark : Brightness.light);
   final brightness = dark ? Brightness.dark : Brightness.light;
@@ -108,16 +133,16 @@ ThemeData buildAppTheme({required bool dark}) {
       linearTrackColor: Pal.overlay,
       circularTrackColor: Pal.overlay,
     ),
-    // Android 14 predictive back: the outgoing screen follows the gesture
-    // instead of jumping once the pop completes.
+    // Every screen opens with the same quiet fade and lift, so a tap never
+    // swaps the page in without a transition.
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
-        TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
-        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
-        TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
-        TargetPlatform.windows: ZoomPageTransitionsBuilder(),
-        TargetPlatform.linux: ZoomPageTransitionsBuilder(),
-        TargetPlatform.fuchsia: ZoomPageTransitionsBuilder(),
+        TargetPlatform.android: _PraxisPageTransitionsBuilder(),
+        TargetPlatform.iOS: _PraxisPageTransitionsBuilder(),
+        TargetPlatform.macOS: _PraxisPageTransitionsBuilder(),
+        TargetPlatform.windows: _PraxisPageTransitionsBuilder(),
+        TargetPlatform.linux: _PraxisPageTransitionsBuilder(),
+        TargetPlatform.fuchsia: _PraxisPageTransitionsBuilder(),
       },
     ),
     scrollbarTheme: ScrollbarThemeData(

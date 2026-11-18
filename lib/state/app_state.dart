@@ -438,11 +438,13 @@ class AppState extends ChangeNotifier {
         orElse: () => projects.first,
       );
 
-  /// New projects start at the top, and a project moves to the top as soon as
-  /// its conversation has newer activity than its creation time.
+  /// Pinned projects stay first, then new projects start at the top and a
+  /// project moves up as soon as its conversation has newer activity than its
+  /// creation time.
   List<Project> get projectsByActivity {
     final sorted = [...projects];
     sorted.sort((a, b) {
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
       final difference = lastActivityFor(b).compareTo(lastActivityFor(a));
       if (difference != 0) return difference;
       return b.createdAt.compareTo(a.createdAt);
@@ -632,6 +634,33 @@ class AppState extends ChangeNotifier {
     await store.remove('$_kChatPrefix${project.id}');
     await _persistDrafts();
     notifyListeners();
+  }
+
+  Future<Project> renameProject(Project project, String name) async {
+    final trimmed = name.trim();
+    final next =
+        project.copyWith(name: trimmed.isEmpty ? project.name : trimmed);
+    if (next.name == project.name) return project;
+    _replaceProject(next);
+    await _writeProjectMeta(
+        Directory('${root.path}/projects/${project.id}'), next);
+    notifyListeners();
+    return next;
+  }
+
+  Future<Project> setProjectPinned(Project project, bool pinned) async {
+    final next = project.copyWith(pinned: pinned);
+    if (next.pinned == project.pinned) return project;
+    _replaceProject(next);
+    await _writeProjectMeta(
+        Directory('${root.path}/projects/${project.id}'), next);
+    notifyListeners();
+    return next;
+  }
+
+  void _replaceProject(Project project) {
+    final index = projects.indexWhere((item) => item.id == project.id);
+    if (index >= 0) projects[index] = project;
   }
 
   /// Updates the branch/repo recorded in project metadata.
@@ -1122,19 +1151,8 @@ class AppState extends ChangeNotifier {
     final thread = threadOf(projectId);
     final started = DateTime.now();
     _activeProjectId = projectId;
-    final quota = _quota.status(provider);
-    if (quota.exhausted) {
-      thread.add(_entry(
-        role: ChatRole.error,
-        text: 'Daily request limit reached for ${provider.name}: '
-            '${quota.used}/${quota.limit}. Raise the limit in the provider '
-            'settings, choose another provider, or resume tomorrow.',
-        ok: false,
-      ));
-      notifyListeners();
-      await _persistChat(projectId);
-      return;
-    }
+    // The daily request limit is informational only: it is counted and shown,
+    // never used to refuse a prompt or pause a run.
 
     final stored = attachments.isEmpty
         ? const <String>[]

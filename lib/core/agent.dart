@@ -1216,12 +1216,17 @@ class Agent {
     final projectEnv = await ProjectEnvStore.load(fs);
     final todoContext = _todoContext();
     final installed = await _installedSkills();
-    final activeSkills = [
-      ...skills.where(
-          (skill) => skill.enabled && skill.instructions.trim().isNotEmpty),
+    // A disabled skill is not offered by relevance, but `/name` still applies
+    // it for this prompt only.
+    final availableSkills = [
+      ...skills.where((skill) => skill.instructions.trim().isNotEmpty),
       ...installed,
     ];
-    final explicit = _explicitSkills(prompt, activeSkills);
+    final explicit = _explicitSkills(prompt, availableSkills);
+    final activeSkills = [
+      for (final skill in availableSkills)
+        if (skill.enabled || explicit.contains(skill.id)) skill,
+    ];
     final loaded = <Skill>[];
     for (final skill in activeSkills) {
       final relevant =

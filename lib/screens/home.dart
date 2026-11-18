@@ -92,8 +92,7 @@ class HomeScreen extends StatelessWidget {
                               builder: (_) => WorkspaceScreen(project: project),
                             ),
                           ),
-                          onDelete: () =>
-                              _confirmDelete(context, state, project),
+                          onMenu: () => _projectMenu(context, state, project),
                         ),
                       ),
                   const SizedBox(height: Sp.x5),
@@ -129,6 +128,64 @@ class HomeScreen extends StatelessWidget {
         MaterialPageRoute(builder: (_) => WorkspaceScreen(project: created)),
       );
     }
+  }
+
+  Future<void> _projectMenu(
+      BuildContext context, AppState state, Project project) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      useSafeArea: true,
+      backgroundColor: Pal.surface,
+      builder: (_) => _ProjectMenuSheet(project: project),
+    );
+    if (action == null || !context.mounted) return;
+    switch (action) {
+      case 'rename':
+        await _renameProject(context, state, project);
+      case 'pin':
+        await state.setProjectPinned(project, !project.pinned);
+      case 'delete':
+        await _confirmDelete(context, state, project);
+    }
+  }
+
+  Future<void> _renameProject(
+      BuildContext context, AppState state, Project project) async {
+    final controller = TextEditingController(text: project.name)
+      ..selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: project.name.length,
+      );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: Pal.surface,
+        title: const Text('Rename project'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: Txt.body,
+          cursorColor: Pal.ember,
+          textInputAction: TextInputAction.done,
+          decoration: appField('project name', label: 'Project name'),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !context.mounted) return;
+    await state.renameProject(project, name);
   }
 
   Future<void> _confirmDelete(
@@ -201,20 +258,20 @@ class _ProjectCard extends StatelessWidget {
     required this.project,
     required this.lastActivity,
     required this.onTap,
-    required this.onDelete,
+    required this.onMenu,
   });
 
   final Project project;
   final DateTime lastActivity;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
+  final VoidCallback onMenu;
 
   @override
   Widget build(BuildContext context) {
     final kind = project.kind;
     return GestureDetector(
       onTap: onTap,
-      onLongPress: onDelete,
+      onLongPress: onMenu,
       behavior: HitTestBehavior.opaque,
       child: Container(
         padding: const EdgeInsets.all(Sp.x3 + 2),
@@ -247,13 +304,137 @@ class _ProjectCard extends StatelessWidget {
                 ],
               ),
             ),
+            if (project.pinned)
+              Icon(Icons.push_pin_rounded, size: 14, color: Pal.ember),
             IconAction(
               icon: Icons.more_horiz_rounded,
               tooltip: 'Project options',
               size: 18,
-              onTap: onDelete,
+              onTap: onMenu,
             ),
             Icon(Icons.chevron_right_rounded, size: 18, color: Pal.textDim),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProjectMenuSheet extends StatelessWidget {
+  const _ProjectMenuSheet({required this.project});
+
+  final Project project;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SheetHandle(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x2),
+            child: Row(
+              children: [
+                ProjectKindBadge(kind: project.kind),
+                const SizedBox(width: Sp.x3),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        project.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Txt.title,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        '${project.kind.label} · created '
+                        '${relativeTime(project.createdAt)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Txt.meta,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Hairline(),
+          _ProjectMenuTile(
+            icon: Icons.drive_file_rename_outline_rounded,
+            label: 'Rename',
+            detail: 'Only the display name changes',
+            onTap: () => Navigator.of(context).pop('rename'),
+          ),
+          _ProjectMenuTile(
+            icon: project.pinned
+                ? Icons.push_pin_outlined
+                : Icons.push_pin_rounded,
+            label: project.pinned ? 'Unpin project' : 'Pin to top',
+            detail: project.pinned
+                ? 'Sits back in the activity order'
+                : 'Stays above newer projects in this list',
+            onTap: () => Navigator.of(context).pop('pin'),
+          ),
+          _ProjectMenuTile(
+            icon: Icons.delete_outline_rounded,
+            label: 'Delete project',
+            detail: 'Removes the project and every file inside it',
+            color: Pal.rose,
+            onTap: () => Navigator.of(context).pop('delete'),
+          ),
+          const SizedBox(height: 10),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProjectMenuTile extends StatelessWidget {
+  const _ProjectMenuTile({
+    required this.icon,
+    required this.label,
+    required this.detail,
+    required this.onTap,
+    this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final String detail;
+  final VoidCallback onTap;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Sp.page, vertical: 11),
+        child: Row(
+          children: [
+            Icon(icon, size: 19, color: color ?? Pal.textMuted),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: Txt.label.copyWith(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: color ?? Pal.text,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(detail, style: Txt.meta.copyWith(fontSize: 9.5)),
+                ],
+              ),
+            ),
           ],
         ),
       ),

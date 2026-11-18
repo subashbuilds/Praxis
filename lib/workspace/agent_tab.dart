@@ -11,6 +11,7 @@ import '../core/task_checkpoint.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
+import '../widgets/chat_markdown.dart';
 import '../widgets/ui.dart';
 
 /// Styles slash skills and @file tags inside the composer itself, so a command
@@ -798,7 +799,7 @@ class _MessageText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(text, style: Txt.body.copyWith(height: 1.58));
+    return ChatMarkdown(text, style: Txt.body.copyWith(height: 1.58));
   }
 }
 
@@ -1711,10 +1712,18 @@ class _ComposerState extends State<_Composer> {
       ));
     }
 
-    for (final skill in state.skills.where((skill) => skill.enabled)) {
+    // Disabled skills are listed too: typing their command applies them for
+    // that one prompt without turning the skill back on everywhere.
+    for (final skill in state.skills) {
       final command =
           skill.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-');
-      if (command.isNotEmpty) add(skill.name, command, 'Enabled skill');
+      if (command.isNotEmpty) {
+        add(
+          skill.name,
+          command,
+          skill.enabled ? 'Enabled skill' : 'Disabled skill',
+        );
+      }
     }
     for (final skill in projectSkills) {
       add(skill.name, skill.slug, 'Project skill');
@@ -2214,7 +2223,7 @@ class _QuotaWarning extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = exhausted ? Pal.rose : Pal.amber;
+    final color = Pal.amber;
     return Container(
       margin: const EdgeInsets.fromLTRB(Sp.x3, 0, Sp.x3, 4),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -2225,17 +2234,13 @@ class _QuotaWarning extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(
-            exhausted ? Icons.block_rounded : Icons.speed_rounded,
-            size: 14,
-            color: color,
-          ),
+          Icon(Icons.speed_rounded, size: 14, color: color),
           const SizedBox(width: 7),
           Expanded(
             child: Text(
               exhausted
-                  ? '$used/$limit requests used today. This provider has no requests left for today.'
-                  : '$used/$limit requests used today. This task may use the rest of today\'s allowance.',
+                  ? '$used/$limit requests used today. This is a local count only; sending still works.'
+                  : '$used/$limit requests used today.',
               style: Txt.meta.copyWith(fontSize: 9.5, color: color),
             ),
           ),

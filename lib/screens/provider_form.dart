@@ -428,7 +428,9 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
             const SizedBox(height: 5),
             Text(
               'Requests are counted on this device and reset at local '
-              'midnight. Leave blank if your provider has no daily request cap.',
+              'midnight. The count is informational: it never blocks a prompt '
+              'or pauses a run. Leave blank if your provider has no daily '
+              'request cap.',
               style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
             ),
             const SizedBox(height: 10),
