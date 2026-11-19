@@ -294,6 +294,7 @@ class _PushSheetState extends State<PushSheet> {
         _push.synced;
     if (alreadyCompared && !force) {
       await _refreshChanges();
+      await _refreshDrift();
       if (!mounted) return;
       if (_compareNote == null) {
         setState(() => _compareNote = _changes.isEmpty
