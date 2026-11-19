@@ -228,7 +228,7 @@ jobs:
           done
 
       - name: Upload signed APKs
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: Praxis-${{ steps.version.outputs.version }}-apks
           path: |
