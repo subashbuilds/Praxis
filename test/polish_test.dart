@@ -418,6 +418,59 @@ void main() {
     );
   });
 
+  test('an explanation question is not pushed into editing files', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_explain_');
+    addTearDown(() => temp.delete(recursive: true));
+    final fs = ProjectFs(temp);
+    await fs.write('README.md', '# Project');
+
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'Let me walk through it. The update flow reads '
+                    'README.md, sends it to GitHub, then writes the returned '
+                    'version back.',
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    var discarded = 0;
+    final events = <AgentEvent>[];
+    await Agent(
+      client: AiClient(client: client),
+      provider: const ProviderConfig(
+        id: 'test',
+        name: 'Test',
+        icon: 'x',
+        baseUrl: 'https://example.test/v1',
+        model: 'model',
+        flavor: ApiFlavor.openai,
+        keys: ['key'],
+      ),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+      onDiscardLive: () => discarded++,
+    ).run(history: const [], prompt: 'explain how the update flow works');
+
+    expect(calls, 1);
+    expect(discarded, 0);
+    expect(await fs.read('README.md'), '# Project');
+    expect(events.last.text, contains('Let me walk through it'));
+  });
+
   test('a missing branch in a non-empty repository is not seeded', () async {
     final requests = <String>[];
     final client = MockClient((request) async {

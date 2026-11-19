@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -554,6 +555,20 @@ class _FilesTabState extends State<FilesTab> {
               ),
             ],
             ListTile(
+              leading: Icon(Icons.file_download_outlined, color: Pal.sky),
+              title: Text(
+                entry.isDir ? 'Export folder as zip' : 'Export file',
+                style: Txt.body,
+              ),
+              subtitle: Text(
+                entry.isDir
+                    ? 'Save this folder as a zip on this device.'
+                    : 'Save a copy of this file on this device.',
+                style: Txt.meta,
+              ),
+              onTap: () => Navigator.of(sheetContext).pop(_EntryAction.export),
+            ),
+            ListTile(
               leading: Icon(Icons.drive_file_rename_outline_rounded,
                   color: Pal.textMuted),
               title: Text('Rename', style: Txt.body),
@@ -585,12 +600,49 @@ class _FilesTabState extends State<FilesTab> {
       case _EntryAction.importFolder:
         await _importFolder(destination: entry.path);
         break;
+      case _EntryAction.export:
+        await _export(entry);
+        break;
       case _EntryAction.rename:
         await _rename(entry);
         break;
       case _EntryAction.delete:
         await _delete(entry);
         break;
+    }
+  }
+
+  Future<void> _export(FileEntry entry) async {
+    final state = AppScope.of(context);
+    try {
+      final Uint8List bytes;
+      final String suggested;
+      if (entry.isDir) {
+        bytes = await state.fsFor(widget.project).zipBytes(from: entry.path);
+        suggested =
+            '${entry.name.replaceAll(RegExp(r'[^A-Za-z0-9._ -]'), '-')}.zip';
+      } else {
+        bytes = Uint8List.fromList(
+          await state.readFileBytes(widget.project, entry.path),
+        );
+        suggested = entry.name;
+      }
+      if (!mounted) return;
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: entry.isDir ? 'Export folder' : 'Export file',
+        fileName: suggested,
+        type: entry.isDir ? FileType.custom : FileType.any,
+        allowedExtensions: entry.isDir ? const ['zip'] : null,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      _showMessage(
+        path == null
+            ? 'Export cancelled.'
+            : 'Exported ${humanSize(bytes.length)} to $path',
+      );
+    } catch (error) {
+      if (mounted) _showMessage('Could not export: $error');
     }
   }
 
@@ -1189,7 +1241,7 @@ class _FilesTabState extends State<FilesTab> {
 
 enum _AddAction { create, importFiles, importFolder }
 
-enum _EntryAction { importFiles, importFolder, rename, delete }
+enum _EntryAction { importFiles, importFolder, export, rename, delete }
 
 class _TreeRow {
   const _TreeRow(this.entry, this.depth);
@@ -1272,10 +1324,17 @@ class _ChangeBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final added = change.status == RepoChangeStatus.added;
-    final color = added ? Pal.mint : Pal.amber;
+    final color = switch (change.status) {
+      RepoChangeStatus.added => Pal.mint,
+      RepoChangeStatus.deleted => Pal.rose,
+      RepoChangeStatus.modified => Pal.amber,
+    };
     return Tooltip(
-      message: added ? 'New since last commit' : 'Modified since last commit',
+      message: switch (change.status) {
+        RepoChangeStatus.added => 'New since last commit',
+        RepoChangeStatus.deleted => 'Deleted since last commit',
+        RepoChangeStatus.modified => 'Modified since last commit',
+      },
       child: Container(
         width: 19,
         height: 19,

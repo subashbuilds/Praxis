@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:praxis/core/file_types.dart';
+import 'package:praxis/core/integrations.dart';
 import 'package:praxis/core/push_state.dart';
 import 'package:praxis/core/store.dart';
 import 'package:praxis/models.dart';
@@ -211,5 +213,120 @@ void main() {
     final readme = edited.firstWhere((change) => change.path == 'README.md');
     expect(readme.before, '# Base\n');
     expect(readme.after, '# Local edit\n');
+  });
+
+  test('a file deleted after a sync becomes a deleted change', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_push_delete_');
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject(
+      'delete',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    final fs = state.fsFor(project);
+    await fs.write('README.md', '# Base\n');
+    final hash = gitBlobSha(utf8.encode('# Base\n'));
+    await state.savePushState(
+      project,
+      PushState(
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+        hashes: {'README.md': hash},
+        baseHashes: {'README.md': hash},
+        baseline: {'README.md': '# Base\n'},
+        synced: true,
+      ),
+    );
+
+    await fs.delete('README.md');
+    final changes = await state.changesFor(project);
+    final removed = changes.firstWhere((change) => change.path == 'README.md');
+    expect(removed.status, RepoChangeStatus.deleted);
+    expect(removed.removed, greaterThan(0));
+  });
+
+  test('a locally deleted file changed on GitHub stops the pull', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_pull_conflict_');
+    final remoteBytes = utf8.encode('# Changed on GitHub\n');
+    final archive = Archive()
+      ..addFile(ArchiveFile(
+        'demo-main/README.md',
+        remoteBytes.length,
+        remoteBytes,
+      ));
+    final zip = ZipEncoder().encode(archive)!;
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+      httpClient: MockClient((request) async {
+        if (request.url.host == 'codeload.github.com') {
+          return http.Response.bytes(zip, 200);
+        }
+        fail('unexpected GitHub request: ${request.method} ${request.url}');
+      }),
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject(
+      'conflict',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    final fs = state.fsFor(project);
+    await fs.write('README.md', '# Base\n');
+    final base = gitBlobSha(utf8.encode('# Base\n'));
+    await state.savePushState(
+      project,
+      PushState(
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+        hashes: {'README.md': base},
+        baseHashes: {'README.md': base},
+        baseline: {'README.md': '# Base\n'},
+        synced: true,
+      ),
+    );
+    await fs.delete('README.md');
+    const account = IntegrationAccount(
+      id: 'github-account',
+      kind: IntegrationKind.github,
+      label: '',
+      username: 'acme',
+      token: 'token',
+    );
+
+    await expectLater(
+      state.pullProject(
+        project,
+        account,
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+      ),
+      throwsA(isA<IntegrationException>().having(
+        (error) => error.message,
+        'message',
+        allOf(
+          contains('README.md'),
+          contains('changed locally and on GitHub'),
+        ),
+      )),
+    );
+    expect(await fs.exists('README.md'), isFalse);
   });
 }

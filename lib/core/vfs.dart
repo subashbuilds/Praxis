@@ -177,13 +177,19 @@ class ProjectFs {
 
   /// Everything the user can see, including binary assets, as a ZIP. Hidden
   /// app state (`.praxis`) is intentionally excluded.
-  Future<Uint8List> zipBytes() async {
-    final entries = await list(includeHidden: true);
+  /// Archives the whole project, or only [from] when it names a folder.
+  /// Entries inside that folder are stored relative to it, so extracting the
+  /// zip gives the folder's contents directly.
+  Future<Uint8List> zipBytes({String from = ''}) async {
+    final base = normalize(from);
+    final entries = await list(path: base, includeHidden: true);
     final archive = Archive();
     for (final entry in entries) {
       if (entry.isDir) continue;
       final bytes = await readBytes(entry.path);
-      archive.addFile(ArchiveFile(entry.path, bytes.length, bytes));
+      final name =
+          base.isEmpty ? entry.path : entry.path.substring(base.length + 1);
+      archive.addFile(ArchiveFile(name, bytes.length, bytes));
     }
     final encoded = ZipEncoder().encode(archive);
     if (encoded == null) throw FsError('Could not build the archive');

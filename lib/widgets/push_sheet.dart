@@ -111,6 +111,7 @@ class _PushSheetState extends State<PushSheet> {
       if (!commit.matches(_ownerText, _repoText, _branchText)) continue;
       pending.addAll(commit.hashes.keys);
       pending.addAll(commit.files.keys);
+      pending.addAll(commit.deleted);
     }
     return _remoteDrift
         .where((path) => !pending.contains(path))
@@ -620,16 +621,28 @@ class _PushSheetState extends State<PushSheet> {
     final state = _state;
     if (state == null) return;
     final added = change.status == RepoChangeStatus.added;
+    final deleted = change.status == RepoChangeStatus.deleted;
     final confirmed = await showPraxisConfirm(
       context,
-      title: added ? 'Delete this new file?' : 'Revert this file?',
+      title: added
+          ? 'Delete this new file?'
+          : deleted
+              ? 'Restore this deleted file?'
+              : 'Revert this file?',
       body: added
           ? '${change.path} is not on the remote branch yet. Reverting removes '
               'it from this device.'
-          : '${change.path} goes back to the version this device last synced. '
-              'Your edits to this file are lost.',
-      confirmLabel: added ? 'Delete file' : 'Revert file',
-      destructive: true,
+          : deleted
+              ? '${change.path} comes back at the version this device last '
+                  'synced. The deletion is discarded.'
+              : '${change.path} goes back to the version this device last '
+                  'synced. Your edits to this file are lost.',
+      confirmLabel: added
+          ? 'Delete file'
+          : deleted
+              ? 'Restore file'
+              : 'Revert file',
+      destructive: !deleted,
       icon: Icons.undo_rounded,
       details: [ConfirmDetail('File', change.path)],
     );
@@ -649,7 +662,9 @@ class _PushSheetState extends State<PushSheet> {
         _error = null;
         _status = added
             ? 'Deleted ${change.path}.'
-            : 'Reverted ${change.path} to the last synced version.';
+            : deleted
+                ? 'Restored ${change.path}.'
+                : 'Reverted ${change.path} to the last synced version.';
       });
       await _refreshChanges();
       await _refreshDrift();
@@ -807,7 +822,12 @@ class _PushSheetState extends State<PushSheet> {
       final files = <String, List<int>>{};
       final texts = <String, String>{};
       final hashes = <String, String>{};
+      final deleted = <String>{};
       for (final change in selectedChanges) {
+        if (change.status == RepoChangeStatus.deleted) {
+          deleted.add(change.path);
+          continue;
+        }
         final bytes = await state.readFileBytes(
           state.projectById(widget.project.id),
           change.path,
@@ -824,8 +844,13 @@ class _PushSheetState extends State<PushSheet> {
         branch: _branchText,
         message: _message.text.trim(),
         files: files,
+        deleted: deleted,
         parentSha: parent?.sha,
       );
+      final baseHashes = {..._push.comparisonBase, ...hashes};
+      for (final path in deleted) {
+        baseHashes.remove(path);
+      }
       final next = _push
           .copyWith(
             owner: _ownerText,
@@ -833,7 +858,7 @@ class _PushSheetState extends State<PushSheet> {
             branch: _branchText,
             // Keep the whole merge base: adding only the committed paths would
             // make every other tracked file look edited.
-            baseHashes: {..._push.comparisonBase, ...hashes},
+            baseHashes: baseHashes,
           )
           .withBaseline(texts, hashes: hashes)
           .withPending(PendingCommit(
@@ -845,6 +870,7 @@ class _PushSheetState extends State<PushSheet> {
             branch: _branchText,
             files: texts,
             hashes: hashes,
+            deleted: deleted.toList(growable: false),
           ));
       await state.savePushState(widget.project, next);
       await state.updateProjectGit(
@@ -879,6 +905,7 @@ class _PushSheetState extends State<PushSheet> {
     for (final commit in commits) {
       unique.addAll(commit.hashes.keys);
       unique.addAll(commit.files.keys);
+      unique.addAll(commit.deleted);
     }
     files = unique.length;
     return showPraxisConfirm(
@@ -913,9 +940,11 @@ class _PushSheetState extends State<PushSheet> {
     if (!confirmed || !mounted) return;
     final pushedTexts = <String, String>{};
     final pushedHashes = <String, String>{};
+    final pushedDeletes = <String>{};
     for (final commit in pending) {
       pushedTexts.addAll(commit.files);
       pushedHashes.addAll(commit.hashes);
+      pushedDeletes.addAll(commit.deleted);
     }
     FocusScope.of(context).unfocus();
     setState(() {
@@ -931,15 +960,22 @@ class _PushSheetState extends State<PushSheet> {
         branch: _branchText,
         sha: last.sha,
       );
+      final remoteHashes = {..._push.hashes, ...pushedHashes};
+      final baseHashes = {..._push.comparisonBase, ...pushedHashes};
+      for (final path in pushedDeletes) {
+        remoteHashes.remove(path);
+        baseHashes.remove(path);
+      }
       final next = _push
           .withBaseline(pushedTexts, hashes: pushedHashes)
           .withoutPending(pending.map((commit) => commit.sha))
           .copyWith(
-        owner: _ownerText,
-        repo: _repoText,
-        branch: _branchText,
-        hashes: {..._push.hashes, ...pushedHashes},
-      );
+            owner: _ownerText,
+            repo: _repoText,
+            branch: _branchText,
+            hashes: remoteHashes,
+            baseHashes: baseHashes,
+          );
       await state.savePushState(widget.project, next);
       await state.updateProjectGit(
         state.projectById(widget.project.id),
@@ -1317,7 +1353,7 @@ class _PushSheetState extends State<PushSheet> {
                                     ),
                                     Text(
                                       '${commit.sha.substring(0, 7)} · '
-                                      '${commit.hashes.length} files',
+                                      '${commit.hashes.length + commit.deleted.length} files',
                                       style: Txt.meta.copyWith(fontSize: 8.5),
                                     ),
                                   ],
@@ -1616,8 +1652,11 @@ class _PushFileRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final added = change.status == RepoChangeStatus.added;
-    final tint = added ? Pal.mint : Pal.amber;
+    final tint = switch (change.status) {
+      RepoChangeStatus.added => Pal.mint,
+      RepoChangeStatus.deleted => Pal.rose,
+      RepoChangeStatus.modified => Pal.amber,
+    };
     return GestureDetector(
       onTap: onOpen,
       behavior: HitTestBehavior.opaque,
@@ -1676,7 +1715,12 @@ class _PushFileRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 7),
-            if (change.isBinary)
+            if (change.status == RepoChangeStatus.deleted)
+              Text(
+                '-${change.removed}',
+                style: Txt.meta.copyWith(fontSize: 9, color: Pal.ghDelText),
+              )
+            else if (change.isBinary)
               Text(
                 humanFileSize(change.size),
                 style: Txt.meta.copyWith(fontSize: 9, color: Pal.sky),

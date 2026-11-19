@@ -88,7 +88,7 @@ class _GithubMarkdownPreviewState extends State<GithubMarkdownPreview> {
     _lastKey = key;
     _documentToken++;
     if (mounted) setState(() => _loading = true);
-    final body = await _readmeBody(
+    final body = await readmePreviewBody(
       widget.source,
       readmePath: widget.path,
       dark: widget.dark,
@@ -142,7 +142,9 @@ class _GithubMarkdownPreviewState extends State<GithubMarkdownPreview> {
   }
 }
 
-Future<String> _readmeBody(
+/// Builds the HTML placed inside the preview WebView. Exposed so tests can
+/// verify picture selection and local-image inlining without a device.
+Future<String> readmePreviewBody(
   String source, {
   required String readmePath,
   required bool dark,
@@ -156,15 +158,18 @@ Future<String> _readmeBody(
   // GitHub emits dark/light variants inside <picture>. Keeping the <source>
   // elements would leave a relative srcset that the WebView cannot load, so
   // the picture is reduced to the <img> variant that matches this preview.
-  body = _resolvePictures(body, dark: dark);
-  return _inlineLocalImages(
+  body = resolveReadmePictures(body, dark: dark);
+  return inlineReadmeImages(
     body,
     readmePath: readmePath,
     loadLocal: loadLocal,
   );
 }
 
-String _resolvePictures(String body, {required bool dark}) {
+/// Reduces every `<picture>` to the `<img>` variant matching [dark]. GitHub
+/// wraps its light and dark cards in `<picture>`; a WebView would otherwise
+/// keep both `<source>` elements and pick by device theme instead.
+String resolveReadmePictures(String body, {required bool dark}) {
   final picture = RegExp(r'<picture\b[\s\S]*?</picture>', caseSensitive: false);
   return body.replaceAllMapped(picture, (match) {
     final block = match.group(0)!;
@@ -194,7 +199,9 @@ String _resolvePictures(String body, {required bool dark}) {
   });
 }
 
-Future<String> _inlineLocalImages(
+/// Replaces local image references with data URIs so the WebView can show
+/// README images that live inside the project instead of on the network.
+Future<String> inlineReadmeImages(
   String body, {
   required String readmePath,
   required Future<Uint8List?> Function(Uri) loadLocal,
@@ -206,7 +213,7 @@ Future<String> _inlineLocalImages(
     var element = match.group(0)!;
     final attribute = match.group(1)!.toLowerCase() == 'img' ? 'src' : 'srcset';
     final attributeMatch = RegExp(
-      RegExp.escape(attribute) + r'''$attribute\s*=\s*("([^"]*)"|'([^']*)')''',
+      RegExp.escape(attribute) + r'''\s*=\s*("([^"]*)"|'([^']*)')''',
       caseSensitive: false,
     ).firstMatch(element);
     if (attributeMatch == null) continue;
@@ -246,7 +253,7 @@ Future<String> _inlineLocalImages(
 
 String _attributeValue(String tag, String name) {
   final match = RegExp(
-    RegExp.escape(name) + r'''$name\s*=\s*("([^"]*)"|'([^']*)')''',
+    RegExp.escape(name) + r'''\s*=\s*("([^"]*)"|'([^']*)')''',
     caseSensitive: false,
   ).firstMatch(tag);
   return match?.group(2) ?? match?.group(3) ?? '';

@@ -815,8 +815,9 @@ class Agent {
           // the model try to write, fail, and stop without ever showing a plan.
           final wantsChange = !_planMode &&
               (expectChanges ||
-                  _looksLikeChangeRequest(prompt) ||
-                  _looksLikeContinueRequest(prompt));
+                  _looksLikeContinueRequest(prompt) ||
+                  (!_looksLikeExplanationRequest(prompt) &&
+                      _looksLikeChangeRequest(prompt)));
 
           // A reasoning model can spend the entire output budget before it emits
           // its tool call. That is not a completed answer, so never print the
@@ -866,6 +867,7 @@ class Agent {
           if (!reply.hitOutputLimit &&
               !mutated &&
               actionNudges < 2 &&
+              !_looksLikeExplanationRequest(prompt) &&
               _announcesAction(text.isEmpty ? reply.thinking : text)) {
             actionNudges++;
             onDiscardLive?.call();
@@ -1225,6 +1227,22 @@ class Agent {
     final text = prompt.toLowerCase();
     return RegExp(
       r'\b(add|change|edit|fix|update|implement|refactor|remove|delete|rename|move|create|write|replace|make|build|improve|polish|migrate|bump|generate|set|configure)\b',
+    ).hasMatch(text);
+  }
+
+  /// A question about how the code works is not a request to edit it. Without
+  /// this, an explanation that merely mentions words like "update" or "add"
+  /// was treated as unfinished work, the reply was discarded and the model was
+  /// pushed into writing files nobody asked for.
+  bool _looksLikeExplanationRequest(String prompt) {
+    final text = prompt.trim().toLowerCase();
+    return RegExp(
+      r'^(?:(?:please|kindly)\s+)?(?:explain|describe|walk me through|'
+      r'tell me (?:about|how|why)|show me how|'
+      r'(?:can|could) you explain|'
+      r"what(?:'s| is| are| does| do)|how(?: does| do| is| are| can)|"
+      r'why(?: does| do| is| are)|where(?: is| does| do)|'
+      r'who(?: is| wrote| owns| maintains))\b',
     ).hasMatch(text);
   }
 

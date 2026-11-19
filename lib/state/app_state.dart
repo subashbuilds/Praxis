@@ -2550,9 +2550,35 @@ query CurrentUser {
     final changes = <RepoChange>[];
     for (final path in paths) {
       final localHash = current.hashes[path];
-      if (localHash == null) continue;
       final baseHash = base[path];
       final remoteHash = state.hashes[path];
+      if (localHash == null) {
+        // A file removed from this device is a change too. Without a merge
+        // base it was never synced here, so it is not a local deletion.
+        if (baseHash == null) continue;
+        var before = state.baseline[path];
+        if (before != null && gitBlobSha(utf8.encode(before)) != baseHash) {
+          before = null;
+        }
+        if (before == null && remoteHash == baseHash && beforeText != null) {
+          try {
+            before = await beforeText(path);
+          } catch (_) {
+            // The deletion is still real without a diff preview.
+          }
+        }
+        final diff = before == null ? null : computeDiff(before, '');
+        changes.add(RepoChange(
+          path: path,
+          status: RepoChangeStatus.deleted,
+          before: before ?? '',
+          after: '',
+          added: 0,
+          removed: diff?.removed ?? 0,
+          isBinary: before == null,
+        ));
+        continue;
+      }
       if (localHash == baseHash) continue;
       var before = state.baseline[path];
       if (before != null &&
@@ -2613,6 +2639,7 @@ query CurrentUser {
     required String branch,
     required String message,
     required Map<String, List<int>> files,
+    Set<String> deleted = const {},
     String? parentSha,
   }) =>
       GitHubClient(account.token, client: httpClient).createCommit(
@@ -2621,6 +2648,7 @@ query CurrentUser {
         branch: branch,
         message: message,
         files: files,
+        deleted: deleted,
         parentSha: parentSha,
       );
 
@@ -2707,7 +2735,17 @@ query CurrentUser {
       final localHash = local.hashes[path];
       final base = baseHash(path);
       if (localHash == null) {
-        writes[path] = cloned.files[path]!;
+        if (base == null) {
+          writes[path] = cloned.files[path]!;
+        } else if (remoteHash != base) {
+          // Deleted locally, but GitHub also changed the file. Keeping either
+          // side would silently lose the other, so stop and report it.
+          conflicts.add(path);
+        } else {
+          // Deleted on this device since the last sync. Keep that deletion; a
+          // pull must not bring a file the user removed back to life.
+          keptLocal++;
+        }
       } else if (localHash == remoteHash) {
         continue;
       } else if (base == localHash) {
@@ -2952,7 +2990,12 @@ query CurrentUser {
     final bytes = <String, List<int>>{};
     final texts = <String, String>{};
     final hashes = <String, String>{};
+    final deleted = <String>{};
     for (final change in changes) {
+      if (change.status == RepoChangeStatus.deleted) {
+        deleted.add(change.path);
+        continue;
+      }
       bytes[change.path] = await fsFor(project).readBytes(change.path);
       final text = snapshot.texts[change.path];
       if (text != null) texts[change.path] = text;
@@ -2967,8 +3010,15 @@ query CurrentUser {
       branch: branch,
       message: message.trim(),
       files: bytes,
+      deleted: deleted,
       parentSha: parent?.sha,
     );
+    final baseHashes = {...state.comparisonBase, ...hashes};
+    final remoteHashes = {...state.hashes, ...hashes};
+    for (final path in deleted) {
+      baseHashes.remove(path);
+      remoteHashes.remove(path);
+    }
     var next = state
         .copyWith(
           owner: owner,
@@ -2976,7 +3026,8 @@ query CurrentUser {
           branch: branch,
           // Start from the full merge base: storing only the committed paths
           // would make every other remote file look edited.
-          baseHashes: {...state.comparisonBase, ...hashes},
+          baseHashes: baseHashes,
+          hashes: remoteHashes,
         )
         .withBaseline(texts, hashes: hashes)
         .withPending(PendingCommit(
@@ -2988,6 +3039,7 @@ query CurrentUser {
           branch: branch,
           files: texts,
           hashes: hashes,
+          deleted: deleted.toList(growable: false),
         ));
     await savePushState(project, next);
     await pushGithubRef(
@@ -2997,8 +3049,7 @@ query CurrentUser {
       branch: branch,
       sha: commit.sha,
     );
-    next = next.copyWith(
-        hashes: {...state.hashes, ...hashes}).withoutPending([commit.sha]);
+    next = next.withoutPending([commit.sha]);
     await savePushState(project, next);
     await updateProjectGit(project, repo: '$owner/$repo', branch: branch);
     return 'Committed and pushed ${changes.length} file${changes.length == 1 ? '' : 's'} '
@@ -4234,7 +4285,11 @@ query CurrentUser {
     if (latest == null) return current;
     // The commit moved these files into the base. Undo that so they appear as
     // uncommitted edits again, relative to the branch that is still on GitHub.
-    final paths = {...latest.hashes.keys, ...latest.files.keys};
+    final paths = {
+      ...latest.hashes.keys,
+      ...latest.files.keys,
+      ...latest.deleted,
+    };
     final baseHashes = Map<String, String>.from(current.baseHashes);
     final hashes = Map<String, String>.from(current.hashes);
     if (baseHashes.isNotEmpty) {

@@ -535,15 +535,20 @@ class GitHubClient {
     required String branch,
     required String message,
     required Map<String, List<int>> files,
+    Set<String> deleted = const {},
     String? parentSha,
   }) async {
-    if (files.isEmpty) {
+    if (files.isEmpty && deleted.isEmpty) {
       throw IntegrationException('Select at least one file to commit.');
     }
 
     var parent = parentSha ?? await headSha(owner, repo, branch);
     var remaining = files;
     if (parent == null) {
+      if (files.isEmpty) {
+        throw IntegrationException(
+            'This branch has no commits, so there is nothing to delete.');
+      }
       await ensureRepo(owner, repo);
       // A missing branch is not the same as an empty repository. Git Data API
       // returns 409 for a repository with no commit, but a 404 for a branch
@@ -572,7 +577,7 @@ class GitHubClient {
         path: seedPath,
         bytes: files[seedPath]!,
       );
-      if (files.length == 1) {
+      if (files.length == 1 && deleted.isEmpty) {
         return GitHubCommit(sha: seed.sha, treeSha: seed.treeSha);
       }
       parent = seed.sha;
@@ -618,6 +623,14 @@ class GitHubClient {
           'mode': '100644',
           'type': 'blob',
           'sha': uploaded[i],
+        },
+      // A null blob id removes the path from the branch.
+      for (final path in deleted)
+        {
+          'path': path,
+          'mode': '100644',
+          'type': 'blob',
+          'sha': null,
         },
     ];
 

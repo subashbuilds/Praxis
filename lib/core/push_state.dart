@@ -3,12 +3,21 @@ import 'dart:io';
 
 import 'vfs.dart';
 
-enum RepoChangeStatus { modified, added }
+enum RepoChangeStatus { modified, added, deleted }
 
 extension RepoChangeStatusX on RepoChangeStatus {
-  /// VS Code-style single letter: M for an existing file, N for a new one.
-  String get letter => this == RepoChangeStatus.modified ? 'M' : 'N';
-  String get label => this == RepoChangeStatus.modified ? 'Modified' : 'New';
+  /// VS Code-style single letter: M for an existing file, N for a new one,
+  /// D for a file removed from this device.
+  String get letter => switch (this) {
+        RepoChangeStatus.modified => 'M',
+        RepoChangeStatus.added => 'N',
+        RepoChangeStatus.deleted => 'D',
+      };
+  String get label => switch (this) {
+        RepoChangeStatus.modified => 'Modified',
+        RepoChangeStatus.added => 'New',
+        RepoChangeStatus.deleted => 'Deleted',
+      };
 }
 
 class RepoChange {
@@ -45,6 +54,7 @@ class PendingCommit {
     required this.branch,
     this.files = const {},
     this.hashes = const {},
+    this.deleted = const [],
   });
 
   final String sha;
@@ -62,6 +72,9 @@ class PendingCommit {
   /// keystore or image from being read as a string.
   final Map<String, String> hashes;
 
+  /// Paths the commit removes from the branch.
+  final List<String> deleted;
+
   bool matches(String owner, String repo, String branch) =>
       this.owner == owner && this.repo == repo && this.branch == branch;
 
@@ -74,6 +87,7 @@ class PendingCommit {
         'branch': branch,
         'files': files,
         'hashes': hashes,
+        'deleted': deleted,
       };
 
   static PendingCommit? fromJson(Map<String, dynamic> json) {
@@ -88,6 +102,9 @@ class PendingCommit {
       branch: json['branch'] as String? ?? 'main',
       files: _stringMap(json['files']),
       hashes: _stringMap(json['hashes']),
+      deleted: (json['deleted'] as List? ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
     );
   }
 }
