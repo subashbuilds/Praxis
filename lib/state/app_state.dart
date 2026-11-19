@@ -600,6 +600,7 @@ class AppState extends ChangeNotifier {
         branch: cloned.branch,
         baseline: snapshot.texts,
         hashes: snapshot.hashes,
+        baseHashes: snapshot.hashes,
         synced: true,
       );
       _pushStates[id] = initialPush;
@@ -1230,7 +1231,7 @@ class AppState extends ChangeNotifier {
       fs: fsFor(project),
       shell: shellFor(project),
       deviceShell: systemShellFor(project),
-      contextLimit: contextLimitFor(provider.model) ?? 128000,
+      contextLimit: contextLimitFor(provider) ?? 128000,
       linuxShell: linux != null,
       activeFile: _activeFiles[projectId],
       skills: skills,
@@ -2041,14 +2042,36 @@ Continue seamlessly from the remaining step. Do not restart the task from the be
   }
 
   Future<List<String>> fetchModels(ProviderConfig provider) async {
-    final models = await ai.listModels(provider);
+    final catalogue = await ai.listModelCatalogue(provider);
     final index = providers.indexWhere((item) => item.id == provider.id);
     if (index >= 0) {
-      providers[index] = providers[index].copyWith(models: models);
+      providers[index] = providers[index].copyWith(
+        models: catalogue.ids,
+        contextLengths: catalogue.contexts,
+      );
       await _persistProviders();
       notifyListeners();
     }
-    return models;
+    return catalogue.ids;
+  }
+
+  /// Refreshes context windows in the background. Called when the model sheet
+  /// opens so an already-saved model also gets its provider-reported size.
+  Future<void> refreshModelContexts(ProviderConfig provider) async {
+    if (!provider.ready) return;
+    try {
+      final catalogue = await ai.listModelCatalogue(provider);
+      final index = providers.indexWhere((item) => item.id == provider.id);
+      if (index < 0) return;
+      providers[index] = providers[index].copyWith(
+        models: catalogue.ids,
+        contextLengths: catalogue.contexts,
+      );
+      await _persistProviders();
+      notifyListeners();
+    } catch (_) {
+      // The fallback table still gives a usable estimate offline.
+    }
   }
 
   ProviderConfig newCustomProvider() => ProviderConfig(
@@ -2450,19 +2473,34 @@ query CurrentUser {
     final client = GitHubClient(account.token, client: httpClient);
     final tree = await client.tree(owner, repo, branch);
     final local = await fsFor(project).localSnapshot();
+    // Keep the previous merge base when the target is unchanged. A remote edit
+    // changes `hashes`, not the files on this device, so the base is what
+    // separates "changed here" from "changed on GitHub".
+    final base = sameTarget
+        ? (current.baseHashes.isEmpty ? current.hashes : current.baseHashes)
+        : const <String, String>{};
     final baseline = <String, String>{};
     final needed = <GitHubTreeFile>[];
     for (final file in tree.textFiles) {
       final remoteHash = tree.hashes[file.path];
       final localHash = local.hashes[file.path];
-      if (localHash == null || localHash == remoteHash) continue;
+      final baseHash = base[file.path];
+      if (localHash == null ||
+          localHash == baseHash ||
+          localHash == remoteHash) {
+        continue;
+      }
       // Only a file that differs locally needs its old text for a diff. Every
       // unchanged file is dropped from the stored baseline, which keeps
       // push.json small and branch switches fast.
       final cached = current.baseline[file.path];
-      if (cached != null && current.hashes[file.path] == remoteHash) {
+      if (cached != null &&
+          ((baseHash != null && gitBlobSha(utf8.encode(cached)) == baseHash) ||
+              current.hashes[file.path] == remoteHash)) {
         baseline[file.path] = cached;
-      } else {
+      } else if (baseHash == null || remoteHash == baseHash) {
+        // Unchanged remotely since the merge base, so the remote text is the
+        // text this device started from.
         needed.add(file);
       }
     }
@@ -2473,6 +2511,7 @@ query CurrentUser {
       branch: branch,
       baseline: baseline,
       hashes: tree.hashes,
+      baseHashes: base,
       synced: true,
     );
     return savePushState(project, next);
@@ -2498,9 +2537,13 @@ query CurrentUser {
   }) async {
     final state = await pushStateFor(project);
     final current = await fsFor(project).localSnapshot();
+    // Compare against what this device last synced, not against the current
+    // remote tree. Otherwise a file edited only on GitHub looks like a local
+    // edit and the pull refuses to replace it.
+    final base = state.comparisonBase;
     final paths = <String>{
+      ...base.keys,
       ...state.hashes.keys,
-      ...state.baseline.keys,
       ...current.hashes.keys,
     }.toList()
       ..sort();
@@ -2508,26 +2551,35 @@ query CurrentUser {
     for (final path in paths) {
       final localHash = current.hashes[path];
       if (localHash == null) continue;
-      var remoteHash = state.hashes[path];
+      final baseHash = base[path];
+      final remoteHash = state.hashes[path];
+      if (localHash == baseHash) continue;
       var before = state.baseline[path];
-      if (remoteHash == null && before != null) {
-        remoteHash = gitBlobSha(utf8.encode(before));
+      if (before != null &&
+          baseHash != null &&
+          gitBlobSha(utf8.encode(before)) != baseHash) {
+        // The cached text no longer matches the merge base, so it cannot
+        // describe what changed here.
+        before = null;
       }
-      if (remoteHash == localHash) continue;
-      final after = current.texts[path];
-      final isBinary = after == null;
-      if (before == null && remoteHash != null && beforeText != null) {
+      if (before == null &&
+          baseHash != null &&
+          remoteHash == baseHash &&
+          beforeText != null) {
         try {
           before = await beforeText(path);
         } catch (_) {
           // A missing preview must not hide a real local change.
         }
       }
-      final canDiff = !isBinary && (before != null || remoteHash == null);
+      final after = current.texts[path];
+      final isBinary = after == null;
+      final isNew = baseHash == null && remoteHash == null;
+      final canDiff = !isBinary && (before != null || isNew);
       final diff = canDiff ? computeDiff(before ?? '', after) : null;
       changes.add(RepoChange(
         path: path,
-        status: before == null && remoteHash == null
+        status: baseHash == null && remoteHash == null
             ? RepoChangeStatus.added
             : RepoChangeStatus.modified,
         before: before ?? '',
@@ -2635,8 +2687,12 @@ query CurrentUser {
 
     final fs = fsFor(project);
     final local = await fs.localSnapshot();
+    // The merge base is what this device last synced. Using the freshly
+    // fetched remote tree here made every remote-only edit look local, so the
+    // pull kept the stale file instead of updating it.
+    final mergeBase = state.comparisonBase;
     String? baseHash(String path) {
-      final known = state.hashes[path];
+      final known = mergeBase[path];
       if (known != null) return known;
       final text = state.baseline[path];
       return text == null ? null : gitBlobSha(utf8.encode(text));
@@ -2696,6 +2752,7 @@ query CurrentUser {
       branch: resolvedBranch,
       baseline: remoteTexts,
       hashes: remoteHashes,
+      baseHashes: remoteHashes,
       synced: true,
     );
     await savePushState(project, next);
@@ -2913,7 +2970,14 @@ query CurrentUser {
       parentSha: parent?.sha,
     );
     var next = state
-        .copyWith(owner: owner, repo: repo, branch: branch)
+        .copyWith(
+          owner: owner,
+          repo: repo,
+          branch: branch,
+          // Start from the full merge base: storing only the committed paths
+          // would make every other remote file look edited.
+          baseHashes: {...state.comparisonBase, ...hashes},
+        )
         .withBaseline(texts, hashes: hashes)
         .withPending(PendingCommit(
           sha: commit.sha,
@@ -2933,7 +2997,8 @@ query CurrentUser {
       branch: branch,
       sha: commit.sha,
     );
-    next = next.withoutPending([commit.sha]);
+    next = next.copyWith(
+        hashes: {...state.hashes, ...hashes}).withoutPending([commit.sha]);
     await savePushState(project, next);
     await updateProjectGit(project, repo: '$owner/$repo', branch: branch);
     return 'Committed and pushed ${changes.length} file${changes.length == 1 ? '' : 's'} '
@@ -4167,9 +4232,103 @@ query CurrentUser {
     final current = await pushStateFor(project);
     final latest = current.lastPendingFor(owner, repo, branch);
     if (latest == null) return current;
+    // The commit moved these files into the base. Undo that so they appear as
+    // uncommitted edits again, relative to the branch that is still on GitHub.
+    final paths = {...latest.hashes.keys, ...latest.files.keys};
+    final baseHashes = Map<String, String>.from(current.baseHashes);
+    final hashes = Map<String, String>.from(current.hashes);
+    if (baseHashes.isNotEmpty) {
+      for (final path in paths) {
+        final remote = current.hashes[path];
+        if (remote == null) {
+          baseHashes.remove(path);
+          hashes.remove(path);
+        } else {
+          baseHashes[path] = remote;
+        }
+      }
+    }
     return savePushState(
       project,
-      current.withoutPending([latest.sha]),
+      current
+          .copyWith(baseHashes: baseHashes, hashes: hashes)
+          .withoutPending([latest.sha]),
+    );
+  }
+
+  /// Paths whose content changed on GitHub since this device last synced.
+  /// These are pullable; they are deliberately not part of the local change
+  /// list.
+  Future<List<String>> remoteDriftFor(Project project) async {
+    final state = await pushStateFor(project);
+    final base = state.comparisonBase;
+    final paths = <String>{...base.keys, ...state.hashes.keys};
+    return paths.where((path) => state.hashes[path] != base[path]).toList()
+      ..sort();
+  }
+
+  /// Restores one file to the merge base, so only this file stops being shown
+  /// as a local change. A file that exists only on this device is deleted.
+  Future<PushState> revertFile(
+    Project project, {
+    IntegrationAccount? account,
+    required String owner,
+    required String repo,
+    required String branch,
+    required String path,
+  }) async {
+    final state = await pushStateFor(project);
+    final base = state.comparisonBase;
+    final baseHash = base[path];
+    final remoteHash = state.hashes[path];
+    final fs = fsFor(project);
+    if (baseHash == null && remoteHash == null) {
+      if (await fs.exists(path)) await fs.delete(path);
+      final baseHashes = Map<String, String>.from(state.baseHashes)
+        ..remove(path);
+      final hashes = Map<String, String>.from(state.hashes)..remove(path);
+      final baseline = Map<String, String>.from(state.baseline)..remove(path);
+      return savePushState(
+        project,
+        state.copyWith(
+          baseHashes: baseHashes,
+          hashes: hashes,
+          baseline: baseline,
+        ),
+      );
+    }
+    final cached = state.baseline[path];
+    List<int>? restored;
+    if (cached != null &&
+        (baseHash == null || gitBlobSha(utf8.encode(cached)) == baseHash)) {
+      restored = utf8.encode(cached);
+    } else if (account != null &&
+        remoteHash != null &&
+        (baseHash == null || remoteHash == baseHash)) {
+      restored = await GitHubClient(account.token, client: httpClient)
+          .fileBytes(owner, repo, path, branch);
+    }
+    if (restored == null) {
+      throw IntegrationException(
+          'Praxis has no saved copy of $path to restore. Pull from GitHub first.');
+    }
+    await fs.writeBytes(path, restored);
+    final baseHashes = Map<String, String>.from(state.comparisonBase);
+    final baseline = Map<String, String>.from(state.baseline);
+    if (baseHash == null) {
+      baseHashes.remove(path);
+    } else {
+      baseHashes[path] = baseHash;
+    }
+    final text = decodeUtf8(restored, allowEmpty: true);
+    if (text != null) {
+      baseline[path] = text;
+    } else {
+      baseline.remove(path);
+    }
+    return savePushState(
+      project,
+      state.copyWith(baseHashes: baseHashes, baseline: baseline),
     );
   }
 
@@ -4440,7 +4599,9 @@ query CurrentUser {
     return latest?.promptTokens;
   }
 
-  int? contextLimitFor(String model) => contextWindowFor(model);
+  int? contextLimitFor(ProviderConfig provider) =>
+      provider.contextLengths[provider.model] ??
+      contextWindowFor(provider.model);
 
   // -------------------------------------------------------------- settings
 

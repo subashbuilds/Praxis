@@ -54,6 +54,14 @@ class AiToolSpec {
   final Map<String, dynamic> parameters;
 }
 
+/// The ids and advertised context windows from a provider's model list.
+class ModelCatalogue {
+  const ModelCatalogue(this.ids, this.contexts);
+
+  final List<String> ids;
+  final Map<String, int> contexts;
+}
+
 class AiUsage {
   const AiUsage({this.promptTokens = 0, this.completionTokens = 0});
   final int promptTokens;
@@ -522,7 +530,13 @@ class AiClient {
 
   /// Lists the models the provider exposes to this key. Used by the provider
   /// form so the user can keep only the models they want.
-  Future<List<String>> listModels(ProviderConfig provider) async {
+  Future<List<String>> listModels(ProviderConfig provider) async =>
+      (await listModelCatalogue(provider)).ids;
+
+  /// Model ids plus the context window each provider advertises. The model
+  /// list is the only reliable source for context size: the same model name
+  /// can be served with different windows by different providers.
+  Future<ModelCatalogue> listModelCatalogue(ProviderConfig provider) async {
     if (!provider.ready) {
       throw AiProviderException(
         'Add a key for ${provider.name} before fetching models.',
@@ -569,16 +583,23 @@ class AiClient {
     }
 
     final models = <String>{};
+    final contexts = <String, int>{};
+    void addModel(String rawId, [Map<dynamic, dynamic>? item]) {
+      final id = rawId.replaceFirst('models/', '').trim();
+      if (id.isEmpty) return;
+      models.add(id);
+      final context = item == null ? null : _contextLength(item);
+      if (context != null) contexts[id] = context;
+    }
+
     for (final item in raw) {
       if (item is String) {
-        models.add(item.replaceFirst('models/', ''));
+        addModel(item);
         continue;
       }
       if (item is Map) {
         final id = item['id'] ?? item['name'] ?? item['model'];
-        if (id is String && id.trim().isNotEmpty) {
-          models.add(id.replaceFirst('models/', '').trim());
-        }
+        if (id is String) addModel(id, item);
       }
     }
     final sorted = models.where((id) => id.isNotEmpty).toList()..sort();
@@ -587,7 +608,37 @@ class AiClient {
         '${provider.name} returned no models. Check the base URL and key.',
       );
     }
-    return sorted;
+    return ModelCatalogue(sorted, contexts);
+  }
+
+  /// Reads the context window from the shapes used by OpenAI-compatible model
+  /// lists (OpenRouter reports `context_length`, vLLM and NVIDIA NIM report
+  /// `max_model_len`, others use `context_window` or a nested `limits`).
+  static int? _contextLength(Map<dynamic, dynamic> item) {
+    int? read(Object? value) => value is num
+        ? value.toInt()
+        : (value is String ? int.tryParse(value.trim()) : null);
+    const keys = [
+      'context_length',
+      'context_window',
+      'max_context_tokens',
+      'max_model_len',
+      'max_input_tokens',
+      'max_context_length',
+      'max_sequence_length',
+    ];
+    for (final key in keys) {
+      final value = read(item[key]);
+      if (value != null && value > 0) return value;
+    }
+    for (final nested in const ['top_provider', 'limits', 'architecture']) {
+      final value = item[nested];
+      if (value is Map) {
+        final found = _contextLength(value);
+        if (found != null) return found;
+      }
+    }
+    return null;
   }
 
   Map<String, String> _headers(ProviderConfig provider) => {

@@ -411,7 +411,21 @@ class GitHubClient {
 
   /// Reads one text file at a branch. Used to fill in a diff when the sparse
   /// baseline does not contain the previous contents of a changed file.
+  /// The raw media type matters: the default JSON response would hand the
+  /// caller base64-wrapped API JSON instead of the file itself.
   Future<String?> fileText(
+    String owner,
+    String repo,
+    String path,
+    String ref,
+  ) async {
+    final bytes = await fileBytes(owner, repo, path, ref);
+    if (bytes == null) return null;
+    return decodeUtf8(bytes, allowEmpty: true);
+  }
+
+  /// Reads one file at a branch as exact bytes, including binaries.
+  Future<List<int>?> fileBytes(
     String owner,
     String repo,
     String path,
@@ -420,15 +434,18 @@ class GitHubClient {
     final encodedPath = path.split('/').map(Uri.encodeComponent).join('/');
     final uri = Uri.parse(
         'https://api.github.com/repos/$owner/$repo/contents/$encodedPath?ref=${Uri.encodeComponent(ref)}');
-    final response = await _client.get(uri, headers: _headers).timeout(
-          const Duration(seconds: 30),
-        );
+    final response = await _client.get(
+      uri,
+      headers: {..._headers, 'Accept': 'application/vnd.github.raw'},
+    ).timeout(
+      const Duration(seconds: 30),
+    );
     if (response.statusCode == 404) return null;
     if (response.statusCode != 200) {
       throw IntegrationException(
           _error(response, 'Could not read $path from GitHub'));
     }
-    return decodeUtf8(response.bodyBytes, allowEmpty: true);
+    return response.bodyBytes;
   }
 
   Future<void> createBranch({

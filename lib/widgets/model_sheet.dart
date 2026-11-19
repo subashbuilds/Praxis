@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -32,6 +34,12 @@ Future<ProviderChoice?> showProviderFallbackSheet(
 /// the user has configured, and only the models they chose to keep.
 Future<void> showModelSheet(BuildContext context) {
   final state = AppScope.of(context);
+  // Model names alone cannot tell two context variants apart. Refresh the
+  // provider's model list so the sheet can show the reported window.
+  for (final provider in state.configuredProviders) {
+    if (provider.contextLengths.isNotEmpty) continue;
+    unawaited(state.refreshModelContexts(provider));
+  }
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -133,7 +141,8 @@ class _ModelSheet extends StatelessWidget {
                     final (provider, model) = models[index];
                     final active = provider.id == state.activeProviderId &&
                         provider.model == model;
-                    final limit = contextWindowFor(model);
+                    final limit = provider.contextLengths[model] ??
+                        contextWindowFor(model);
                     final quota = state.quotaStatusFor(provider);
                     return InkWell(
                       onTap: () async {

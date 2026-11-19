@@ -2383,15 +2383,28 @@ class _ReadFilesBody extends StatelessWidget {
                       borderRadius: Rd.sm,
                       border: Border.all(color: Pal.line),
                     ),
+                    // A long repository path used to grow the pill past the
+                    // right edge of the transcript. Keep it inside the chat
+                    // column and ellipsize it instead.
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.sizeOf(context).width - 72,
+                    ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(Icons.description_outlined,
                             size: 12, color: Pal.sky),
                         const SizedBox(width: 5),
-                        Text(
-                          match.group(1) ?? '',
-                          style: Txt.code.copyWith(fontSize: 10),
+                        Flexible(
+                          child: Tooltip(
+                            message: match.group(1) ?? '',
+                            child: Text(
+                              match.group(1) ?? '',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Txt.code.copyWith(fontSize: 10),
+                            ),
+                          ),
                         ),
                       ],
                     ),

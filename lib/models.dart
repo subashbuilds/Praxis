@@ -182,6 +182,7 @@ class ProviderConfig {
     this.keyIndex = 0,
     this.models = const [],
     this.selectedModels = const [],
+    this.contextLengths = const {},
     this.requiresKey = true,
     this.isCustom = false,
     this.hint = '',
@@ -204,6 +205,11 @@ class ProviderConfig {
   /// user chose to keep.
   final List<String> models;
   final List<String> selectedModels;
+
+  /// Context window reported by the provider's model list, per model id.
+  /// Provider data is more accurate than a family guess for models that ship
+  /// with several context variants.
+  final Map<String, int> contextLengths;
   final bool requiresKey;
   final bool isCustom;
   final String hint;
@@ -235,6 +241,7 @@ class ProviderConfig {
     int? keyIndex,
     List<String>? models,
     List<String>? selectedModels,
+    Map<String, int>? contextLengths,
     bool? requiresKey,
     int? dailyLimit,
   }) =>
@@ -249,6 +256,7 @@ class ProviderConfig {
         keyIndex: keyIndex ?? this.keyIndex,
         models: models ?? this.models,
         selectedModels: selectedModels ?? this.selectedModels,
+        contextLengths: contextLengths ?? this.contextLengths,
         requiresKey: requiresKey ?? this.requiresKey,
         isCustom: isCustom,
         hint: hint,
@@ -266,6 +274,7 @@ class ProviderConfig {
         'keyIndex': keyIndex,
         'models': models,
         'selectedModels': selectedModels,
+        'contextLengths': contextLengths,
         'requiresKey': requiresKey,
         'isCustom': isCustom,
         'hint': hint,
@@ -299,6 +308,11 @@ class ProviderConfig {
       keyIndex: keyIndex,
       models: _strings(json['models']),
       selectedModels: _strings(json['selectedModels']),
+      contextLengths: {
+        for (final entry
+            in (json['contextLengths'] as Map? ?? const {}).entries)
+          if (entry.value is num) '${entry.key}': (entry.value as num).toInt(),
+      },
       requiresKey: json['requiresKey'] as bool? ?? true,
       isCustom: json['isCustom'] as bool? ?? false,
       hint: json['hint'] as String? ?? '',

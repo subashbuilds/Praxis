@@ -444,7 +444,7 @@ class _EditorScreenState extends State<EditorScreen> {
                           ],
                         ),
                       ),
-                      if (_preview && _isMarkdown)
+                      if (_preview && (_isMarkdown || _image || _svg))
                         _MarkdownThemeToggle(
                           dark: markdownDark,
                           onChanged: (dark) =>
@@ -667,8 +667,8 @@ class _EditorScreenState extends State<EditorScreen> {
         ],
       );
     }
-    if (_image && _preview) return _imagePreview();
-    if (_svg && _preview) return _svgPreview();
+    if (_image && _preview) return _imagePreview(markdownDark);
+    if (_svg && _preview) return _svgPreview(markdownDark);
     if (_binary) return _binaryPreview();
     if (_tooLarge) return _largeFilePreview();
     if (_isMarkdown && _preview) {
@@ -721,11 +721,14 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget _imagePreview() {
+  Color _previewCanvas(bool dark) =>
+      dark ? Pal.canvas : const Color(0xFFF6F8FA);
+
+  Widget _imagePreview(bool dark) {
     final bytes = _bytes;
     if (bytes == null) return const SizedBox.shrink();
     return Container(
-      color: Pal.canvas,
+      color: _previewCanvas(dark),
       padding: const EdgeInsets.all(Sp.x4),
       child: InteractiveViewer(
         minScale: 0.5,
@@ -748,10 +751,10 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget _svgPreview() {
+  Widget _svgPreview(bool dark) {
     try {
       return Container(
-        color: Pal.canvas,
+        color: _previewCanvas(dark),
         padding: const EdgeInsets.all(Sp.x4),
         child: InteractiveViewer(
           minScale: 0.5,

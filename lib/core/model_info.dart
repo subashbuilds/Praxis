@@ -29,7 +29,11 @@ int? contextWindowFor(String model) {
 
   // Open-weight families
   if (name.contains('deepseek')) return 65536;
-  if (name.contains('nemotron')) return 131072;
+  // Nemotron 3.5 Super ships with a 262K native window on NVIDIA NIM. Hosted
+  // variants can advertise more, which the provider model list overrides.
+  if (name.contains('nemotron')) return 262144;
+  if (name.contains('kimi')) return 262144;
+  if (name.contains('glm')) return 131072;
   if (name.contains('llama')) return 131072;
   if (name.contains('mistral') ||
       name.contains('mixtral') ||
@@ -46,13 +50,13 @@ int? contextWindowFor(String model) {
   return null;
 }
 
-String contextLabel(String model, int? used) {
-  final limit = contextWindowFor(model);
-  if (limit == null) {
+String contextLabel(String model, int? used, {int? limit}) {
+  final resolved = limit ?? contextWindowFor(model);
+  if (resolved == null) {
     return used == null ? 'context unknown' : '${_short(used)} used';
   }
-  if (used == null) return _short(limit);
-  return '${_short(used)}/${_short(limit)}';
+  if (used == null) return _short(resolved);
+  return '${_short(used)}/${_short(resolved)}';
 }
 
 String _short(int tokens) {

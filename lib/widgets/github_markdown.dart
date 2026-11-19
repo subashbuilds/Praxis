@@ -76,10 +76,10 @@ class _GithubMarkdownPreviewState extends State<GithubMarkdownPreview> {
     final sourceChanged = oldWidget.source != widget.source ||
         oldWidget.path != widget.path ||
         oldWidget.project.id != widget.project.id;
-    if (sourceChanged) {
+    // The body now chooses the dark or light variant of a <picture>, so a
+    // theme change needs a fresh conversion rather than a CSS reload.
+    if (sourceChanged || oldWidget.dark != widget.dark) {
       _render();
-    } else if (oldWidget.dark != widget.dark) {
-      _loadDocument();
     }
   }
 
@@ -91,6 +91,7 @@ class _GithubMarkdownPreviewState extends State<GithubMarkdownPreview> {
     final body = await _readmeBody(
       widget.source,
       readmePath: widget.path,
+      dark: widget.dark,
       loadLocal: (uri) async {
         final relative = resolveReadmeImagePath(widget.path, uri);
         if (relative.isEmpty) return null;
@@ -144,6 +145,7 @@ class _GithubMarkdownPreviewState extends State<GithubMarkdownPreview> {
 Future<String> _readmeBody(
   String source, {
   required String readmePath,
+  required bool dark,
   required Future<Uint8List?> Function(Uri) loadLocal,
 }) async {
   var body = md.markdownToHtml(
@@ -151,33 +153,115 @@ Future<String> _readmeBody(
     extensionSet: md.ExtensionSet.gitHubWeb,
     encodeHtml: false,
   );
-  final image = RegExp(
-    r'''<img\b[^>]*\bsrc\s*=\s*("([^"]*)"|'([^']*)')''',
-    caseSensitive: false,
+  // GitHub emits dark/light variants inside <picture>. Keeping the <source>
+  // elements would leave a relative srcset that the WebView cannot load, so
+  // the picture is reduced to the <img> variant that matches this preview.
+  body = _resolvePictures(body, dark: dark);
+  return _inlineLocalImages(
+    body,
+    readmePath: readmePath,
+    loadLocal: loadLocal,
   );
-  final matches = image.allMatches(body).toList();
+}
+
+String _resolvePictures(String body, {required bool dark}) {
+  final picture = RegExp(r'<picture\b[\s\S]*?</picture>', caseSensitive: false);
+  return body.replaceAllMapped(picture, (match) {
+    final block = match.group(0)!;
+    final imgMatch =
+        RegExp(r'<img\b[^>]*>', caseSensitive: false).firstMatch(block);
+    if (imgMatch == null) return block;
+    final tag = imgMatch.group(0)!;
+    final srcMatch = RegExp(
+      r'''src\s*=\s*("([^"]*)"|'([^']*)')''',
+      caseSensitive: false,
+    ).firstMatch(tag);
+    if (srcMatch == null) return block;
+    var src = srcMatch.group(2) ?? srcMatch.group(3) ?? '';
+    final wanted = dark ? 'dark' : 'light';
+    for (final source
+        in RegExp(r'<source\b[^>]*>', caseSensitive: false).allMatches(block)) {
+      final media = _attributeValue(source.group(0)!, 'media').toLowerCase();
+      if (!media.contains('prefers-color-scheme') || !media.contains(wanted)) {
+        continue;
+      }
+      final srcset = _attributeValue(source.group(0)!, 'srcset');
+      if (srcset.trim().isEmpty) continue;
+      src = srcset.split(',').first.trim().split(RegExp(r'\s+')).first;
+      break;
+    }
+    return tag.replaceRange(srcMatch.start, srcMatch.end, 'src="$src"');
+  });
+}
+
+Future<String> _inlineLocalImages(
+  String body, {
+  required String readmePath,
+  required Future<Uint8List?> Function(Uri) loadLocal,
+}) async {
+  final tags = RegExp(r'<(img|source)\b[^>]*>', caseSensitive: false);
+  final matches = tags.allMatches(body).toList();
+  var output = body;
   for (final match in matches.reversed) {
-    final raw = match.group(2) ?? match.group(3) ?? '';
-    final uri = Uri.tryParse(raw);
-    if (uri == null || uri.hasScheme || uri.hasAuthority) continue;
-    if (resolveReadmeImagePath(readmePath, uri).isEmpty) continue;
-    final bytes = await loadLocal(uri);
-    if (bytes == null || bytes.isEmpty) continue;
-    final extension = uri.path.toLowerCase().split('.').last;
-    final mime = switch (extension) {
-      'png' => 'image/png',
-      'jpg' || 'jpeg' => 'image/jpeg',
-      'gif' => 'image/gif',
-      'webp' => 'image/webp',
-      'svg' => 'image/svg+xml',
-      _ => 'application/octet-stream',
-    };
-    final dataUri = 'data:$mime;base64,${base64Encode(bytes)}';
-    final srcStart = match.start + match.group(0)!.indexOf(raw);
-    final srcEnd = srcStart + raw.length;
-    body = body.replaceRange(srcStart, srcEnd, dataUri);
+    var element = match.group(0)!;
+    final attribute = match.group(1)!.toLowerCase() == 'img' ? 'src' : 'srcset';
+    final attributeMatch = RegExp(
+      RegExp.escape(attribute) + r'''$attribute\s*=\s*("([^"]*)"|'([^']*)')''',
+      caseSensitive: false,
+    ).firstMatch(element);
+    if (attributeMatch == null) continue;
+    final raw = attributeMatch.group(2) ?? attributeMatch.group(3) ?? '';
+    final candidates = attribute == 'srcset' ? raw.split(',') : [raw];
+    final resolved = <String>[];
+    for (final candidate in candidates) {
+      final parts = candidate.trim().split(RegExp(r'\s+'));
+      final uri = parts.isEmpty ? null : Uri.tryParse(parts.first);
+      if (uri == null || uri.hasScheme || uri.hasAuthority) {
+        resolved.add(candidate);
+        continue;
+      }
+      if (resolveReadmeImagePath(readmePath, uri).isEmpty) {
+        resolved.add(candidate);
+        continue;
+      }
+      final bytes = await loadLocal(uri);
+      if (bytes == null || bytes.isEmpty) {
+        resolved.add(candidate);
+        continue;
+      }
+      final dataUri =
+          'data:${_imageMime(uri.path)};base64,${base64Encode(bytes)}';
+      resolved.add([dataUri, ...parts.skip(1)].join(' '));
+    }
+    final value = attribute == 'srcset' ? resolved.join(', ') : resolved.first;
+    element = element.replaceRange(
+      attributeMatch.start,
+      attributeMatch.end,
+      '$attribute="$value"',
+    );
+    output = output.replaceRange(match.start, match.end, element);
   }
-  return body;
+  return output;
+}
+
+String _attributeValue(String tag, String name) {
+  final match = RegExp(
+    RegExp.escape(name) + r'''$name\s*=\s*("([^"]*)"|'([^']*)')''',
+    caseSensitive: false,
+  ).firstMatch(tag);
+  return match?.group(2) ?? match?.group(3) ?? '';
+}
+
+String _imageMime(String path) {
+  final extension = path.toLowerCase().split('.').last;
+  return switch (extension) {
+    'png' => 'image/png',
+    'jpg' || 'jpeg' => 'image/jpeg',
+    'gif' => 'image/gif',
+    'webp' => 'image/webp',
+    'svg' => 'image/svg+xml',
+    _ => 'application/octet-stream',
+  };
 }
 
 String _readmeDocument(String body, {required bool dark}) {

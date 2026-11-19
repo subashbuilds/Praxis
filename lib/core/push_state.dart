@@ -103,6 +103,7 @@ class PushState {
     this.branch = 'main',
     this.baseline = const {},
     this.hashes = const {},
+    this.baseHashes = const {},
     this.pending = const [],
     this.synced = false,
   });
@@ -111,7 +112,15 @@ class PushState {
   final String repo;
   final String branch;
   final Map<String, String> baseline;
+
+  /// The remote tree at the last comparison, pull or push.
   final Map<String, String> hashes;
+
+  /// The merge base: the contents that were on this device when the branch was
+  /// last synced. A file changed only on GitHub is still equal to this base, so
+  /// it is pulled instead of being reported as a local edit. Empty means "no
+  /// merge base yet", and comparisons fall back to the remote tree.
+  final Map<String, String> baseHashes;
   final List<PendingCommit> pending;
 
   /// Whether this target has been compared with the remote branch. Needed for
@@ -137,6 +146,7 @@ class PushState {
     String? branch,
     Map<String, String>? baseline,
     Map<String, String>? hashes,
+    Map<String, String>? baseHashes,
     List<PendingCommit>? pending,
     bool? synced,
   }) =>
@@ -146,9 +156,15 @@ class PushState {
         branch: branch ?? this.branch,
         baseline: baseline ?? this.baseline,
         hashes: hashes ?? this.hashes,
+        baseHashes: baseHashes ?? this.baseHashes,
         pending: pending ?? this.pending,
         synced: synced ?? this.synced,
       );
+
+  /// Merge base for every path. Until a real base is stored (older saves),
+  /// comparing against the remote tree is the only useful answer.
+  Map<String, String> get comparisonBase =>
+      baseHashes.isEmpty ? hashes : baseHashes;
 
   PushState withPending(PendingCommit commit) =>
       copyWith(pending: [...pending, commit]);
@@ -179,6 +195,7 @@ class PushState {
       copyWith(
         baseline: Map<String, String>.from(files),
         hashes: Map<String, String>.from(hashes),
+        baseHashes: Map<String, String>.from(hashes),
         synced: true,
       );
 
@@ -188,6 +205,7 @@ class PushState {
         'branch': branch,
         'baseline': baseline,
         'hashes': hashes,
+        'baseHashes': baseHashes,
         'pending': pending.map((commit) => commit.toJson()).toList(),
         'synced': synced,
       };
@@ -195,12 +213,18 @@ class PushState {
   static PushState fromJson(Map<String, dynamic> json) {
     final baseline = _stringMap(json['baseline']);
     final hashes = _stringMap(json['hashes']);
+    // Saves written before the merge base was tracked compared against the
+    // remote, so the stored remote tree is the correct starting point.
+    final baseHashes = json.containsKey('baseHashes')
+        ? _stringMap(json['baseHashes'])
+        : hashes;
     return PushState(
       owner: json['owner'] as String? ?? '',
       repo: json['repo'] as String? ?? '',
       branch: json['branch'] as String? ?? 'main',
       baseline: baseline,
       hashes: hashes,
+      baseHashes: baseHashes,
       pending: [
         for (final item in (json['pending'] as List? ?? const []))
           if (item is Map)

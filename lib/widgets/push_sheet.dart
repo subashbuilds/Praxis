@@ -40,12 +40,14 @@ class _PushSheetState extends State<PushSheet> {
   bool _loadingRepos = false;
   bool _creatingBranch = false;
   bool _syncing = false;
+  bool _pullBusy = false;
   bool _loadedOnce = false;
   String? _error;
   String? _status;
   String? _messageError;
   String? _compareNote;
   List<RepoChange> _changes = const [];
+  List<String> _remoteDrift = const [];
   List<IntegrationAccount> _accounts = const [];
   List<GitHubRepo> _repos = const [];
   List<String> _branches = const [];
@@ -101,6 +103,19 @@ class _PushSheetState extends State<PushSheet> {
   int get _pendingForTarget =>
       _push.pendingFor(_ownerText, _repoText, _branchText);
   bool get _targetReady => _ownerText.isNotEmpty && _repoText.isNotEmpty;
+
+  /// GitHub-side edits that are not already part of a waiting commit.
+  List<String> get _pullable {
+    final pending = <String>{};
+    for (final commit in _push.pending) {
+      if (!commit.matches(_ownerText, _repoText, _branchText)) continue;
+      pending.addAll(commit.hashes.keys);
+      pending.addAll(commit.files.keys);
+    }
+    return _remoteDrift
+        .where((path) => !pending.contains(path))
+        .toList(growable: false);
+  }
 
   Future<void> _load() async {
     final state = _state;
@@ -315,6 +330,7 @@ class _PushSheetState extends State<PushSheet> {
                 ? 'Compared with $_ownerText/$_repoText · $_branchText. No local changes.'
                 : 'Compared with $_ownerText/$_repoText · $_branchText.';
       });
+      await _refreshDrift();
     } catch (error) {
       if (!mounted) return;
       if (_push.synced) {
@@ -339,6 +355,69 @@ class _PushSheetState extends State<PushSheet> {
       }
     } finally {
       if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  Future<void> _refreshDrift() async {
+    final state = _state;
+    if (state == null || !_targetReady) return;
+    try {
+      final drift = await state.remoteDriftFor(widget.project);
+      if (!mounted) return;
+      setState(() => _remoteDrift = drift);
+    } catch (_) {
+      // The local change list is still usable without the drift list.
+      if (mounted) setState(() => _remoteDrift = const []);
+    }
+  }
+
+  Future<void> _pull() async {
+    final state = _state;
+    final account = _account;
+    if (state == null || account == null || _pullBusy) return;
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Pull changes from GitHub?',
+      body: 'Files changed on GitHub are updated here. Local edits are kept, '
+          'and a file changed on both sides stops the pull instead of being '
+          'overwritten.',
+      confirmLabel: 'Pull',
+      icon: Icons.cloud_download_outlined,
+      details: [
+        ConfirmDetail('Repository', '$_ownerText/$_repoText'),
+        ConfirmDetail('Branch', _branchText),
+        ConfirmDetail('Files on GitHub', '${_pullable.length}'),
+      ],
+    );
+    if (!confirmed || !mounted) return;
+    setState(() {
+      _pullBusy = true;
+      _error = null;
+      _status = null;
+    });
+    try {
+      final result = await state.pullProject(
+        widget.project,
+        account,
+        owner: _ownerText,
+        repo: _repoText,
+        branch: _branchText,
+      );
+      final next = await state.pushStateFor(widget.project);
+      if (!mounted) return;
+      setState(() {
+        _push = next;
+        _remoteDrift = const [];
+        _status = 'Pulled from GitHub. ${result.updated} updated, '
+            '${result.added} added, ${result.deleted} deleted, '
+            '${result.keptLocal} kept local.';
+      });
+      await _refreshChanges();
+      await _refreshDrift();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _pullBusy = false);
     }
   }
 
@@ -536,6 +615,48 @@ class _PushSheetState extends State<PushSheet> {
     }
   }
 
+  Future<void> _revertFile(RepoChange change) async {
+    final state = _state;
+    if (state == null) return;
+    final added = change.status == RepoChangeStatus.added;
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: added ? 'Delete this new file?' : 'Revert this file?',
+      body: added
+          ? '${change.path} is not on the remote branch yet. Reverting removes '
+              'it from this device.'
+          : '${change.path} goes back to the version this device last synced. '
+              'Your edits to this file are lost.',
+      confirmLabel: added ? 'Delete file' : 'Revert file',
+      destructive: true,
+      icon: Icons.undo_rounded,
+      details: [ConfirmDetail('File', change.path)],
+    );
+    if (!confirmed || !mounted) return;
+    try {
+      final next = await state.revertFile(
+        widget.project,
+        account: _account,
+        owner: _ownerText,
+        repo: _repoText,
+        branch: _branchText,
+        path: change.path,
+      );
+      if (!mounted) return;
+      setState(() {
+        _push = next;
+        _error = null;
+        _status = added
+            ? 'Deleted ${change.path}.'
+            : 'Reverted ${change.path} to the last synced version.';
+      });
+      await _refreshChanges();
+      await _refreshDrift();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
+  }
+
   Future<void> _pickBranch() async {
     if (_loadingBranches) return;
     if (_branches.isEmpty) await _loadBranches();
@@ -709,6 +830,9 @@ class _PushSheetState extends State<PushSheet> {
             owner: _ownerText,
             repo: _repoText,
             branch: _branchText,
+            // Keep the whole merge base: adding only the committed paths would
+            // make every other tracked file look edited.
+            baseHashes: {..._push.comparisonBase, ...hashes},
           )
           .withBaseline(texts, hashes: hashes)
           .withPending(PendingCommit(
@@ -730,13 +854,14 @@ class _PushSheetState extends State<PushSheet> {
       if (!mounted) return;
       setState(() {
         _push = next;
-        _changes = const [];
         _selected.clear();
         _message.clear();
         _messageError = null;
         _status =
             'Committed ${commit.sha.substring(0, 7)}. Push when you are ready.';
       });
+      await _refreshChanges();
+      await _refreshDrift();
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -809,10 +934,11 @@ class _PushSheetState extends State<PushSheet> {
           .withBaseline(pushedTexts, hashes: pushedHashes)
           .withoutPending(pending.map((commit) => commit.sha))
           .copyWith(
-            owner: _ownerText,
-            repo: _repoText,
-            branch: _branchText,
-          );
+        owner: _ownerText,
+        repo: _repoText,
+        branch: _branchText,
+        hashes: {..._push.hashes, ...pushedHashes},
+      );
       await state.savePushState(widget.project, next);
       await state.updateProjectGit(
         state.projectById(widget.project.id),
@@ -823,10 +949,11 @@ class _PushSheetState extends State<PushSheet> {
       setState(() {
         _push = next;
         _pushed = true;
-        _changes = const [];
         _selected.clear();
         _status = 'Pushed to github.com/$_ownerText/$_repoText/$_branchText';
       });
+      await _refreshChanges();
+      await _refreshDrift();
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -1001,6 +1128,58 @@ class _PushSheetState extends State<PushSheet> {
                         ],
                       ),
                     ],
+                    if (_pullable.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(10, 6, 3, 6),
+                        decoration: BoxDecoration(
+                          color: Pal.sky.withOpacity(0.07),
+                          borderRadius: Rd.sm,
+                          border: Border.all(color: Pal.sky.withOpacity(0.28)),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.cloud_download_outlined,
+                                size: 15, color: Pal.sky),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '${_pullable.length} '
+                                '${_pullable.length == 1 ? 'file was' : 'files were'} '
+                                'changed on GitHub. Pull to bring '
+                                '${_pullable.length == 1 ? 'it' : 'them'} here.',
+                                style: Txt.meta.copyWith(
+                                  color: Pal.textMuted,
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _pullBusy ? null : _pull,
+                              style: TextButton.styleFrom(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: const Size(0, 28),
+                              ),
+                              child: _pullBusy
+                                  ? const SizedBox(
+                                      width: 12,
+                                      height: 12,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 1.5),
+                                    )
+                                  : Text(
+                                      'Pull',
+                                      style: Txt.meta.copyWith(
+                                        color: Pal.sky,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 14),
                     _PushField(
                       key: _messageKey,
@@ -1075,6 +1254,7 @@ class _PushSheetState extends State<PushSheet> {
                             }
                           }),
                           onOpen: () => _showDiff(change),
+                          onRevert: () => _revertFile(change),
                         ),
                         const SizedBox(height: 6),
                       ],
@@ -1424,12 +1604,14 @@ class _PushFileRow extends StatelessWidget {
     required this.selected,
     required this.onToggle,
     required this.onOpen,
+    required this.onRevert,
   });
 
   final RepoChange change;
   final bool selected;
   final VoidCallback onToggle;
   final VoidCallback onOpen;
+  final VoidCallback onRevert;
 
   @override
   Widget build(BuildContext context) {
@@ -1510,6 +1692,13 @@ class _PushFileRow extends StatelessWidget {
               ),
             ],
             const SizedBox(width: 2),
+            IconAction(
+              icon: Icons.undo_rounded,
+              tooltip: 'Revert ${change.path}',
+              size: 15,
+              padding: const EdgeInsets.all(6),
+              onTap: onRevert,
+            ),
             Icon(Icons.chevron_right_rounded, size: 15, color: Pal.textDim),
           ],
         ),

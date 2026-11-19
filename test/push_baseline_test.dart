@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:praxis/core/file_types.dart';
+import 'package:praxis/core/push_state.dart';
 import 'package:praxis/core/store.dart';
 import 'package:praxis/models.dart';
 import 'package:praxis/state/app_state.dart';
@@ -163,5 +164,52 @@ void main() {
     expect(dart.before, 'void main() {}\n');
     expect(dart.added, 1);
     expect(dart.removed, 1);
+  });
+
+  test('a file changed only on GitHub is not reported as a local change',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_push_remote_');
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject(
+      'remote-only',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    final fs = state.fsFor(project);
+    await fs.write('README.md', '# Base\n');
+    final baseHash = gitBlobSha(utf8.encode('# Base\n'));
+    final remoteHash = gitBlobSha(utf8.encode('# Edited on GitHub\n'));
+    await state.savePushState(
+      project,
+      PushState(
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+        hashes: {'README.md': remoteHash},
+        baseHashes: {'README.md': baseHash},
+        baseline: {'README.md': '# Base\n'},
+        synced: true,
+      ),
+    );
+
+    final changes = await state.changesFor(project);
+    expect(changes.map((change) => change.path), isNot(contains('README.md')));
+    expect(await state.remoteDriftFor(project), ['README.md']);
+
+    // A real local edit is still detected against the same merge base.
+    await fs.write('README.md', '# Local edit\n');
+    final edited = await state.changesFor(project);
+    final readme = edited.firstWhere((change) => change.path == 'README.md');
+    expect(readme.before, '# Base\n');
+    expect(readme.after, '# Local edit\n');
   });
 }

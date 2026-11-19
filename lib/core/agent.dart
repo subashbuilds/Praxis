@@ -688,6 +688,7 @@ class Agent {
     // the model to restart work that is already on disk.
     var mutated = skipActionFingerprints.isNotEmpty;
     var completionNudges = 0;
+    var actionNudges = 0;
     var limitNudges = 0;
     final log = roundLog;
     final task = taskId ?? 'task-${DateTime.now().microsecondsSinceEpoch}';
@@ -854,6 +855,25 @@ class Agent {
               'new file now. Read only the specific range you still need. If the '
               'request genuinely requires no file change, state the evidence, '
               'but otherwise make the requested change.',
+            ));
+            continue;
+          }
+
+          // Reasoning models sometimes describe the next step ("Let me read
+          // the SVG…") and end the turn without calling a tool. That is not an
+          // answer, so ask once for the action it just announced instead of
+          // leaving the task stopped until the user types "continue".
+          if (!reply.hitOutputLimit &&
+              !mutated &&
+              actionNudges < 2 &&
+              _announcesAction(text.isEmpty ? reply.thinking : text)) {
+            actionNudges++;
+            onDiscardLive?.call();
+            turns.add(AiTurn.assistant(reply.text, const []));
+            turns.add(const AiTurn.user(
+              'You described the next step but did not run it, and no file has '
+              'changed. Call the tool you just described now. Do not repeat the '
+              'plan or the explanation.',
             ));
             continue;
           }
@@ -1684,6 +1704,31 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         r'^\s*(continue|resume|keep going|go on)\b',
         caseSensitive: false,
       ).hasMatch(prompt.trim());
+
+  /// True when a reply reads like the model is about to do something rather
+  /// than reporting a finished result.
+  bool _announcesAction(String reply) {
+    final text = reply.trim();
+    if (text.isEmpty) return false;
+    final lower = text.toLowerCase();
+    final lead = lower.length > 80 ? lower.substring(0, 80) : lower;
+    const intent = [
+      'let me ',
+      "let's ",
+      'i will ',
+      "i'll ",
+      'i am going to ',
+      'i need to ',
+      'next, i',
+      'first, i',
+      'now i',
+    ];
+    if (!intent.any(lead.contains)) return false;
+    return RegExp(
+      r'\b(read|open|check|inspect|look|search|list|run|write|edit|update|'
+      r'verify|grep|find|fetch|test|build|fix)\b',
+    ).hasMatch(lead);
+  }
 
   /// Only patches that delete a file need permission. Ordinary edits and
   /// writes proceed without an approval round.

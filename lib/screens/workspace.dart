@@ -301,7 +301,11 @@ class _AgentStatusBar extends StatelessWidget {
       provider.model,
       projectId: project.id,
     );
-    final context = contextLabel(provider.model, used);
+    final context = contextLabel(
+      provider.model,
+      used,
+      limit: state.contextLimitFor(provider),
+    );
 
     return Container(
       decoration: BoxDecoration(
