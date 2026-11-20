@@ -61,6 +61,7 @@ typedef ConfirmPrompt = Future<bool> Function(
 typedef ProviderChoicePrompt = Future<ProviderChoice?> Function(
   ProviderConfig current,
   List<ProviderConfig> providers,
+  String reason,
 );
 
 class PullResult {
@@ -938,8 +939,12 @@ class AppState extends ChangeNotifier {
   Future<void> _persistChat(String projectId) async {
     final thread = _threads[projectId];
     if (thread == null) return;
-    final trimmed = thread.length > 140
-        ? [...thread.take(20), ...thread.skip(thread.length - 120)]
+    // Keep the whole transcript for normal projects. Dropping the middle of a
+    // long conversation made earlier messages look like they had vanished
+    // after a restart. Only an extreme transcript is compressed, and then the
+    // opening request and the recent tail are preserved.
+    final trimmed = thread.length > 2000
+        ? [...thread.take(40), ...thread.skip(thread.length - 1960)]
         : thread;
     await store.write(
       '$_kChatPrefix$projectId',
@@ -1126,12 +1131,25 @@ class AppState extends ChangeNotifier {
   }) async {
     // A paused task must continue from its checkpoint. Sending a fresh prompt
     // with only the recent transcript made the model restart the whole task.
-    if (attachments.isEmpty &&
-        !busy &&
-        hasResumableCheckpoint(projectId) &&
-        _looksLikeContinuePrompt(raw)) {
-      await resumeTask(projectId);
-      return;
+    if (attachments.isEmpty && !busy && _looksLikeContinuePrompt(raw)) {
+      if (hasResumableCheckpoint(projectId)) {
+        await resumeTask(projectId);
+        return;
+      }
+      // No checkpoint was kept, but the project already has this conversation.
+      // Send an explicit continuation brief so the model resumes instead of
+      // starting the task again from its first step.
+      final continued = _continuePrompt(projectId);
+      if (continued != null) {
+        threadOf(projectId).add(_entry(
+          role: ChatRole.note,
+          text: 'Continuing the previous task from the last unfinished step.',
+        ));
+        notifyListeners();
+        unawaited(_persistChat(projectId));
+        await _runPrompt(projectId, continued, recordUserMessage: false);
+        return;
+      }
     }
     await _runPrompt(projectId, raw, attachments: attachments);
   }
@@ -1557,6 +1575,58 @@ class AppState extends ChangeNotifier {
     return [...history.take(firstEnd), ...history.skip(tailStart)];
   }
 
+  /// Builds a continuation brief from the visible transcript. It names the
+  /// original request, the work already recorded, and the open checklist so a
+  /// "continue" after a stop picks up instead of restarting the task.
+  String? _continuePrompt(String projectId) {
+    final thread = threadOf(projectId);
+    final requests = thread
+        .where((entry) =>
+            entry.role == ChatRole.user && entry.text.trim().isNotEmpty)
+        .toList();
+    if (requests.isEmpty) return null;
+    final replies = thread
+        .where((entry) =>
+            entry.role == ChatRole.assistant && entry.text.trim().isNotEmpty)
+        .toList();
+    final changed = <String>{};
+    for (final entry in thread) {
+      if (entry.role == ChatRole.tool &&
+          entry.ok &&
+          const {
+            'write_file',
+            'write_files',
+            'edit_file',
+            'apply_patch',
+            'download_file',
+          }.contains(entry.tool) &&
+          entry.detail.trim().isNotEmpty) {
+        changed.add(entry.detail.trim());
+      }
+    }
+    final open = todosFor(projectId)
+        .where((todo) => !todo.done)
+        .map((todo) => '- ${todo.text}')
+        .toList();
+    final lastReply =
+        replies.isEmpty ? '' : replies.last.text.trim().replaceAll('\n', ' ');
+    return '''CONTINUE THE PREVIOUS TASK
+Do not restart this task. The transcript above is the same task and the project already contains the work done so far.
+
+Original request: ${requests.last.text.trim()}
+
+Last assistant message: ${lastReply.isEmpty ? '(none)' : lastReply}
+
+Files already changed in this task:
+${changed.isEmpty ? '- None recorded.' : changed.take(12).map((path) => '- $path').join('\n')}
+
+Open checklist steps:
+${open.isEmpty ? '- None recorded. Continue from the last unfinished step.' : open.take(12).join('\n')}
+
+Resume from the last unfinished step now. Re-read a file before editing it. Do not repeat a write or command that already succeeded, and do not begin the task again from the first step.'''
+        .trim();
+  }
+
   bool _looksLikeContinuePrompt(String raw) => RegExp(
         r'^\s*(?:please\s+)?(continue|resume|keep going|go on|carry on)\b',
         caseSensitive: false,
@@ -1712,6 +1782,15 @@ class AppState extends ChangeNotifier {
     final index = providers.indexWhere((item) => item.id == current.id);
     if (index >= 0) providers[index] = current;
 
+    // Show the provider error before the picker opens. Otherwise the picker
+    // hides why the run stopped until it is dismissed.
+    final reasonText = error.message.trim();
+    _addNote(
+      '${current.name}${current.keys.length > 1 ? ' (key ${current.keyIndex + 1})' : ''} '
+      '${error.isLimit ? 'is rate-limited or out of credit' : 'returned an error'}'
+      '${reasonText.isEmpty ? '.' : ': $reasonText'}',
+    );
+
     if (current.hasMoreKeys) {
       var nextIndex = -1;
       for (var i = current.keyIndex + 1; i < current.keys.length; i++) {
@@ -1756,7 +1835,8 @@ class AppState extends ChangeNotifier {
       final provider = candidates.first;
       choice = ProviderChoice(provider, provider.model);
     } else {
-      choice = await providerChoicePrompt?.call(current, candidates);
+      choice =
+          await providerChoicePrompt?.call(current, candidates, reasonText);
     }
     if (choice == null) return null;
 

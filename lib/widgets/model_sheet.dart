@@ -17,6 +17,7 @@ Future<ProviderChoice?> showProviderFallbackSheet(
   BuildContext context, {
   required ProviderConfig current,
   required List<ProviderConfig> providers,
+  String reason = '',
 }) {
   return showModalBottomSheet<ProviderChoice>(
     context: context,
@@ -26,6 +27,7 @@ Future<ProviderChoice?> showProviderFallbackSheet(
     builder: (_) => _ProviderFallbackSheet(
       current: current,
       providers: providers,
+      reason: reason,
     ),
   );
 }
@@ -251,10 +253,14 @@ class _ProviderFallbackSheet extends StatelessWidget {
   const _ProviderFallbackSheet({
     required this.current,
     required this.providers,
+    this.reason = '',
   });
 
   final ProviderConfig current;
   final List<ProviderConfig> providers;
+
+  /// The provider's own message, shown before the user chooses where to go.
+  final String reason;
 
   List<(ProviderConfig, String)> get _models {
     final result = <(ProviderConfig, String)>[];
@@ -299,6 +305,18 @@ class _ProviderFallbackSheet extends StatelessWidget {
                     'saved key. Pick a provider and model to continue this task.',
                     style: Txt.bodySoft,
                   ),
+                  if (reason.trim().isNotEmpty) ...[
+                    const SizedBox(height: Sp.x3),
+                    Panel(
+                      child: Text(
+                        reason.trim(),
+                        style: Txt.code.copyWith(
+                          fontSize: 11,
+                          color: Pal.ember,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

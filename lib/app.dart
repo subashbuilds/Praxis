@@ -43,13 +43,14 @@ class _PraxisAppState extends State<PraxisApp> {
         icon: Icons.bolt_outlined,
       );
     };
-    state.providerChoicePrompt = (current, providers) async {
+    state.providerChoicePrompt = (current, providers, reason) async {
       final context = _navigatorKey.currentContext;
       if (context == null) return null;
       return showProviderFallbackSheet(
         context,
         current: current,
         providers: providers,
+        reason: reason,
       );
     };
     state.confirmPrompt = (title, body, accept) async {

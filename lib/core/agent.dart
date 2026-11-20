@@ -552,7 +552,27 @@ class Agent {
   int _lastPromptTokens = 0;
   bool _toolPending = false;
 
+  /// A question, explanation or recommendation. Those turns are read-only:
+  /// the answer is the deliverable, so a file-changing tool is refused instead
+  /// of turning a question into an unrequested edit.
+  bool _answerOnly = false;
+  final Set<String> _changedPaths = {};
+  int _mutationCount = 0;
+  int _todoGateRejections = 0;
+  int _checklistNudges = 0;
+  int _summaryNudges = 0;
+
   bool get _planMode => mode == AgentMode.plan;
+
+  static const _mutableTools = {
+    'write_file',
+    'write_files',
+    'edit_file',
+    'apply_patch',
+    'download_file',
+    'install_skill',
+    'commit_and_push',
+  };
 
   static const _planBannedTools = {
     'apply_patch',
@@ -656,6 +676,9 @@ class Agent {
     required String prompt,
     bool Function()? isCancelled,
   }) async {
+    _answerOnly = !_planMode &&
+        _looksLikeExplanationRequest(prompt) &&
+        !_hasExplicitAction(prompt);
     final system = await _systemPrompt(
       prompt: prompt,
       firstTurn: history.isEmpty,
@@ -816,8 +839,8 @@ class Agent {
           final wantsChange = !_planMode &&
               (expectChanges ||
                   _looksLikeContinueRequest(prompt) ||
-                  (!_looksLikeExplanationRequest(prompt) &&
-                      _looksLikeChangeRequest(prompt)));
+                  (!_answerOnly && _looksLikeChangeRequest(prompt)));
+          final openTodos = _todos.where((todo) => !todo.done).toList();
 
           // A reasoning model can spend the entire output budget before it emits
           // its tool call. That is not a completed answer, so never print the
@@ -862,22 +885,76 @@ class Agent {
 
           // Reasoning models sometimes describe the next step ("Let me read
           // the SVG…") and end the turn without calling a tool. That is not an
-          // answer, so ask once for the action it just announced instead of
-          // leaving the task stopped until the user types "continue".
+          // answer, so ask for the action it just announced instead of leaving
+          // the task stopped until the user types "continue". This applies
+          // after edits too: "Let me write the workflow" following successful
+          // writes is still an unfinished task, not a result.
           if (!reply.hitOutputLimit &&
-              !mutated &&
-              actionNudges < 2 &&
-              !_looksLikeExplanationRequest(prompt) &&
+              actionNudges < 3 &&
+              !_answerOnly &&
+              wantsChange &&
               _announcesAction(text.isEmpty ? reply.thinking : text)) {
             actionNudges++;
             onDiscardLive?.call();
             turns.add(AiTurn.assistant(reply.text, const []));
-            turns.add(const AiTurn.user(
-              'You described the next step but did not run it, and no file has '
-              'changed. Call the tool you just described now. Do not repeat the '
-              'plan or the explanation.',
+            turns.add(AiTurn.user(
+              'You described the next step but did not run it. Call the tool '
+              'you just described now. Do not repeat the plan or the '
+              'explanation${mutated ? '; the work already done stays as it is' : ''}.',
             ));
             continue;
+          }
+
+          // The checklist is the task's contract. A turn cannot end while
+          // steps are open; the model must finish them or update the list.
+          if (!reply.hitOutputLimit &&
+              !_answerOnly &&
+              mutated &&
+              openTodos.isNotEmpty &&
+              _checklistNudges < 2) {
+            _checklistNudges++;
+            onDiscardLive?.call();
+            turns.add(AiTurn.assistant(reply.text, const []));
+            turns.add(AiTurn.user(
+              'Your checklist still has ${openTodos.length} unfinished '
+              '${openTodos.length == 1 ? 'step' : 'steps'}: '
+              '${openTodos.map((todo) => todo.text).join('; ')}. Continue '
+              'with the next tool call now. When a step is finished, call '
+              'update_todos and mark it completed. Do not end the turn while '
+              'checklist steps are open.',
+            ));
+            continue;
+          }
+
+          // A multi-file change ends with an account of what was asked and
+          // what changed, not a bare "Done".
+          if (!reply.hitOutputLimit &&
+              !_answerOnly &&
+              _changedPaths.length > 1 &&
+              openTodos.isEmpty &&
+              _summaryNudges < 1 &&
+              !_mentionsChangedPath(text, _changedPaths)) {
+            _summaryNudges++;
+            onDiscardLive?.call();
+            turns.add(AiTurn.assistant(reply.text, const []));
+            turns.add(const AiTurn.user(
+              'Finish with a short summary for the user: restate what they '
+              'asked for, list the exact files you changed, and say how you '
+              'verified the result. If a requested change is still missing, '
+              'make it now instead of claiming completion.',
+            ));
+            continue;
+          }
+
+          if (!_answerOnly && mutated && openTodos.isNotEmpty) {
+            outcome = AgentOutcome.error;
+            final message = 'The task stopped with ${openTodos.length} '
+                'checklist ${openTodos.length == 1 ? 'step' : 'steps'} '
+                'unfinished. Send “continue” to resume from the checklist '
+                'instead of starting over.';
+            onEvent(AgentEvent.error(message));
+            onPause?.call(message);
+            return;
           }
 
           if (!mutated && wantsChange) {
@@ -1014,17 +1091,10 @@ class Agent {
             continue;
           }
           if (result.failed) roundFailed = true;
-          if (!mutated &&
-              const {
-                'write_file',
-                'write_files',
-                'edit_file',
-                'apply_patch',
-                'download_file',
-                'install_skill',
-              }.contains(call.name) &&
-              !result.text.startsWith('Error')) {
+          if (!result.failed && _mutableTools.contains(call.name)) {
             mutated = true;
+            _mutationCount++;
+            _changedPaths.addAll(_pathsFor(call));
           }
           if (flags.loopGuards &&
               current.dailyLimit > 0 &&
@@ -1236,14 +1306,75 @@ class Agent {
   /// pushed into writing files nobody asked for.
   bool _looksLikeExplanationRequest(String prompt) {
     final text = prompt.trim().toLowerCase();
+    if (text.isEmpty) return false;
+    return text.endsWith('?') ||
+        RegExp(
+          r'^(?:(?:please|kindly)\s+)?(?:explain|describe|walk me through|'
+          r'tell me (?:about|how|why)|show me how|'
+          r'(?:can|could) you (?:explain|describe|clarify|summarize)|'
+          r"what(?:'s| is| are| does| do| would| should| happens)|"
+          r'how(?: does| do| is| are| can| would| should)|'
+          r'why(?: does| do| is| are| did| would)|'
+          r'where(?: is| does| do| are)|'
+          r'who(?: is| wrote| owns| maintains)|which\b|'
+          r'(?:recommend|suggest|advise|compare|differences? between|'
+          r'pros and cons|is it (?:possible|better|safe)|should i))\b',
+        ).hasMatch(text);
+  }
+
+  /// An explicit instruction to change something overrides answer-only mode:
+  /// "why does this fail? fix it" still authorizes the fix.
+  bool _hasExplicitAction(String prompt) {
+    final text = prompt.toLowerCase();
+    const verbs = r'(?:add|create|write|make|build|fix|update|change|edit|'
+        r'implement|refactor|remove|delete|rename|move|replace|install|'
+        r'uninstall|generate|set up|configure|commit|push|deploy|run|start)';
     return RegExp(
-      r'^(?:(?:please|kindly)\s+)?(?:explain|describe|walk me through|'
-      r'tell me (?:about|how|why)|show me how|'
-      r'(?:can|could) you explain|'
-      r"what(?:'s| is| are| does| do)|how(?: does| do| is| are| can)|"
-      r'why(?: does| do| is| are)|where(?: is| does| do)|'
-      r'who(?: is| wrote| owns| maintains))\b',
+      '(?:^|[.!?]\\s*|\\b(?:and|then|also|but|please|now)\\s+|'
+      '(?:can|could|would|will)\\s+you\\s+)$verbs\\b',
     ).hasMatch(text);
+  }
+
+  Set<String> _pathsFor(AiToolCall call) {
+    final paths = <String>{};
+    void add(Object? value) {
+      final path = '${value ?? ''}'.trim();
+      if (path.isNotEmpty) paths.add(path);
+    }
+
+    if (call.name == 'write_file' ||
+        call.name == 'edit_file' ||
+        call.name == 'download_file') {
+      add(call.arguments['path']);
+    } else if (call.name == 'write_files') {
+      final files = call.arguments['files'];
+      if (files is List) {
+        for (final file in files) {
+          if (file is Map) add(file['path']);
+        }
+      }
+    } else if (call.name == 'apply_patch') {
+      final patch = '${call.arguments['patch'] ?? ''}';
+      for (final match in RegExp(
+        r'^\*\*\* (?:Add|Update|Delete) File: (.+)$',
+        multiLine: true,
+      ).allMatches(patch)) {
+        add(match.group(1));
+      }
+    }
+    return paths;
+  }
+
+  bool _mentionsChangedPath(String text, Set<String> paths) {
+    final lower = text.toLowerCase();
+    for (final path in paths) {
+      final name = path.split('/').last.toLowerCase();
+      if (lower.contains(path.toLowerCase()) ||
+          (name.length >= 3 && lower.contains(name))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<String> _systemPrompt({
@@ -1329,6 +1460,13 @@ ${parallelTools ? '- Batch independent reads and searches in one response so the
   write_file has succeeded. If the request is already satisfied, state the
   evidence instead of claiming a change.
 - Do not claim to have changed a file unless a file-writing tool succeeded.
+- Never end a turn on an announcement (“Let me read…”, “Let me write…”). Call
+  that tool in the same turn; an announcement without a tool call leaves the
+  task stopped.
+${_answerOnly ? '- ANSWER-ONLY: the user asked a question or for an explanation or recommendation. The answer is the deliverable. Reply in prose only. Never call write_file, write_files, edit_file, apply_patch, download_file, install_skill, commit_and_push or update_todos; do not run a command that changes files; never claim a file changed. Reading and searching are allowed.' : '- TASK CHECKLIST: for a change touching more than one file, call update_todos first with 2-7 concrete steps; the first file-changing tool is refused until it exists. Mark a step in_progress when it starts and completed immediately after it finishes. Never end the turn while a step is open; finish it or rewrite the list. Every step must be completed before the final answer.'}
+- End every change task with a short summary: what the user asked for, the
+  exact files changed, and how you verified it. A bare “Done” is not a
+  finished response.
 
 Project files:
 $files
@@ -1686,6 +1824,40 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     String? validation,
   ) async {
     if (validation != null) return _ToolOutcome('Error: $validation');
+    if (_answerOnly) {
+      final writes = _mutableTools.contains(call.name) ||
+          call.name == 'update_todos' ||
+          (call.name == 'run_command' &&
+              _answerCommandWrites('${call.arguments['command'] ?? ''}')) ||
+          (call.name == 'run_commands' &&
+              call.arguments['commands'] is List &&
+              (call.arguments['commands'] as List)
+                  .any((command) => _answerCommandWrites('$command')));
+      if (writes) {
+        return const _ToolOutcome(
+          'Error: this request asks for an answer, not a change. No file was '
+          'written and no changing command was run. Reply with the answer in '
+          'prose; do not change files or start a task.',
+        );
+      }
+    }
+    // A multi-step change must have a checklist before it starts. One rejection
+    // is enough to make the model create it; a second miss is not blocked, so a
+    // provider that ignores the instruction cannot deadlock the task.
+    if (!_planMode &&
+        !_answerOnly &&
+        _mutableTools.contains(call.name) &&
+        (_todos.isEmpty || _todos.every((todo) => todo.done)) &&
+        _todoGateRejections < 1 &&
+        (call.name == 'write_files' ||
+            call.name == 'apply_patch' ||
+            _mutationCount > 0)) {
+      _todoGateRejections++;
+      return const _ToolOutcome(
+        'Error: this is a multi-step change with no checklist. Call '
+        'update_todos first with 2-7 concrete steps, then repeat this change.',
+      );
+    }
     if (_checkpointGuardedTools.contains(call.name)) {
       final fingerprint =
           TaskCheckpoint.actionFingerprint(call.name, call.arguments);
@@ -1701,12 +1873,18 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
 
   String _todoContext() {
     if (_todos.isEmpty) {
-      return 'Task checklist: none yet. For multi-step work, call update_todos '
-          'with 2-7 concrete steps before you start.';
+      return 'Task checklist: none yet. For any change touching more than one '
+          'file, your first action must be update_todos with 2-7 concrete '
+          'steps. The first file-changing tool is refused until it exists.';
+    }
+    if (_todos.every((todo) => todo.done)) {
+      return 'Task checklist: every step is completed. Replace it with '
+          'update_todos when a new multi-file task starts.';
     }
     final done = _todos.where((todo) => todo.done).length;
     return 'Current task checklist ($done/${_todos.length} complete). Update it '
-        'with update_todos as work progresses; replace it when the task changes.\n'
+        'with update_todos as work progresses; replace it when the task changes. '
+        'Do not finish while a step is open.\n'
         '${_renderTodos()}';
   }
 
@@ -1781,6 +1959,49 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     }
     return deletions.any(command.startsWith) ||
         deletions.any((item) => command.contains(' $item'));
+  }
+
+  /// Commands that create or change project files. Read-only inspection and
+  /// builds stay allowed while answering a question.
+  bool _answerCommandWrites(String raw) {
+    final command = raw.toLowerCase();
+    if (command.contains('>')) return true;
+    const markers = [
+      ' rm ',
+      'rm -',
+      ' mv ',
+      'mv -',
+      ' cp ',
+      'cp -',
+      'touch ',
+      'mkdir ',
+      'rmdir ',
+      'truncate ',
+      'tee ',
+      'sed -i',
+      'chmod ',
+      'chown ',
+      'git add',
+      'git commit',
+      'git push',
+      'git pull',
+      'git merge',
+      'git reset',
+      'git checkout',
+      'git switch',
+      'git clone',
+      'git clean',
+      'npm install',
+      'npm i ',
+      'pip install',
+      'pip3 install',
+      'apk add',
+      'apk del',
+      'curl -o',
+      'wget ',
+    ];
+    final padded = ' $command';
+    return markers.any(padded.contains);
   }
 
   bool _commandChangesFiles(String raw) {
