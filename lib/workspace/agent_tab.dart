@@ -78,6 +78,8 @@ class _AgentTabState extends State<AgentTab> {
   int _lastLiveSignal = 0;
   bool _stickToBottom = true;
   bool _showJumpToBottom = false;
+  final _openThinking = <String>{};
+  bool _liveThinkingOpen = false;
   bool _draftRestored = false;
   bool _todosLoaded = false;
   bool _loadingFollowUps = false;
@@ -253,7 +255,10 @@ class _AgentTabState extends State<AgentTab> {
     final files = List<String>.from(_attachments);
     _composer.clear();
     _state?.setPromptDraft(widget.project.id, '');
-    setState(_attachments.clear);
+    setState(() {
+      _attachments.clear();
+      _liveThinkingOpen = false;
+    });
     _scrollToEnd(force: true);
     await AppScope.of(context)
         .send(widget.project.id, text, attachments: files);
@@ -273,6 +278,7 @@ class _AgentTabState extends State<AgentTab> {
     }
 
     final showLive = state.busy || state.hasLiveReply;
+    final autoOpenThinkingId = _autoOpenThinkingId(thread);
     final todos = state.todosFor(widget.project.id);
     return Column(
       children: [
@@ -301,11 +307,28 @@ class _AgentTabState extends State<AgentTab> {
                                 thinking: state.liveThinking,
                                 tools: state.liveTools,
                                 busy: state.busy,
+                                thinkingOpen: _liveThinkingOpen,
+                                onToggleThinking: () => setState(
+                                  () => _liveThinkingOpen = !_liveThinkingOpen,
+                                ),
                               );
                             }
+                            final entry = thread[index];
                             return _EntryView(
-                              entry: thread[index],
+                              entry: entry,
                               project: widget.project,
+                              thinkingOpen: _openThinking.contains(entry.id) ||
+                                  autoOpenThinkingId == entry.id,
+                              onToggleThinking: () {
+                                setState(() {
+                                  // Manual control wins over carrying the
+                                  // live view into the committed entry.
+                                  _liveThinkingOpen = false;
+                                  if (!_openThinking.remove(entry.id)) {
+                                    _openThinking.add(entry.id);
+                                  }
+                                });
+                              },
                             );
                           },
                         ),
@@ -357,6 +380,25 @@ class _AgentTabState extends State<AgentTab> {
         ),
       ],
     );
+  }
+
+  /// A round's live reasoning becomes a normal transcript entry when the
+  /// round ends. If the live pill was open, keep that same reasoning open so
+  /// reading it is not interrupted by the next pill or thinking update.
+  String? _autoOpenThinkingId(List<ChatEntry> thread) {
+    if (!_liveThinkingOpen) return null;
+    for (var index = thread.length - 1; index >= 0; index--) {
+      final entry = thread[index];
+      if (entry.role == ChatRole.user) return null;
+      if (entry.role == ChatRole.assistant &&
+          entry.thinking.trim().isNotEmpty) {
+        // Remember it too, so a later round cannot collapse the reasoning the
+        // user was reading when it becomes a normal transcript entry.
+        _openThinking.add(entry.id);
+        return entry.id;
+      }
+    }
+    return null;
   }
 
   Future<void> _showTodos(List<AgentTodo> todos) async {
@@ -633,10 +675,17 @@ class _EmptyAgent extends StatelessWidget {
 }
 
 class _EntryView extends StatelessWidget {
-  const _EntryView({required this.entry, required this.project});
+  const _EntryView({
+    required this.entry,
+    required this.project,
+    required this.thinkingOpen,
+    required this.onToggleThinking,
+  });
 
   final ChatEntry entry;
   final Project project;
+  final bool thinkingOpen;
+  final VoidCallback onToggleThinking;
 
   @override
   Widget build(BuildContext context) {
@@ -652,7 +701,11 @@ class _EntryView extends StatelessWidget {
               const _AgentLabel(),
               if (entry.thinking.trim().isNotEmpty) ...[
                 const SizedBox(height: 7),
-                _ThinkingPill(text: entry.thinking),
+                _ThinkingPill(
+                  text: entry.thinking,
+                  open: thinkingOpen,
+                  onToggle: onToggleThinking,
+                ),
               ],
               if (entry.text.trim().isNotEmpty) ...[
                 const SizedBox(height: 6),
@@ -809,12 +862,16 @@ class _LiveReply extends StatelessWidget {
     required this.thinking,
     required this.tools,
     required this.busy,
+    required this.thinkingOpen,
+    required this.onToggleThinking,
   });
 
   final String text;
   final String thinking;
   final List<ToolDraft> tools;
   final bool busy;
+  final bool thinkingOpen;
+  final VoidCallback onToggleThinking;
 
   @override
   Widget build(BuildContext context) {
@@ -829,7 +886,12 @@ class _LiveReply extends StatelessWidget {
           const _AgentLabel(),
           if (thinking.isNotEmpty) ...[
             const SizedBox(height: 7),
-            _ThinkingPill(text: thinking, live: true),
+            _ThinkingPill(
+              text: thinking,
+              live: true,
+              open: thinkingOpen,
+              onToggle: onToggleThinking,
+            ),
           ],
           if (text.isNotEmpty) ...[
             const SizedBox(height: 6),
@@ -1082,17 +1144,63 @@ class _AttachmentPreview extends StatelessWidget {
 }
 
 class _ThinkingPill extends StatefulWidget {
-  const _ThinkingPill({required this.text, this.live = false});
+  const _ThinkingPill({
+    required this.text,
+    required this.open,
+    required this.onToggle,
+    this.live = false,
+  });
 
   final String text;
   final bool live;
+  final bool open;
+  final VoidCallback onToggle;
 
   @override
   State<_ThinkingPill> createState() => _ThinkingPillState();
 }
 
 class _ThinkingPillState extends State<_ThinkingPill> {
-  bool _open = false;
+  final _scroll = ScrollController();
+  bool _stickToBottom = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ThinkingPill oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.open && !oldWidget.open) _stickToBottom = true;
+    if (widget.open &&
+        (!oldWidget.open || oldWidget.text.length != widget.text.length)) {
+      _scrollToEnd();
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final nearBottom =
+        _scroll.position.maxScrollExtent - _scroll.position.pixels <= 40;
+    _stickToBottom = nearBottom;
+  }
+
+  void _scrollToEnd() {
+    if (!_stickToBottom) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1100,7 +1208,7 @@ class _ThinkingPillState extends State<_ThinkingPill> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         GestureDetector(
-          onTap: () => setState(() => _open = !_open),
+          onTap: widget.onToggle,
           behavior: HitTestBehavior.opaque,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1129,7 +1237,7 @@ class _ThinkingPillState extends State<_ThinkingPill> {
                 ),
                 const SizedBox(width: 5),
                 Icon(
-                  _open
+                  widget.open
                       ? Icons.keyboard_arrow_up_rounded
                       : Icons.keyboard_arrow_down_rounded,
                   size: 15,
@@ -1139,28 +1247,25 @@ class _ThinkingPillState extends State<_ThinkingPill> {
             ),
           ),
         ),
-        if (_open)
-          GestureDetector(
-            onTap: () => setState(() => _open = false),
-            behavior: HitTestBehavior.opaque,
-            child: Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(top: 6),
-              padding: const EdgeInsets.all(10),
-              constraints: const BoxConstraints(maxHeight: 300),
-              decoration: BoxDecoration(
-                color: Pal.ghBg,
-                borderRadius: Rd.sm,
-                border: Border.all(color: Pal.ghLine),
-              ),
-              child: SingleChildScrollView(
-                child: Text(
-                  widget.text,
-                  style: Txt.code.copyWith(
-                    fontSize: 11,
-                    height: 1.55,
-                    color: Pal.ghMuted,
-                  ),
+        if (widget.open)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.all(10),
+            constraints: const BoxConstraints(maxHeight: 300),
+            decoration: BoxDecoration(
+              color: Pal.ghBg,
+              borderRadius: Rd.sm,
+              border: Border.all(color: Pal.ghLine),
+            ),
+            child: SingleChildScrollView(
+              controller: _scroll,
+              child: Text(
+                widget.text,
+                style: Txt.code.copyWith(
+                  fontSize: 11,
+                  height: 1.55,
+                  color: Pal.ghMuted,
                 ),
               ),
             ),

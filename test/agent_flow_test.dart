@@ -165,6 +165,82 @@ void main() {
     expect(events.last.text, contains('README.md'));
   });
 
+  test(
+      'a change request answered without an edit completes instead of erroring',
+      () async {
+    var calls = 0;
+    final events = <AgentEvent>[];
+    String? paused;
+    final client = MockClient((request) async {
+      calls++;
+      return textReply(
+          'No change is needed: the patch already handles every import. I '
+          'verified each module against the patch list without a compiler.');
+    });
+
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+      onPause: (message) => paused = message,
+    ).run(
+        history: const [],
+        prompt: 'fix the patch if anything is wrong, otherwise verify it');
+
+    expect(calls, 1);
+    expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
+    expect(events.last.kind, AgentEventKind.text);
+    expect(events.last.text, contains('No change is needed'));
+    expect(paused, isNull);
+  });
+
+  test('a multi-file edit gets one summary nudge when no file is named',
+      () async {
+    var calls = 0;
+    final events = <AgentEvent>[];
+    final client = MockClient((request) async {
+      calls++;
+      return switch (calls) {
+        1 => callReply('t1', 'update_todos', {
+            'todos': [
+              {'text': 'Create a.txt', 'status': 'in_progress'},
+              {'text': 'Create b.txt', 'status': 'pending'},
+            ],
+          }),
+        2 => callReply('w1', 'write_files', {
+            'files': [
+              {'path': 'a.txt', 'content': 'alpha'},
+              {'path': 'b.txt', 'content': 'beta'},
+            ],
+          }),
+        3 => callReply('t2', 'update_todos', {
+            'todos': [
+              {'text': 'Create a.txt', 'status': 'completed'},
+              {'text': 'Create b.txt', 'status': 'completed'},
+            ],
+          }),
+        4 => textReply('Done.'),
+        _ => textReply('Changed a.txt and b.txt, and verified both files.'),
+      };
+    });
+
+    await Agent(
+      client: AiClient(client: client),
+      provider: provider(),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+    ).run(history: const [], prompt: 'create a.txt and b.txt');
+
+    expect(calls, 5);
+    expect(events.last.kind, AgentEventKind.text);
+    expect(events.last.text, contains('a.txt'));
+  });
+
   test('a multi-file change creates a checklist before writing', () async {
     var calls = 0;
     List<AgentTodo>? updated;

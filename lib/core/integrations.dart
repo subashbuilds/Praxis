@@ -1300,6 +1300,7 @@ class CloudflarePagesClient {
     required String project,
     required String deploymentId,
     required Iterable<ProjectEnvEntry> secrets,
+    int maxChars = 40000,
   }) async {
     final (accountId, _) = await _account();
     final response = await _client
@@ -1332,7 +1333,7 @@ class CloudflarePagesClient {
     }
     // Mask first, then truncate. The returned log is safe to pass to the
     // agent, the UI, an exception, or the persisted deploy record.
-    return maskSecretLog(lines.join('\n'), secrets);
+    return maskSecretLog(lines.join('\n'), secrets, maxChars: maxChars);
   }
 
   Future<String> latestDeploymentId(String project) async {

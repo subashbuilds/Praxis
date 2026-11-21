@@ -315,8 +315,9 @@ void main() {
     expect(state.projectsByActivity.first.id, older.id);
   });
 
-  test('a final answer with no mutation gets one corrective round', () async {
-    final temp = await Directory.systemTemp.createTemp('praxis_nudge_');
+  test('a final answer with no mutation completes without a forced edit',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_no_edit_');
     addTearDown(() => temp.delete(recursive: true));
     final fs = ProjectFs(temp);
     await fs.write('README.md', '# Project');
@@ -324,59 +325,14 @@ void main() {
     var calls = 0;
     final client = MockClient((request) async {
       calls++;
-      if (calls == 1) {
-        return http.Response(
-          jsonEncode({
-            'choices': [
-              {
-                'message': {
-                  'role': 'assistant',
-                  'content': 'Done — no changes were needed.',
-                },
-              },
-            ],
-          }),
-          200,
-          headers: {'content-type': 'application/json'},
-        );
-      }
-      if (calls == 2) {
-        return http.Response(
-          jsonEncode({
-            'choices': [
-              {
-                'message': {
-                  'role': 'assistant',
-                  'content': '',
-                  'tool_calls': [
-                    {
-                      'id': 'edit_1',
-                      'type': 'function',
-                      'function': {
-                        'name': 'edit_file',
-                        'arguments': jsonEncode({
-                          'path': 'README.md',
-                          'old_text': '# Project',
-                          'new_text': '# Project\n\nUpdated.',
-                        }),
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          }),
-          200,
-          headers: {'content-type': 'application/json'},
-        );
-      }
       return http.Response(
         jsonEncode({
           'choices': [
             {
               'message': {
                 'role': 'assistant',
-                'content': 'Updated the README.',
+                'content': 'No changes were needed: README.md is already '
+                    'correct and the request is satisfied.',
               },
             },
           ],
@@ -387,6 +343,7 @@ void main() {
     });
 
     var discarded = 0;
+    String? paused;
     final events = <AgentEvent>[];
     await Agent(
       client: AiClient(client: client),
@@ -404,18 +361,16 @@ void main() {
       skills: const [],
       onEvent: events.add,
       onDiscardLive: () => discarded++,
+      onPause: (message) => paused = message,
     ).run(history: const [], prompt: 'update the README');
 
-    expect(calls, 3);
-    expect(discarded, 1);
-    expect(await fs.read('README.md'), contains('Updated.'));
-    expect(events.last.text, contains('Updated the README'));
-    expect(
-      events.any((event) =>
-          event.kind == AgentEventKind.text &&
-          event.text.contains('no changes were needed')),
-      isFalse,
-    );
+    expect(calls, 1);
+    expect(discarded, 0);
+    expect(await fs.read('README.md'), '# Project');
+    expect(events.last.kind, AgentEventKind.text);
+    expect(events.last.text, contains('No changes were needed'));
+    expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
+    expect(paused, isNull);
   });
 
   test('an explanation question is not pushed into editing files', () async {

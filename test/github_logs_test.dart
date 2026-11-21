@@ -89,4 +89,77 @@ void main() {
     expect(result, contains('compile failed: missing dependency'));
     expect(result, isNot(contains('Pass the numeric')));
   });
+
+  test('a long GitHub job log is readable from end to start with offsets',
+      () async {
+    final fullLog = StringBuffer('FIRST-LINE-OF-BUILD\n');
+    for (var index = 0; index < 1500; index++) {
+      fullLog.writeln('build line $index ${'x' * 24}');
+    }
+    fullLog.write('REAL-FAILURE: missing dependency\n');
+    expect(fullLog.length, greaterThan(48000));
+
+    final client = MockClient((request) async {
+      final path = request.url.path;
+      if (path.endsWith('/actions/runs/9/jobs')) {
+        return jsonResponse({
+          'jobs': [
+            {
+              'id': 77,
+              'name': 'android',
+              'status': 'completed',
+              'conclusion': 'failure',
+              'steps': [
+                {'name': 'Assemble', 'conclusion': 'failure'},
+              ],
+            },
+          ],
+        });
+      }
+      if (path.endsWith('/actions/jobs/77/logs')) {
+        return http.Response(fullLog.toString(), 200);
+      }
+      return http.Response('not found', 404);
+    });
+    final root = await tempRoot();
+    final state = AppState(
+      root: root,
+      store: MemoryStore(),
+      httpClient: client,
+      seedWelcome: false,
+    );
+    addTearDown(state.dispose);
+    state.integrations = const Integrations(
+      accounts: [
+        IntegrationAccount(
+          id: 'gh-1',
+          kind: IntegrationKind.github,
+          label: 'GitHub',
+          username: 'owner',
+          token: 'token',
+        ),
+      ],
+      activeGithubId: 'gh-1',
+    );
+
+    final end = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'owner/repo/actions/runs/9',
+    );
+    expect(end, contains('REAL-FAILURE'));
+    expect(end, contains('Earlier log: call with offset 0.'));
+    expect(end, isNot(contains('FIRST-LINE-OF-BUILD')));
+
+    final start = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'owner/repo/actions/runs/9',
+      offset: 0,
+    );
+    expect(start, contains('FIRST-LINE-OF-BUILD'));
+    expect(start, contains('[log continues at offset 16000]'));
+  });
 }

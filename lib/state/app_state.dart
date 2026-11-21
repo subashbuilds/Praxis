@@ -1254,8 +1254,8 @@ class AppState extends ChangeNotifier {
       activeFile: _activeFiles[projectId],
       skills: skills,
       mode: agentMode,
-      onIntegrationQuery: (service, action, target) =>
-          _integrationStatus(project, service, action, target),
+      onIntegrationQuery: (service, action, target, offset) =>
+          _integrationStatus(project, service, action, target, offset: offset),
       onPause: (message) {
         pauseMessage = message;
         checkpoint = checkpoint.copyWith(
@@ -3299,14 +3299,16 @@ query CurrentUser {
     CloudflarePagesClient pages,
     String projectName,
     String deploymentId,
-    Iterable<ProjectEnvEntry> entries,
-  ) async {
+    Iterable<ProjectEnvEntry> entries, {
+    int maxChars = 40000,
+  }) async {
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
         final logs = await pages.deploymentLogs(
           project: projectName,
           deploymentId: deploymentId,
           secrets: entries,
+          maxChars: maxChars,
         );
         if (logs.trim().isNotEmpty) return logs;
       } catch (_) {
@@ -3613,9 +3615,36 @@ query CurrentUser {
     Project project,
     String service,
     String action,
-    String target,
-  ) =>
-      _integrationStatus(project, service, action, target);
+    String target, {
+    int offset = -1,
+  }) =>
+      _integrationStatus(project, service, action, target, offset: offset);
+
+  /// Returns a readable slice of a long log without hiding the rest. With no
+  /// offset the failure end is returned because builds fail at the end; an
+  /// explicit offset can page through the entire masked log.
+  String _logSlice(String masked, int offset, {int maxChars = 24000}) {
+    final total = masked.length;
+    if (total == 0) return '';
+    var start = offset;
+    if (start < 0) start = total > maxChars ? total - maxChars : 0;
+    if (start > total) start = total;
+    var end = start + maxChars;
+    if (end > total) end = total;
+    final buffer = StringBuffer();
+    if (start > 0 || end < total) {
+      buffer.write('[log characters $start-$end of $total]');
+      if (start > 0) {
+        buffer.write(' Earlier log: call with offset 0.');
+      }
+      buffer.writeln();
+    }
+    buffer.write(masked.substring(start, end));
+    if (end < total) {
+      buffer.write('\n[log continues at offset $end]');
+    }
+    return buffer.toString();
+  }
 
   /// Reads deployment and workflow data from connected accounts for the
   /// agent. Credentials never appear in the returned text.
@@ -3623,8 +3652,9 @@ query CurrentUser {
     Project project,
     String service,
     String action,
-    String target,
-  ) async {
+    String target, {
+    int offset = -1,
+  }) async {
     try {
       switch (service) {
         case 'github':
@@ -3675,7 +3705,8 @@ query CurrentUser {
             }
             final jobsResponse = await httpClient.get(
               Uri.parse(
-                  'https://api.github.com/repos/$repo/actions/runs/$runId/jobs'),
+                  'https://api.github.com/repos/$repo/actions/runs/$runId/jobs'
+                  '?per_page=100'),
               headers: headers,
             );
             if (jobsResponse.statusCode == 404) {
@@ -3727,19 +3758,26 @@ query CurrentUser {
                     'https://api.github.com/repos/$repo/actions/jobs/$jobId/logs'),
                 headers: headers,
               );
-              if (logResponse.statusCode == 200 &&
-                  logResponse.body.trim().isNotEmpty) {
-                final masked = maskSecretLog(
-                  logResponse.body,
-                  entries,
-                  maxChars: 6000,
-                );
-                logs.write(
-                    '\n\nLogs for ${job['name']} (job $jobId):\n$masked');
+              final rawLog = logResponse.body;
+              if (logResponse.statusCode == 200 && rawLog.trim().isNotEmpty) {
+                // Keep the whole masked log available so an offset slice can
+                // reach the beginning as well as the failure at the end.
+                final masked = maskSecretLog(rawLog, entries, maxChars: 0);
+                logs.write('\n\nLogs for ${job['name']} (job $jobId, '
+                    '${masked.length} characters):\n'
+                    '${_logSlice(masked, offset, maxChars: 16000)}');
+              } else if (logResponse.statusCode == 200) {
+                logs.write('\n\nLogs for ${job['name']} are empty. The job may '
+                    'still be running.');
               } else if (logResponse.statusCode == 404 ||
                   logResponse.statusCode == 410) {
-                logs.write('\n\nLogs for ${job['name']} are not available yet '
-                    '(HTTP ${logResponse.statusCode}).');
+                logs.write('\n\nLogs for ${job['name']} are not available '
+                    '(HTTP ${logResponse.statusCode}). GitHub keeps job logs '
+                    'for a limited time; the run may be old or private.');
+              } else {
+                logs.write('\n\nLogs for ${job['name']} returned HTTP '
+                    '${logResponse.statusCode}. Check that the GitHub token '
+                    'still has Actions read access.');
               }
             }
             return 'GitHub Actions run $runId in $repo:\n$summary'
@@ -3799,14 +3837,15 @@ query CurrentUser {
               project: projectName,
               deploymentId: deploymentId,
               secrets: entries,
+              maxChars: 0,
             );
             if (logs.trim().isEmpty) {
               return 'Cloudflare returned no build log for $projectName/'
                   '$deploymentId yet.';
             }
-            // The client already masked before its cutoff. Mask again here so
-            // the agent's smaller excerpt also truncates only masked text.
-            final excerpt = maskSecretLog(logs, entries, maxChars: 12000);
+            // The client already masked the entire log. Slice after masking
+            // so no secret is ever split by a character cutoff.
+            final excerpt = _logSlice(logs, offset, maxChars: 24000);
             return 'Cloudflare Pages build logs for $projectName/$deploymentId:'
                 '\n$excerpt';
           }
@@ -3854,10 +3893,75 @@ query CurrentUser {
             return 'Vercel is not connected. Ask the user to connect it in '
                 'Integrations.';
           }
+          final headers = {'Authorization': 'Bearer ${account.token}'};
+          if (action == 'logs') {
+            var deploymentId = target.trim();
+            if (deploymentId.isEmpty) {
+              final latest = await httpClient.get(
+                Uri.parse('https://api.vercel.com/v6/deployments?limit=1'),
+                headers: headers,
+              );
+              if (latest.statusCode != 200) {
+                return 'Vercel returned ${latest.statusCode} while looking '
+                    'for the latest deployment.';
+              }
+              final latestBody = jsonDecode(latest.body);
+              final deployments =
+                  latestBody is Map ? latestBody['deployments'] : null;
+              if (deployments is! List || deployments.isEmpty) {
+                return 'No Vercel deployments were found. Pass a deployment '
+                    'id or URL as target.';
+              }
+              final first = deployments.whereType<Map>().isEmpty
+                  ? null
+                  : deployments.whereType<Map>().first;
+              deploymentId = '${first?['id'] ?? ''}'.trim();
+            }
+            if (deploymentId.isEmpty) {
+              return 'No Vercel deployment id was found. Pass one as target.';
+            }
+            final response = await httpClient.get(
+              Uri.parse('https://api.vercel.com/v3/deployments/'
+                  '${Uri.encodeComponent(deploymentId)}/events'
+                  '?direction=forward&limit=-1&builds=1'),
+              headers: headers,
+            );
+            if (response.statusCode == 401 || response.statusCode == 403) {
+              return 'Vercel rejected the saved access token. Ask the user to '
+                  'reconnect it in Integrations.';
+            }
+            if (response.statusCode != 200) {
+              return 'Vercel returned ${response.statusCode} for deployment '
+                  '$deploymentId.';
+            }
+            final decoded = jsonDecode(response.body);
+            final events =
+                decoded is List ? decoded.whereType<Map>().toList() : <Map>[];
+            if (events.isEmpty) {
+              return 'Vercel returned no build events for $deploymentId yet.';
+            }
+            final lines = <String>[];
+            for (final event in events) {
+              final payload = event['payload'];
+              final text = payload is Map
+                  ? '${payload['text'] ?? ''}'.trimRight()
+                  : '${event['text'] ?? ''}'.trimRight();
+              if (text.trim().isNotEmpty) lines.add(text);
+            }
+            final entries = await environmentFor(project);
+            final masked =
+                maskSecretLog(lines.join('\n'), entries, maxChars: 0);
+            if (masked.trim().isEmpty) {
+              return 'Vercel returned no readable build output for '
+                  '$deploymentId yet.';
+            }
+            return 'Vercel build logs for $deploymentId:\n'
+                '${_logSlice(masked, offset, maxChars: 24000)}';
+          }
           final response = await httpClient.get(
             Uri.parse(
                 'https://api.vercel.com/v6/deployments?limit=8${target.isEmpty ? '' : '&projectId=${Uri.encodeQueryComponent(target)}'}'),
-            headers: {'Authorization': 'Bearer ${account.token}'},
+            headers: headers,
           );
           if (response.statusCode != 200) {
             return 'Vercel returned ${response.statusCode}.';

@@ -180,4 +180,77 @@ void main() {
     );
     expect(expoProjects, contains('My App'));
   });
+
+  test('the agent can read a full Vercel build log in offset slices', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_vercel_logs_');
+    addTearDown(() => temp.delete(recursive: true));
+    final events = <Map<String, Object?>>[
+      {
+        'type': 'command',
+        'payload': {'text': 'FIRST-VERCEL-LINE'},
+      },
+      for (var index = 0; index < 1500; index++)
+        {
+          'type': 'command',
+          'payload': {'text': 'vercel line $index ${'y' * 24}'},
+        },
+      {
+        'type': 'command',
+        'payload': {'text': 'VERCEL BUILD FAILED'},
+      },
+    ];
+    final client = MockClient((request) async {
+      if (request.url.host == 'api.vercel.com') {
+        expect(request.url.path, contains('/v3/deployments/dpl_1/events'));
+        return http.Response(
+          jsonEncode(events),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('not found', 404);
+    });
+
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+      httpClient: client,
+    );
+    addTearDown(state.dispose);
+    await state.init();
+    final project = await state.createProject('vercel-logs', ProjectKind.blank);
+    await state.saveIntegrations(const Integrations(
+      accounts: [
+        IntegrationAccount(
+          id: 'vercel-1',
+          kind: IntegrationKind.vercel,
+          label: 'Vercel',
+          username: 'owner',
+          token: 'vercel-test',
+        ),
+      ],
+      activeVercelId: 'vercel-1',
+    ));
+
+    final end = await state.integrationStatusForAgent(
+      project,
+      'vercel',
+      'logs',
+      'dpl_1',
+    );
+    expect(end, contains('VERCEL BUILD FAILED'));
+    expect(end, contains('Earlier log: call with offset 0.'));
+    expect(end, isNot(contains('FIRST-VERCEL-LINE')));
+
+    final start = await state.integrationStatusForAgent(
+      project,
+      'vercel',
+      'logs',
+      'dpl_1',
+      offset: 0,
+    );
+    expect(start, contains('FIRST-VERCEL-LINE'));
+    expect(start, contains('[log continues at offset 24000]'));
+  });
 }

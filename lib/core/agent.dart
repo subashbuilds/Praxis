@@ -113,6 +113,7 @@ typedef AgentIntegrationQuery = Future<String> Function(
   String service,
   String action,
   String target,
+  int offset,
 );
 
 const _baseAgentTools = <AiToolSpec>[
@@ -606,14 +607,18 @@ class Agent {
         'the latest run for the project repository. It downloads the failing '
         'job logs itself, so never ask the user for a numeric run id. For '
         'Cloudflare, use action logs with target project or '
-        'project/deployment-id to fetch the real build log. For Supabase, '
-        'action projects lists the account projects and target filters by name '
-        'or project ref. For Expo, action projects lists apps and action builds '
-        'reads EAS builds for the app id in app.json or the target. For Tavily, '
-        'action search runs a real web search and target is the query. The '
-        'connected accounts are listed in the system prompt. Use this instead '
-        'of asking the user to paste logs or account details. Never prints '
-        'access tokens.',
+        'project/deployment-id to fetch the real build log. Vercel action logs '
+        'reads build events for a deployment id or the latest deployment. For '
+        'Supabase, action projects lists the account projects and target '
+        'filters by name or project ref. For Expo, action projects lists apps '
+        'and action builds reads EAS builds for the app id in app.json or the '
+        'target. For Tavily, action search runs a real web search and target is '
+        'the query. Long logs are returned in slices: when a result ends with '
+        '"[log continues at offset N]", call again with the same service, '
+        'action and target plus offset N to read the rest instead of guessing. '
+        'The connected accounts are listed in the system prompt. Use this '
+        'instead of asking the user to paste logs or account details. Never '
+        'prints access tokens.',
     parameters: {
       'type': 'object',
       'properties': {
@@ -647,6 +652,14 @@ class Agent {
                   'optional deployment id. For Supabase: optional project name '
                   'or ref. For Expo: optional EAS project id. For Tavily: the '
                   'search query.',
+        },
+        'offset': {
+          'type': 'integer',
+          'description':
+              'For logs only: character offset of the slice to read. Omit to get '
+                  'the part where builds normally fail. A result that ends with '
+                  '"[log continues at offset N]" names the exact value to pass '
+                  'next, so the whole log can be read without guessing.',
         },
       },
       'required': ['service', 'action'],
@@ -707,10 +720,9 @@ class Agent {
     if (flags.compoundTools) await _detectVerificationCommand();
     var current = provider;
     // A resumed task already changed files before the interruption. Treat it
-    // as mutated so the "you have not changed a file yet" nudge cannot force
-    // the model to restart work that is already on disk.
+    // as mutated so the checklist and summary rules apply to the work that is
+    // already on disk.
     var mutated = skipActionFingerprints.isNotEmpty;
-    var completionNudges = 0;
     var actionNudges = 0;
     var limitNudges = 0;
     final log = roundLog;
@@ -866,23 +878,6 @@ class Agent {
             continue;
           }
 
-          if (!reply.hitOutputLimit &&
-              !mutated &&
-              completionNudges < 2 &&
-              wantsChange) {
-            completionNudges++;
-            onDiscardLive?.call();
-            turns.add(AiTurn.assistant(reply.text, const []));
-            turns.add(const AiTurn.user(
-              'You have not changed a file yet. Do not stop with a completion '
-              'message. Use edit_file for an existing file or write_file for a '
-              'new file now. Read only the specific range you still need. If the '
-              'request genuinely requires no file change, state the evidence, '
-              'but otherwise make the requested change.',
-            ));
-            continue;
-          }
-
           // Reasoning models sometimes describe the next step ("Let me read
           // the SVG…") and end the turn without calling a tool. That is not an
           // answer, so ask for the action it just announced instead of leaving
@@ -927,7 +922,8 @@ class Agent {
           }
 
           // A multi-file change ends with an account of what was asked and
-          // what changed, not a bare "Done".
+          // what changed, not a bare "Done". A one-file edit does not spend
+          // another model round on this: the reply is already the result.
           if (!reply.hitOutputLimit &&
               !_answerOnly &&
               _changedPaths.length > 1 &&
@@ -952,19 +948,6 @@ class Agent {
                 'checklist ${openTodos.length == 1 ? 'step' : 'steps'} '
                 'unfinished. Send “continue” to resume from the checklist '
                 'instead of starting over.';
-            onEvent(AgentEvent.error(message));
-            onPause?.call(message);
-            return;
-          }
-
-          if (!mutated && wantsChange) {
-            outcome = AgentOutcome.error;
-            final message = text.isEmpty
-                ? 'The model stopped without changing a file and returned no '
-                    'text. This is usually an output-budget or tool-call '
-                    'failure; send “continue” to retry.'
-                : 'The model stopped without changing a file. It said: “$text”\n'
-                    'Send “continue” to retry the edit.';
             onEvent(AgentEvent.error(message));
             onPause?.call(message);
             return;
@@ -1456,17 +1439,21 @@ ${parallelTools ? '- Batch independent reads and searches in one response so the
 - write_file replaces the whole file, so send complete contents. For an
   existing file, prefer edit_file with a unique old_text and the replacement
   new_text; this keeps large files inside the model's output budget.
-- Finish the requested edit. Do not answer “Done” until edit_file or
-  write_file has succeeded. If the request is already satisfied, state the
-  evidence instead of claiming a change.
+- Act only when the request calls for action. A question, review,
+  recommendation or comparison is answered in prose; do not edit files for it.
+  If a change is requested but you find it is unnecessary, unsafe, or cannot
+  work here, explain why with the evidence you gathered and stop. Never invent
+  an edit just to satisfy a rule.
+- When the request does call for a change, finish it: do not answer “Done”
+  until edit_file or write_file has succeeded.
 - Do not claim to have changed a file unless a file-writing tool succeeded.
 - Never end a turn on an announcement (“Let me read…”, “Let me write…”). Call
   that tool in the same turn; an announcement without a tool call leaves the
   task stopped.
 ${_answerOnly ? '- ANSWER-ONLY: the user asked a question or for an explanation or recommendation. The answer is the deliverable. Reply in prose only. Never call write_file, write_files, edit_file, apply_patch, download_file, install_skill, commit_and_push or update_todos; do not run a command that changes files; never claim a file changed. Reading and searching are allowed.' : '- TASK CHECKLIST: for a change touching more than one file, call update_todos first with 2-7 concrete steps; the first file-changing tool is refused until it exists. Mark a step in_progress when it starts and completed immediately after it finishes. Never end the turn while a step is open; finish it or rewrite the list. Every step must be completed before the final answer.'}
-- End every change task with a short summary: what the user asked for, the
-  exact files changed, and how you verified it. A bare “Done” is not a
-  finished response.
+- End every task that changed files with a short summary: what the user asked
+  for, the exact files changed, and how you verified it. A bare “Done” is not
+  a finished response.
 
 Project files:
 $files
@@ -1492,7 +1479,7 @@ Environment:
 - A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
 - Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
-${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status for these accounts: service "github", "cloudflare" or "vercel" for deployments, workflows and build logs; service "supabase" with action "projects" for database projects; service "expo" with action "projects" or "builds" for EAS apps and builds; service "tavily" with action "search" and the query as target for live web search. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. It downloads the failing job logs for you; never ask the user for a numeric run id first. Never ask for a token.'}
+${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status for these accounts: service "github", "cloudflare" or "vercel" for deployments, workflows and build logs; service "supabase" with action "projects" for database projects; service "expo" with action "projects" or "builds" for EAS apps and builds; service "tavily" with action "search" and the query as target for live web search. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. It downloads the failing job logs for you; never ask the user for a numeric run id first. Never ask for a token. Long build logs are returned in slices: when a result ends with "[log continues at offset N]", call integration_status again with the same service, action and target plus offset N to read the rest. Read the actual log before naming a cause; if the log is empty or not available yet, say that instead of guessing. If the provider itself expired or omitted the log, say so plainly and work from the job names and steps rather than inventing output.'}
 
 Context policy (the host enforces this automatically):
 - Below about 60% of the model window: do nothing.
@@ -1723,7 +1710,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
             return const _ToolOutcome(
                 'Error: service and action are required.');
           }
-          return _ToolOutcome(await query(service, action, target));
+          final rawOffset = call.arguments['offset'];
+          final offset = rawOffset is int
+              ? rawOffset
+              : int.tryParse('${rawOffset ?? ''}') ?? -1;
+          return _ToolOutcome(await query(service, action, target, offset));
         case 'run_command':
           final command = (call.arguments['command'] as String? ?? '').trim();
           if (command.isEmpty) {
@@ -1907,7 +1898,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     final text = reply.trim();
     if (text.isEmpty) return false;
     final lower = text.toLowerCase();
-    final lead = lower.length > 80 ? lower.substring(0, 80) : lower;
+    // Only a trailing announcement means the turn ended before acting. A
+    // complete answer can start with "I'll explain…" or "First, I checked…"
+    // without being unfinished, so the lead is not a reliable signal.
+    final tail =
+        lower.length > 160 ? lower.substring(lower.length - 160) : lower;
     const intent = [
       'let me ',
       "let's ",
@@ -1919,11 +1914,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       'first, i',
       'now i',
     ];
-    if (!intent.any(lead.contains)) return false;
+    if (!intent.any(tail.contains)) return false;
     return RegExp(
       r'\b(read|open|check|inspect|look|search|list|run|write|edit|update|'
       r'verify|grep|find|fetch|test|build|fix)\b',
-    ).hasMatch(lead);
+    ).hasMatch(tail);
   }
 
   /// Only patches that delete a file need permission. Ordinary edits and
