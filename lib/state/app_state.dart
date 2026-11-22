@@ -19,6 +19,7 @@ import '../core/diff.dart';
 import '../core/file_import.dart';
 import '../core/file_types.dart';
 import '../core/follow_ups.dart';
+import '../core/gitignore.dart';
 import '../core/integrations.dart';
 import '../core/linux_environment.dart';
 import '../core/model_info.dart';
@@ -1000,13 +1001,22 @@ class AppState extends ChangeNotifier {
     liveThinking = '';
     liveTools.clear();
     _lastLiveDraftText = '';
+    _liveDraftVersion++;
     final hadDraft = _liveDraftSaved;
     _liveDraftSaved = false;
-    if (hadDraft) unawaited(store.write(_kLiveDraft, ''));
+    if (hadDraft) {
+      // Queue the clear behind any write already in flight, so a slow storage
+      // write cannot restore a finished reply after the run ends.
+      _liveDraftWrites = _liveDraftWrites
+          .catchError((Object _) {})
+          .then((_) => store.write(_kLiveDraft, ''));
+    }
   }
 
   Timer? _liveNotify;
   Timer? _liveDraftTimer;
+  Future<void> _liveDraftWrites = Future.value();
+  int _liveDraftVersion = 0;
   DateTime _lastLiveDraft = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastLiveDraftText = '';
   bool _liveDraftSaved = false;
@@ -1058,15 +1068,24 @@ class AppState extends ChangeNotifier {
     if (text.trim().isEmpty || text == _lastLiveDraftText) return;
     _lastLiveDraftText = text;
     _liveDraftSaved = true;
-    await store.write(
-      _kLiveDraft,
-      jsonEncode({
-        'projectId': projectId,
-        'text': text,
-        'thinking': liveThinking,
-        'at': DateTime.now().toIso8601String(),
-      }),
-    );
+    final version = _liveDraftVersion;
+    final thinking = liveThinking;
+    _liveDraftWrites =
+        _liveDraftWrites.catchError((Object _) {}).then((_) async {
+      // A run that finished while the previous write was waiting must not
+      // leave its partial reply behind.
+      if (version != _liveDraftVersion) return;
+      await store.write(
+        _kLiveDraft,
+        jsonEncode({
+          'projectId': projectId,
+          'text': text,
+          'thinking': thinking,
+          'at': DateTime.now().toIso8601String(),
+        }),
+      );
+    });
+    await _liveDraftWrites;
   }
 
   /// Transcript writes used to happen on every tool event, which meant
@@ -2617,6 +2636,7 @@ query CurrentUser {
   }) async {
     final state = await pushStateFor(project);
     final current = await fsFor(project).localSnapshot();
+    final gitignore = await GitIgnoreSet.load(fsFor(project));
     // Compare against what this device last synced, not against the current
     // remote tree. Otherwise a file edited only on GitHub looks like a local
     // edit and the pull refuses to replace it.
@@ -2632,6 +2652,10 @@ query CurrentUser {
       final localHash = current.hashes[path];
       final baseHash = base[path];
       final remoteHash = state.hashes[path];
+      final isNew = baseHash == null && remoteHash == null;
+      // Ignore rules only hide untracked files. A file that is already on the
+      // remote branch stays visible and editable even when it matches a rule.
+      if (isNew && gitignore.ignores(path)) continue;
       if (localHash == null) {
         // A file removed from this device is a change too. Without a merge
         // base it was never synced here, so it is not a local deletion.
@@ -2680,7 +2704,6 @@ query CurrentUser {
       }
       final after = current.texts[path];
       final isBinary = after == null;
-      final isNew = baseHash == null && remoteHash == null;
       final canDiff = !isBinary && (before != null || isNew);
       final diff = canDiff ? computeDiff(before ?? '', after) : null;
       changes.add(RepoChange(
@@ -3665,6 +3688,7 @@ query CurrentUser {
           }
           final resolved = _githubRunTarget(target, project.repo);
           final repo = resolved.$1;
+          final jobSelector = resolved.$3.trim();
           if (repo.isEmpty) {
             return 'No GitHub repository is linked to this project. Pass '
                 'owner/repo or open the repository first.';
@@ -3735,22 +3759,51 @@ query CurrentUser {
                       .map((step) => step['name'])
                       .join(', ')
                   : '';
-              return '- ${job['name']} [${job['status']}/${job['conclusion']}]'
+              return '- ${job['name']} (job ${job['id']}) '
+                  '[${job['status']}/${job['conclusion']}]'
                   '${failed.isEmpty ? '' : ' failed: $failed'}';
             }).join('\n');
 
-            // Download the failing job logs through the Actions API. When no
-            // job has failed (a queued or successful run), fetch the first
-            // job so the agent still sees real output instead of only names.
-            var logJobs = jobs
-                .where((job) =>
-                    job['conclusion'] == 'failure' ||
-                    job['conclusion'] == 'timed_out')
-                .toList();
-            if (logJobs.isEmpty) logJobs = jobs.take(1).toList();
+            // A job selector can name any job by id or name. Without one, the
+            // failing jobs are the useful default; when no job failed (a
+            // queued or successful run), fetch the first job so the agent
+            // still sees real output instead of only names.
+            List<Map> logJobs;
+            if (jobSelector.isNotEmpty) {
+              final wanted = jobSelector.toLowerCase();
+              bool exact(Map job) {
+                final id = '${job['id'] ?? ''}'.trim();
+                final name = '${job['name'] ?? ''}'.trim().toLowerCase();
+                return id == jobSelector || name == wanted;
+              }
+
+              // Prefer an id or a full name. Only fall back to a partial name
+              // when the caller gave a distinctive fragment.
+              final exactMatches = jobs.where(exact).toList();
+              final matched = exactMatches.isNotEmpty
+                  ? exactMatches
+                  : jobs.where((job) {
+                      final name = '${job['name'] ?? ''}'.trim().toLowerCase();
+                      return name.contains(wanted);
+                    }).toList();
+              if (matched.isEmpty) {
+                return 'GitHub Actions run $runId in $repo:\n$summary\n\n'
+                    'No job matched "$jobSelector". Pass a job id or name from '
+                    'the list above, or a URL ending in '
+                    '.../actions/runs/$runId/job/<job-id>.';
+              }
+              logJobs = matched;
+            } else {
+              logJobs = jobs
+                  .where((job) =>
+                      job['conclusion'] == 'failure' ||
+                      job['conclusion'] == 'timed_out')
+                  .toList();
+              if (logJobs.isEmpty) logJobs = jobs.take(1).toList();
+            }
             final entries = await environmentFor(project);
             final logs = StringBuffer();
-            for (final job in logJobs.take(2)) {
+            for (final job in jobSelector.isEmpty ? logJobs.take(2) : logJobs) {
               final jobId = '${job['id'] ?? ''}'.trim();
               if (jobId.isEmpty) continue;
               final logResponse = await httpClient.get(
@@ -3781,7 +3834,9 @@ query CurrentUser {
               }
             }
             return 'GitHub Actions run $runId in $repo:\n$summary'
-                '${logs.isEmpty ? '\n\nNo job logs were available yet. The run may still be queued.' : logs}';
+                '${logs.isEmpty ? '\n\nNo job logs were available yet. The run may still be queued.' : logs}'
+                '\n\nTo read another job from this run, pass target '
+                '"$runId/job/<job-id>" or "$runId/job/<job-name>".';
           }
           final response = await httpClient.get(
             Uri.parse(
@@ -4253,47 +4308,73 @@ query CurrentUser {
     return '';
   }
 
-  /// Resolves a GitHub Actions target into an owner/repo and an optional run
-  /// id. It accepts a bare run id, owner/repo, a full Actions run URL, or a
-  /// relative owner/repo/actions/runs/id path. An empty run id means "latest".
-  (String, String) _githubRunTarget(String raw, String fallbackRepo) {
+  /// Resolves a GitHub Actions target into an owner/repo, an optional run id
+  /// and an optional job selector. It accepts a bare run id, owner/repo, a full
+  /// Actions run or job URL, a relative run/job path, and `job:<id or name>`.
+  /// An empty run id means "latest" and an empty selector means "failing jobs".
+  (String, String, String) _githubRunTarget(String raw, String fallbackRepo) {
     final target = raw.trim();
     String clean(String value) =>
         value.replaceAll(RegExp(r'\.git$'), '').trim();
+    String decode(String value) {
+      try {
+        return Uri.decodeComponent(value).trim();
+      } catch (_) {
+        return value.trim();
+      }
+    }
+
+    String queryJob(String value) {
+      final match = RegExp(r'[?&]job=([^&\s#]+)').firstMatch(value);
+      return match == null ? '' : decode(match.group(1)!);
+    }
+
     final fallback = clean(fallbackRepo);
-    if (target.isEmpty) return (fallback, '');
+    if (target.isEmpty) return (fallback, '', '');
 
     final absoluteRun = RegExp(
-      r'(?:api\.github\.com/repos/|github\.com/)([^/\s]+)/([^/\s?#]+)/actions/runs/(\d+)',
+      r'(?:api\.github\.com/repos/|github\.com/)([^/\s]+)/([^/\s?#]+)/actions/runs/(\d+)(?:/job/([^/\s?#]+))?',
     ).firstMatch(target);
     if (absoluteRun != null) {
       return (
         '${absoluteRun.group(1)}/${clean(absoluteRun.group(2)!)}',
-        absoluteRun.group(3)!
+        absoluteRun.group(3)!,
+        decode(absoluteRun.group(4) ?? queryJob(target)),
       );
     }
     final relativeRun = RegExp(
-      r'^([^/\s]+)/([^/\s]+)/actions/runs/(\d+)',
+      r'^([^/\s]+)/([^/\s]+)/actions/runs/(\d+)(?:/job/([^/\s?#]+))?',
     ).firstMatch(target);
     if (relativeRun != null) {
       return (
         '${relativeRun.group(1)}/${clean(relativeRun.group(2)!)}',
-        relativeRun.group(3)!
+        relativeRun.group(3)!,
+        decode(relativeRun.group(4) ?? queryJob(target)),
       );
     }
-    if (RegExp(r'^\d+$').hasMatch(target)) return (fallback, target);
+    final bareRun = RegExp(r'^(\d+)(?:[?&].*)?$').firstMatch(target);
+    if (bareRun != null) {
+      return (fallback, bareRun.group(1)!, queryJob(target));
+    }
+    final runAndJob = RegExp(r'^(\d+)/job/([^/\s?#]+)').firstMatch(target);
+    if (runAndJob != null) {
+      return (fallback, runAndJob.group(1)!, decode(runAndJob.group(2)!));
+    }
     final runOnly = RegExp(r'/actions/runs/(\d+)').firstMatch(target);
-    if (runOnly != null) return (fallback, runOnly.group(1)!);
+    if (runOnly != null) return (fallback, runOnly.group(1)!, queryJob(target));
+    final jobOnly =
+        RegExp(r'^job[:\s]+(.+)$', caseSensitive: false).firstMatch(target);
+    if (jobOnly != null) return (fallback, '', decode(jobOnly.group(1)!));
     if (target.startsWith('http')) {
       final repoUrl =
           RegExp(r'github\.com/([^/\s]+)/([^/\s?#]+)').firstMatch(target);
       if (repoUrl != null) {
-        return ('${repoUrl.group(1)}/${clean(repoUrl.group(2)!)}', '');
+        return ('${repoUrl.group(1)}/${clean(repoUrl.group(2)!)}', '', '');
       }
-      return (fallback, '');
+      return (fallback, '', '');
     }
-    if (target.contains('/')) return (clean(target), '');
-    return (fallback, '');
+    if (target.contains('/')) return (clean(target), '', '');
+    return (fallback, '', '');
   }
 
   /// Pages Direct Upload serves the files it receives; it does not build a
@@ -4458,6 +4539,46 @@ query CurrentUser {
 
   /// Removes the newest unpushed commit record for a branch. The files on disk
   /// stay untouched and immediately return to the changed-files list.
+  /// Records a locally created commit without changing the remote tree. The
+  /// pending commit keeps its own hashes, so reverting it can restore the
+  /// previous merge base instead of treating the committed files as clean.
+  PushState recordPendingCommit(
+    PushState current, {
+    required String owner,
+    required String repo,
+    required String branch,
+    required String sha,
+    required String message,
+    required Map<String, String> texts,
+    required Map<String, String> hashes,
+    required Set<String> deleted,
+  }) {
+    final baseHashes = {...current.comparisonBase, ...hashes};
+    for (final path in deleted) {
+      baseHashes.remove(path);
+    }
+    // The baseline is the remote text used for offline diffs. Leave it alone
+    // until the commit is pushed; the pending commit carries its own text.
+    return current
+        .copyWith(
+          owner: owner,
+          repo: repo,
+          branch: branch,
+          baseHashes: baseHashes,
+        )
+        .withPending(PendingCommit(
+          sha: sha,
+          message: message,
+          at: DateTime.now(),
+          owner: owner,
+          repo: repo,
+          branch: branch,
+          files: texts,
+          hashes: hashes,
+          deleted: deleted.toList(growable: false),
+        ));
+  }
+
   Future<PushState> revertLatestPending(
     Project project, {
     required String owner,
@@ -4880,8 +5001,19 @@ query CurrentUser {
     final projectsDir = Directory('${root.path}/projects');
     if (await projectsDir.exists()) await projectsDir.delete(recursive: true);
     await projectsDir.create(recursive: true);
+    // Transcripts live in the key-value store, not in the project folder, so
+    // deleting the folder alone would leave the conversation history behind.
+    for (final project in projects) {
+      await store.remove('$_kChatPrefix${project.id}');
+    }
+    _chatPersistTimer?.cancel();
+    _chatPersistTimer = null;
+    _chatPersistProject = null;
     projects.clear();
     _threads.clear();
+    _todos.clear();
+    _checkpoints.clear();
+    _deployJobs.clear();
     _drafts.clear();
     _fs.clear();
     _shells.clear();
@@ -4894,6 +5026,7 @@ query CurrentUser {
       _foregroundServiceOn = false;
     }
     _clearLive();
+    await _liveDraftWrites;
     await roundLog?.clear();
     usageEvents.clear();
     _lastUsage = null;
@@ -4907,6 +5040,8 @@ query CurrentUser {
       _kAutoNextProvider,
       _kUsage,
       _kDrafts,
+      _kQuota,
+      _kLiveDraft,
     ]) {
       await store.remove(key);
     }

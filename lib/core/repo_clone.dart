@@ -20,11 +20,12 @@ class RepoRef {
     if (value.startsWith('github.com/')) {
       value = value.substring('github.com/'.length);
     } else if (value.contains('/') && !value.startsWith('github.com')) {
-      // Accept owner/repo as the short form; reject other hosts.
-      if (RegExp(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+').hasMatch(value) &&
-          !value.contains(':')) {
-        // keep going
-      } else {
+      // Accept owner/repo as the short form, but reject another host: a first
+      // segment with a dot is a domain, not a GitHub owner.
+      final first = value.split('/').first;
+      if (first.contains('.') ||
+          first.contains(':') ||
+          !RegExp(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+').hasMatch(value)) {
         return null;
       }
     }

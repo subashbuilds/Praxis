@@ -12,6 +12,8 @@ import '../theme/tokens.dart';
 import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
+String _shortSha(String sha) => sha.length <= 7 ? sha : sha.substring(0, 7);
+
 class PushSheet extends StatefulWidget {
   const PushSheet({super.key, required this.project});
 
@@ -593,7 +595,7 @@ class _PushSheetState extends State<PushSheet> {
       destructive: true,
       icon: Icons.undo_rounded,
       details: [
-        ConfirmDetail('Commit', latest.sha.substring(0, 7)),
+        ConfirmDetail('Commit', _shortSha(latest.sha)),
         ConfirmDetail('Message', latest.message),
       ],
     );
@@ -847,31 +849,17 @@ class _PushSheetState extends State<PushSheet> {
         deleted: deleted,
         parentSha: parent?.sha,
       );
-      final baseHashes = {..._push.comparisonBase, ...hashes};
-      for (final path in deleted) {
-        baseHashes.remove(path);
-      }
-      final next = _push
-          .copyWith(
-            owner: _ownerText,
-            repo: _repoText,
-            branch: _branchText,
-            // Keep the whole merge base: adding only the committed paths would
-            // make every other tracked file look edited.
-            baseHashes: baseHashes,
-          )
-          .withBaseline(texts, hashes: hashes)
-          .withPending(PendingCommit(
-            sha: commit.sha,
-            message: _message.text.trim(),
-            at: DateTime.now(),
-            owner: _ownerText,
-            repo: _repoText,
-            branch: _branchText,
-            files: texts,
-            hashes: hashes,
-            deleted: deleted.toList(growable: false),
-          ));
+      final next = state.recordPendingCommit(
+        _push,
+        owner: _ownerText,
+        repo: _repoText,
+        branch: _branchText,
+        sha: commit.sha,
+        message: _message.text.trim(),
+        texts: texts,
+        hashes: hashes,
+        deleted: deleted,
+      );
       await state.savePushState(widget.project, next);
       await state.updateProjectGit(
         state.projectById(widget.project.id),
@@ -885,7 +873,7 @@ class _PushSheetState extends State<PushSheet> {
         _message.clear();
         _messageError = null;
         _status =
-            'Committed ${commit.sha.substring(0, 7)}. Push when you are ready.';
+            'Committed ${_shortSha(commit.sha)}. Push when you are ready.';
       });
       await _refreshChanges();
       await _refreshDrift();
@@ -1352,7 +1340,7 @@ class _PushSheetState extends State<PushSheet> {
                                       ),
                                     ),
                                     Text(
-                                      '${commit.sha.substring(0, 7)} · '
+                                      '${_shortSha(commit.sha)} · '
                                       '${commit.hashes.length + commit.deleted.length} files',
                                       style: Txt.meta.copyWith(fontSize: 8.5),
                                     ),

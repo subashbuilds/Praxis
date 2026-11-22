@@ -255,6 +255,128 @@ void main() {
     expect(removed.removed, greaterThan(0));
   });
 
+  test('push changes skip untracked files ignored by .gitignore', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_push_ignore_');
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject(
+      'ignore',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    final fs = state.fsFor(project);
+    await fs.write('.gitignore', 'build/\n*.log\n!keep.log\n');
+    await fs.write('README.md', '# Hi\n');
+    await fs.write('build/output.txt', 'generated\n');
+    await fs.write('debug.log', 'noise\n');
+    await fs.write('keep.log', 'keep me\n');
+
+    final changes = await state.changesFor(project);
+    final paths = changes.map((change) => change.path).toList();
+    expect(paths, contains('README.md'));
+    expect(paths, contains('keep.log'));
+    expect(paths, contains('.gitignore'));
+    expect(paths, isNot(contains('build/output.txt')));
+    expect(paths, isNot(contains('debug.log')));
+
+    // A file that is already tracked on the remote stays editable even when a
+    // rule matches it; ignore rules only hide new, untracked files.
+    final base = gitBlobSha(utf8.encode('old\n'));
+    await state.savePushState(
+      project,
+      PushState(
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+        hashes: {'debug.log': base},
+        baseHashes: {'debug.log': base},
+        baseline: {'debug.log': 'old\n'},
+        synced: true,
+      ),
+    );
+    await fs.write('debug.log', 'changed\n');
+    final edited = await state.changesFor(project);
+    expect(
+      edited.map((change) => change.path),
+      contains('debug.log'),
+    );
+  });
+
+  test('reverting a waiting commit shows its files as uncommitted again',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_push_revert_');
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject(
+      'revert',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    final fs = state.fsFor(project);
+    const text = '# Local change\n';
+    await fs.write('README.md', text);
+    final remoteHash = gitBlobSha(utf8.encode('# Remote\n'));
+    final localHash = gitBlobSha(utf8.encode(text));
+    final base = PushState(
+      owner: 'acme',
+      repo: 'demo',
+      branch: 'main',
+      hashes: {'README.md': remoteHash},
+      baseHashes: {'README.md': remoteHash},
+      baseline: {'README.md': '# Remote\n'},
+      synced: true,
+    );
+    await state.savePushState(
+      project,
+      state.recordPendingCommit(
+        base,
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+        sha: 'local-commit',
+        message: 'Local change',
+        texts: {'README.md': text},
+        hashes: {'README.md': localHash},
+        deleted: const {},
+      ),
+    );
+
+    // A committed file is clean while the commit waits to be pushed.
+    expect(
+      (await state.changesFor(project)).map((change) => change.path),
+      isNot(contains('README.md')),
+    );
+
+    await state.revertLatestPending(
+      project,
+      owner: 'acme',
+      repo: 'demo',
+      branch: 'main',
+    );
+
+    final changes = await state.changesFor(project);
+    final readme = changes.firstWhere((change) => change.path == 'README.md');
+    expect(readme.status, RepoChangeStatus.modified);
+    expect(readme.after, text);
+    expect(readme.before, '# Remote\n');
+  });
+
   test('a locally deleted file changed on GitHub stops the pull', () async {
     final temp = await Directory.systemTemp.createTemp('praxis_pull_conflict_');
     final remoteBytes = utf8.encode('# Changed on GitHub\n');

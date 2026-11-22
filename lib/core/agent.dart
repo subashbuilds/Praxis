@@ -603,9 +603,12 @@ class Agent {
         'Read connected GitHub Actions, Cloudflare Pages/Workers, Vercel, '
         'Supabase or Expo data, including status, URLs and logs. For GitHub, '
         'action workflows lists recent runs. Action logs accepts a run id, a '
-        'full github.com Actions run URL, or owner/repo; omit target to use '
-        'the latest run for the project repository. It downloads the failing '
-        'job logs itself, so never ask the user for a numeric run id. For '
+        'full github.com Actions run URL, a run/job path such as '
+        '"42/job/12345", or owner/repo; omit target to use the latest run '
+        'for the project repository. Every result lists each job id, so any '
+        'job can be read by passing its id or name, not only the failing '
+        'ones. It downloads the job logs itself, so never ask the user for a '
+        'numeric run id. For '
         'Cloudflare, use action logs with target project or '
         'project/deployment-id to fetch the real build log. Vercel action logs '
         'reads build events for a deployment id or the latest deployment. For '
@@ -648,6 +651,8 @@ class Agent {
           'type': 'string',
           'description':
               'For GitHub logs: a run id, full Actions run URL, or owner/repo. '
+                  'Add a job id or name as "42/job/12345" or '
+                  '"42/job/<job-name>" to read a specific job. '
                   'For Cloudflare: project or project/deployment-id. For Vercel: '
                   'optional deployment id. For Supabase: optional project name '
                   'or ref. For Expo: optional EAS project id. For Tavily: the '
@@ -1479,7 +1484,7 @@ Environment:
 - A web build is previewable when an index.html exists at the root, dist/, build/, build/web/ or out/.
 - Binary assets are never decoded as text. Open them in Files to preview them.
 - Secrets and API keys live in settings; never write them into project files.
-${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status for these accounts: service "github", "cloudflare" or "vercel" for deployments, workflows and build logs; service "supabase" with action "projects" for database projects; service "expo" with action "projects" or "builds" for EAS apps and builds; service "tavily" with action "search" and the query as target for live web search. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. It downloads the failing job logs for you; never ask the user for a numeric run id first. Never ask for a token. Long build logs are returned in slices: when a result ends with "[log continues at offset N]", call integration_status again with the same service, action and target plus offset N to read the rest. Read the actual log before naming a cause; if the log is empty or not available yet, say that instead of guessing. If the provider itself expired or omitted the log, say so plainly and work from the job names and steps rather than inventing output.'}
+${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status for these accounts: service "github", "cloudflare" or "vercel" for deployments, workflows and build logs; service "supabase" with action "projects" for database projects; service "expo" with action "projects" or "builds" for EAS apps and builds; service "tavily" with action "search" and the query as target for live web search. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. Every result lists each job with its id: pass "<run-id>/job/<job-id>" (or "<run-id>/job/<job-name>") to read any specific job, not only the failing ones. It downloads the job logs for you; never ask the user for a numeric run id first. Never ask for a token. Long build logs are returned in slices: when a result ends with "[log continues at offset N]", call integration_status again with the same service, action and target plus offset N to read the rest. Read the actual log before naming a cause; if the log is empty or not available yet, say that instead of guessing. If the provider itself expired or omitted the log, say so plainly and work from the job names and steps rather than inventing output.'}
 
 Context policy (the host enforces this automatically):
 - Below about 60% of the model window: do nothing.
@@ -1901,8 +1906,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     // Only a trailing announcement means the turn ended before acting. A
     // complete answer can start with "I'll explain…" or "First, I checked…"
     // without being unfinished, so the lead is not a reliable signal.
+    // "Let me know if…" and similar closings are finished answers, not a
+    // promise to act. Remove them before looking for an announcement.
     final tail =
-        lower.length > 160 ? lower.substring(lower.length - 160) : lower;
+        (lower.length > 160 ? lower.substring(lower.length - 160) : lower)
+            .replaceAll(RegExp(r'\blet me know\b'), '');
     const intent = [
       'let me ',
       "let's ",

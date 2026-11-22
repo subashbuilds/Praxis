@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:praxis/core/file_types.dart';
 import 'package:praxis/core/readme_html.dart';
+import 'package:praxis/core/repo_clone.dart';
 import 'package:praxis/core/shell.dart';
 import 'package:praxis/core/system_shell.dart';
 import 'package:praxis/core/vfs.dart';
@@ -18,6 +19,23 @@ void main() {
 
   tearDown(() async {
     if (await temp.exists()) await temp.delete(recursive: true);
+  });
+
+  group('RepoRef.parse', () {
+    test('accepts GitHub URLs and the short owner/repo form', () {
+      expect(
+        RepoRef.parse('https://github.com/acme/demo.git')?.slug,
+        'acme/demo',
+      );
+      expect(RepoRef.parse('github.com/acme/demo')?.slug, 'acme/demo');
+      expect(RepoRef.parse('acme/demo')?.slug, 'acme/demo');
+    });
+
+    test('rejects another host instead of treating it as an owner', () {
+      expect(RepoRef.parse('https://gitlab.com/acme/demo'), isNull);
+      expect(RepoRef.parse('gitlab.com/acme/demo'), isNull);
+      expect(RepoRef.parse('https://example.com/acme/demo'), isNull);
+    });
   });
 
   group('ProjectFs', () {

@@ -241,7 +241,19 @@ class AiClient {
       onError: controller.addError,
       onDone: controller.close,
     );
-    final cancellation = _cancellationSignal(isCancelled);
+    // Poll the stop flag while this reply is streaming. The timer is cancelled
+    // in the finally block below; leaving it running on a normal completion
+    // leaked one 10 Hz timer for every completed round.
+    final cancellation = Completer<void>();
+    Timer? cancellationTimer;
+    if (isCancelled != null) {
+      cancellationTimer =
+          Timer.periodic(const Duration(milliseconds: 100), (timer) {
+        if (!isCancelled()) return;
+        timer.cancel();
+        if (!cancellation.isCompleted) cancellation.complete();
+      });
+    }
     try {
       final consumed = provider.flavor == ApiFlavor.anthropic
           ? _consumeAnthropic(
@@ -258,31 +270,17 @@ class AiClient {
             );
       return await Future.any<AiReply>([
         consumed,
-        cancellation.then<AiReply>((_) => throw const AiCancelledException()),
+        cancellation.future
+            .then<AiReply>((_) => throw const AiCancelledException()),
       ]);
     } on TimeoutException {
       throw AiProviderException(
           '${provider.name} stalled mid-response. Try again.');
     } finally {
+      cancellationTimer?.cancel();
       await subscription.cancel();
       if (!controller.isClosed) await controller.close();
     }
-  }
-
-  /// Completes when the agent's stop flag is raised. The stream subscription
-  /// is cancelled by [stream] as soon as this wins the race, so a stop press
-  /// does not wait for a provider to finish a long reply.
-  Future<void> _cancellationSignal(bool Function()? isCancelled) {
-    if (isCancelled == null) return Completer<void>().future;
-    final completer = Completer<void>();
-    Timer? timer;
-    timer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (isCancelled()) {
-        timer?.cancel();
-        if (!completer.isCompleted) completer.complete();
-      }
-    });
-    return completer.future.whenComplete(() => timer?.cancel());
   }
 
   /// Parses an already-buffered SSE body (used when a proxy omits the content

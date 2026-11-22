@@ -315,6 +315,32 @@ void main() {
     expect(state.projectsByActivity.first.id, older.id);
   });
 
+  test('reset removes saved project transcripts as well as project files',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_reset_');
+    final store = MemoryStore();
+    final state = AppState(root: temp, store: store, seedWelcome: false);
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject('reset', ProjectKind.blank);
+    await store.write('praxis.chat.${project.id}', '[{"text":"private"}]');
+    await store.write('praxis.liveDraft', '{"text":"private"}');
+
+    await state.resetEverything();
+
+    expect(store.read('praxis.chat.${project.id}'), isNull);
+    expect(store.read('praxis.liveDraft'), isNull);
+    expect(
+      await Directory('${temp.path}/projects/${project.id}').exists(),
+      isFalse,
+    );
+    // Reset starts over with the welcome project, not an empty project list.
+    expect(state.projects.single.name, 'hello-praxis');
+  });
+
   test('a final answer with no mutation completes without a forced edit',
       () async {
     final temp = await Directory.systemTemp.createTemp('praxis_no_edit_');
@@ -369,6 +395,61 @@ void main() {
     expect(await fs.read('README.md'), '# Project');
     expect(events.last.kind, AgentEventKind.text);
     expect(events.last.text, contains('No changes were needed'));
+    expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
+    expect(paused, isNull);
+  });
+
+  test('a closing offer to run checks is a complete answer', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_closing_');
+    addTearDown(() => temp.delete(recursive: true));
+    final fs = ProjectFs(temp);
+    await fs.write('README.md', '# Project');
+
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'No changes were needed: README.md is already '
+                    'correct. Let me know if you want me to run the tests.',
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    var discarded = 0;
+    String? paused;
+    final events = <AgentEvent>[];
+    await Agent(
+      client: AiClient(client: client),
+      provider: const ProviderConfig(
+        id: 'test',
+        name: 'Test',
+        icon: 'x',
+        baseUrl: 'https://example.test/v1',
+        model: 'model',
+        flavor: ApiFlavor.openai,
+        keys: ['key'],
+      ),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      onEvent: events.add,
+      onDiscardLive: () => discarded++,
+      onPause: (message) => paused = message,
+    ).run(history: const [], prompt: 'update the README');
+
+    expect(calls, 1);
+    expect(discarded, 0);
+    expect(events.last.text, contains('Let me know'));
     expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
     expect(paused, isNull);
   });

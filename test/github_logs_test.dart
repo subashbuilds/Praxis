@@ -90,6 +90,137 @@ void main() {
     expect(result, isNot(contains('Pass the numeric')));
   });
 
+  test('GitHub logs can target any job by id or name', () async {
+    final requested = <String>[];
+    final client = MockClient((request) async {
+      final path = request.url.path;
+      if (path.endsWith('/actions/runs/42/jobs')) {
+        return jsonResponse({
+          'jobs': [
+            {
+              'id': 10,
+              'name': 'build',
+              'status': 'completed',
+              'conclusion': 'failure',
+            },
+            {
+              'id': 11,
+              'name': 'test',
+              'status': 'completed',
+              'conclusion': 'failure',
+            },
+            {
+              'id': 12,
+              'name': 'lint (ubuntu-latest)',
+              'status': 'completed',
+              'conclusion': 'success',
+            },
+            {
+              'id': 14,
+              'name': 'test (integration)',
+              'status': 'completed',
+              'conclusion': 'failure',
+            },
+          ],
+        });
+      }
+      final jobLog = RegExp(r'/actions/jobs/(\d+)/logs').firstMatch(path);
+      if (jobLog != null) {
+        final id = jobLog.group(1)!;
+        requested.add(id);
+        return http.Response('log from job $id\n', 200);
+      }
+      return http.Response('not found', 404);
+    });
+    final root = await tempRoot();
+    final state = AppState(
+      root: root,
+      store: MemoryStore(),
+      httpClient: client,
+      seedWelcome: false,
+    );
+    addTearDown(state.dispose);
+    state.integrations = const Integrations(
+      accounts: [
+        IntegrationAccount(
+          id: 'gh-1',
+          kind: IntegrationKind.github,
+          label: 'GitHub',
+          username: 'owner',
+          token: 'token',
+        ),
+      ],
+      activeGithubId: 'gh-1',
+    );
+
+    final failing = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'https://github.com/owner/repo/actions/runs/42',
+    );
+    expect(requested, ['10', '11']);
+    expect(failing, contains('log from job 10'));
+    expect(failing, contains('log from job 11'));
+    expect(failing, isNot(contains('log from job 12')));
+    expect(failing, contains('lint (ubuntu-latest) (job 12)'));
+    expect(failing, contains('To read another job from this run'));
+
+    requested.clear();
+    final byId = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'https://github.com/owner/repo/actions/runs/42/job/12',
+    );
+    expect(requested, ['12']);
+    expect(byId, contains('log from job 12'));
+    expect(byId, isNot(contains('log from job 10')));
+
+    requested.clear();
+    final byName = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'owner/repo/actions/runs/42/job/lint',
+    );
+    expect(byName, contains('log from job 12'), reason: byName);
+    expect(requested, ['12']);
+
+    // A full job name wins over another job whose name only contains it.
+    requested.clear();
+    final exactName = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'owner/repo/actions/runs/42/job/test',
+    );
+    expect(exactName, contains('log from job 11'));
+    expect(exactName, isNot(contains('log from job 14')));
+    expect(requested, ['11']);
+
+    // A bare run id with a job query also works.
+    requested.clear();
+    final byQuery = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'owner/repo/actions/runs/42?job=12',
+    );
+    expect(byQuery, contains('log from job 12'));
+    expect(requested, ['12']);
+
+    requested.clear();
+    final missing = await state.integrationStatusForAgent(
+      project(),
+      'github',
+      'logs',
+      'owner/repo/actions/runs/42/job/deploy',
+    );
+    expect(requested, isEmpty);
+    expect(missing, contains('No job matched "deploy"'));
+  });
+
   test('a long GitHub job log is readable from end to start with offsets',
       () async {
     final fullLog = StringBuffer('FIRST-LINE-OF-BUILD\n');
