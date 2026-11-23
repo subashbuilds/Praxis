@@ -170,8 +170,7 @@ class AiClient {
 
     http.StreamedResponse response;
     try {
-      response =
-          await _client.send(request).timeout(const Duration(seconds: 45));
+      response = await _send(request, isCancelled);
       if (isCancelled?.call() ?? false) {
         await response.stream.drain<void>();
         throw const AiCancelledException();
@@ -280,6 +279,40 @@ class AiClient {
       cancellationTimer?.cancel();
       await subscription.cancel();
       if (!controller.isClosed) await controller.close();
+    }
+  }
+
+  /// Sends the request and returns as soon as either the provider answers or
+  /// the run is stopped. Waiting for the 45s connect timeout made the stop
+  /// button look dead while the connection was stalled.
+  Future<http.StreamedResponse> _send(
+    http.Request request,
+    bool Function()? isCancelled,
+  ) async {
+    final send = _client.send(request).timeout(const Duration(seconds: 45));
+    if (isCancelled == null) return send;
+    if (isCancelled()) throw const AiCancelledException();
+    final cancelled = Completer<http.StreamedResponse>();
+    var stopped = false;
+    final timer = Timer.periodic(const Duration(milliseconds: 100), (watch) {
+      if (!isCancelled()) return;
+      stopped = true;
+      watch.cancel();
+      if (!cancelled.isCompleted) {
+        cancelled.completeError(const AiCancelledException());
+      }
+    });
+    // A response that arrives after the stop must not leave its socket open.
+    unawaited(send.then<void>((lateResponse) {
+      if (stopped) lateResponse.stream.drain<void>();
+    }, onError: (Object _) {}));
+    try {
+      return await Future.any<http.StreamedResponse>([
+        send,
+        cancelled.future,
+      ]);
+    } finally {
+      timer.cancel();
     }
   }
 

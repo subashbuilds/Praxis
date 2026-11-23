@@ -19,7 +19,7 @@ import 'system_shell.dart';
 import 'tool_validation.dart';
 import 'vfs.dart';
 
-enum AgentEventKind { text, tool, activity, error }
+enum AgentEventKind { text, tool, activity, error, retry }
 
 class AgentEvent {
   const AgentEvent({
@@ -31,6 +31,9 @@ class AgentEvent {
     this.patch = '',
     this.added = 0,
     this.removed = 0,
+    this.attempt = 0,
+    this.total = 0,
+    this.seconds = 0,
     this.ok = true,
   });
 
@@ -42,6 +45,9 @@ class AgentEvent {
         patch = '',
         added = 0,
         removed = 0,
+        attempt = 0,
+        total = 0,
+        seconds = 0,
         ok = true;
 
   const AgentEvent.tool({
@@ -53,6 +59,9 @@ class AgentEvent {
     this.removed = 0,
   })  : kind = AgentEventKind.tool,
         thinking = '',
+        attempt = 0,
+        total = 0,
+        seconds = 0,
         ok = true;
 
   const AgentEvent.activity({
@@ -64,10 +73,34 @@ class AgentEvent {
         patch = '',
         added = 0,
         removed = 0,
+        attempt = 0,
+        total = 0,
+        seconds = 0,
         ok = true;
 
   const AgentEvent.error(String value)
       : kind = AgentEventKind.error,
+        text = value,
+        tool = '',
+        detail = '',
+        thinking = '',
+        patch = '',
+        added = 0,
+        removed = 0,
+        attempt = 0,
+        total = 0,
+        seconds = 0,
+        ok = false;
+
+  /// A failed request that will be tried again on the same provider and
+  /// model. The UI shows the error and the countdown instead of appending a
+  /// transcript entry for every attempt.
+  const AgentEvent.retry({
+    required String value,
+    required this.attempt,
+    required this.total,
+    required this.seconds,
+  })  : kind = AgentEventKind.retry,
         text = value,
         tool = '',
         detail = '',
@@ -85,6 +118,9 @@ class AgentEvent {
   final String patch;
   final int added;
   final int removed;
+  final int attempt;
+  final int total;
+  final int seconds;
   final bool ok;
 }
 
@@ -442,6 +478,11 @@ bool providerSupportsParallelToolCalls(ProviderConfig provider) {
 }
 
 class Agent {
+  /// Transient failures (rate limits, provider outages and network timeouts)
+  /// are retried on the same provider and model before the error is final.
+  static const defaultMaxTransientRetries = 5;
+  static const defaultRetryDelay = Duration(seconds: 10);
+
   Agent({
     required this.client,
     required this.provider,
@@ -478,6 +519,8 @@ class Agent {
     this.maxRounds = 40,
     this.contextLimit = 128000,
     this.onPause,
+    this.maxTransientRetries = defaultMaxTransientRetries,
+    this.retryDelay = defaultRetryDelay,
   });
 
   final AiClient client;
@@ -543,6 +586,11 @@ class Agent {
   /// The provider model's context window. Compaction is only attempted when
   /// the host knows a real limit.
   final int contextLimit;
+
+  /// Retry count and wait for transient provider failures. Tests shorten the
+  /// wait; the app keeps five retries ten seconds apart.
+  final int maxTransientRetries;
+  final Duration retryDelay;
 
   late final List<AgentTodo> _todos = List.of(initialTodos);
   final Map<String, int> _readCache = {};
@@ -755,6 +803,7 @@ class Agent {
         final attemptedProviders = <String>{};
         String attemptKey(ProviderConfig config) =>
             '${config.id}|${config.keyIndex}|${config.model}';
+        var transientRetries = 0;
         while (true) {
           attemptedProviders.add(attemptKey(current));
           final requestedAt = DateTime.now();
@@ -792,6 +841,16 @@ class Agent {
                 finishReason: 'error',
               ),
             );
+            if (error.isTransient) {
+              if (transientRetries < maxTransientRetries) {
+                transientRetries++;
+                await _waitForRetry(error, transientRetries, isCancelled);
+                continue;
+              }
+              // The five retries are the whole allowance. Do not switch keys or
+              // providers behind the user's back after the last failure.
+              rethrow;
+            }
             final handler = onProviderLimit;
             // A key can fail for reasons other than quota (invalid key,
             // provider outage, rejected model). Offer the next key or another
@@ -816,6 +875,7 @@ class Agent {
               ));
             }
             current = next;
+            transientRetries = 0;
             continue;
           }
           _lastPromptTokens = reply.usage?.promptTokens ?? 0;
@@ -1151,6 +1211,35 @@ class Agent {
       rethrow;
     } finally {
       await _finishTask(log, task, outcome);
+    }
+  }
+
+  /// Counts down the fixed retry delay while reporting each remaining second
+  /// to the UI. Checking the stop flag every 100ms means a stop during the
+  /// wait ends the retry immediately instead of finishing the interval.
+  Future<void> _waitForRetry(
+    AiProviderException error,
+    int attempt,
+    bool Function()? isCancelled,
+  ) async {
+    onDiscardLive?.call();
+    final end = DateTime.now().add(retryDelay);
+    var lastSeconds = -1;
+    while (true) {
+      if (isCancelled?.call() ?? false) throw const AiCancelledException();
+      final left = end.difference(DateTime.now()).inMilliseconds;
+      if (left <= 0) return;
+      final seconds = (left / 1000).ceil();
+      if (seconds != lastSeconds) {
+        lastSeconds = seconds;
+        onEvent(AgentEvent.retry(
+          value: error.message,
+          attempt: attempt,
+          total: maxTransientRetries,
+          seconds: seconds,
+        ));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
     }
   }
 

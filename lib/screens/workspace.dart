@@ -93,8 +93,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '${project.kind.label} · ${project.branch}'
-                              '${project.repo.isEmpty ? '' : ' · ${project.repo}'}',
+                              '${project.branch}'
+                              '${project.repo.isEmpty ? '' : '  ${project.repo}'}',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: Txt.meta.copyWith(fontSize: 10),
@@ -331,18 +331,16 @@ class _AgentStatusBar extends StatelessWidget {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    'PROJECT TOKENS',
-                    style: Txt.overline.copyWith(fontSize: 8.5),
+                    'tokens',
+                    style: Txt.meta.copyWith(fontSize: 10),
                   ),
                   const SizedBox(width: 9),
-                  Text(
-                    total == 0
-                        ? 'this project'
-                        : today == 0
-                            ? 'this project · no usage today'
-                            : '+${compactTokens(today)} today',
-                    style: Txt.meta.copyWith(fontSize: 9.5),
-                  ),
+                  if (total == 0)
+                    Text('no usage yet',
+                        style: Txt.meta.copyWith(fontSize: 9.5))
+                  else if (today > 0)
+                    Text('+${compactTokens(today)} today',
+                        style: Txt.meta.copyWith(fontSize: 9.5)),
                   const Spacer(),
                   Text('usage', style: Txt.meta.copyWith(fontSize: 9)),
                   const SizedBox(width: 2),

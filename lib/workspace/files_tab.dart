@@ -1017,8 +1017,8 @@ class _FilesTabState extends State<FilesTab> {
           ),
           child: Text(
             _lastData != null && _lastData!.pending > 0
-                ? '${_lastData!.pending} unpushed commit${_lastData!.pending == 1 ? '' : 's'} · tap to open · long-press for actions'
-                : 'tap to edit · long-press for rename or delete · long-press a folder to import',
+                ? '${_lastData!.pending} unpushed commit${_lastData!.pending == 1 ? '' : 's'}'
+                : 'Tap to edit. Long-press for rename, delete or import.',
             style: Txt.meta.copyWith(fontSize: 9.5),
           ),
         ),

@@ -168,14 +168,6 @@ class _IntegrationsScreenState extends State<IntegrationsScreen> {
                       ),
                     ),
                   ],
-                  const SectionLabel('HOW IT WORKS'),
-                  Text(
-                    'Only the service you choose receives its token. GitHub and '
-                    'Vercel are used by Push and Deploy; the others are stored '
-                    'for prompts and future actions. Remove an account here and '
-                    'its token is deleted immediately.',
-                    style: Txt.bodySoft.copyWith(fontSize: 12),
-                  ),
                 ],
               ),
             ),

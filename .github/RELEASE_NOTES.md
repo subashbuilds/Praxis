@@ -1,37 +1,32 @@
-## Praxis 2.2.0 — First public release
+## Praxis 2.2.1
 
-Praxis is a pocket-sized AI coding workbench for Android. It keeps your project in a normal folder on your phone and brings an editor, a device shell, an optional Alpine Linux environment, a live preview, and an AI coding agent together in one app.
+This release fixes the stop button, adds automatic retries for transient provider errors, and makes the Linux CPU and memory readings update. It also removes the old Polydev artwork and tightens the interface copy.
 
-### Highlights
+### Fixes
 
-- **An agent that finishes the job** — answers questions and explains code without forcing file edits, works through multi-step tasks with a live checklist, and resumes from the last completed step after a stop or provider limit.
-- **Live thinking** — expandable reasoning that follows new output, pauses when you scroll up, and resumes when you return to the bottom. The panel stays open while new reasoning arrives.
-- **GitHub from your phone** — clone, branch, compare, commit, push, and pull. Existing files, binaries, and deletions are handled without overwriting local edits, and files covered by `.gitignore` stay out of pushes.
-- **Build logs without guessing** — read GitHub Actions logs for any job by id or name, paged from the failure to the start of the log. Cloudflare Pages and Vercel build logs are available too.
-- **A real editor** — syntax highlighting, line numbers, word wrap, find and undo, Markdown preview, image and SVG previews, and binary-safe storage.
-- **Files that stay yours** — projects are ordinary folders. Import files or merge whole folders, with collision handling and byte-preserving copies.
-- **On-device shell and Alpine Linux** — run the tools installed on the phone through the device shell, or prepare Alpine 3.21.7 with Node.js, Python, PHP, or Go. The project is mounted at `/workspace`.
-- **Live preview** — inspect static web projects, Markdown, images, and SVGs without leaving the app.
-- **Skills and templates** — create reusable instructions, import `.md` files, discover public `SKILL.md` skills, and start projects from built-in templates.
-- **Integrations** — GitHub, Vercel, Cloudflare, Expo EAS, Tavily web search, and Supabase. Credentials stay on the device and are never shown to the agent.
-
-### Reliability
-
-- Planned answers and reviews complete without an unnecessary edit round.
-- Reverting a waiting commit brings its files back as uncommitted edits with their diffs intact.
-- GitHub Actions logs can target any job in a run, not only the first failing jobs.
-- Ignored files never appear in the push sheet, so generated output and secrets cannot be committed by accident.
-- Reset now removes saved conversations, drafts, checklists, and checkpoints along with project files.
-- Fixed a streaming timer leak, false continuation prompts after polite closings, and stale draft restoration after a finished reply.
-- Rejects non-GitHub URLs instead of mistaking another host for a repository owner.
+- **Stop now ends the run.** Tapping stop shows a spinner until the run actually ends, cancels a retry immediately, and force-stops a shell command that ignores the first interrupt.
+- **Failed requests retry before giving up.** Rate limits, provider outages, and network timeouts are retried five times, ten seconds apart, on the same provider and model. The composer shows the error and a countdown such as `Retrying 1/5 in 8s`. After the fifth retry the full error appears in the conversation.
+- **Linux CPU and memory update.** The resource card and the shell header now read live values from inside Alpine and refresh every five seconds. The old `ps` call used columns BusyBox does not provide, so every reading stayed at zero.
+- **A reopened project opens at the latest message** instead of somewhere in the middle of a long conversation.
+- **Old Polydev logo files are gone** from the app assets.
+- **Cleaner interface copy.** Removed duplicated labels, decorative badges, and design notes across the conversation, settings, integrations, and Linux screens.
 
 ### Download
 
-- `Praxis-2.2.0-universal.apk` — recommended for most devices
-- `Praxis-2.2.0-arm64-v8a.apk` — smaller package for modern 64-bit phones
-- `Praxis-2.2.0-armeabi-v7a.apk` — for older 32-bit phones
+- `Praxis-2.2.1-universal.apk` for most devices
+- `Praxis-2.2.1-arm64-v8a.apk` for modern 64-bit phones
+- `Praxis-2.2.1-armeabi-v7a.apk` for older 32-bit phones
 
-Requires Android 7.0 or newer. The release workflow records each APK's SHA-256 in the run summary.
+Requires Android 7.0 or newer.
+
+### Verify the download
+
+Every release includes `SHA256SUMS`. Put it in the same folder as the APKs and run:
+
+```sh
+sha256sum -c SHA256SUMS      # Linux
+shasum -a 256 -c SHA256SUMS  # macOS
+```
 
 ### Getting started
 
@@ -44,6 +39,5 @@ Requires Android 7.0 or newer. The release workflow records each APK's SHA-256 i
 ### Notes
 
 - Bring your own provider key. Keys remain on the device and are not included in prompts.
-- The bundled Alpine environment currently targets arm64-v8a devices; package installs require network access.
+- The bundled Alpine environment targets arm64-v8a devices. Package installs need network access.
 - Cloudflare Pages deploys static output on-device. Server-side Workers code should be built and deployed on a desktop or CI runner.
-- This is the first public release. Please report issues with the app version and, where possible, the relevant build or agent log.

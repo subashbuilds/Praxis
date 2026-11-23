@@ -125,8 +125,8 @@ class _AgentTabState extends State<AgentTab> {
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
-    final nearBottom =
-        _scroll.position.maxScrollExtent - _scroll.position.pixels <= 80;
+    // The transcript list is reversed, so the newest entry sits at offset 0.
+    final nearBottom = _scroll.position.pixels <= 80;
     if (nearBottom == _stickToBottom) return;
     setState(() {
       _stickToBottom = nearBottom;
@@ -144,7 +144,7 @@ class _AgentTabState extends State<AgentTab> {
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      _scroll.jumpTo(0);
     });
   }
 
@@ -166,8 +166,7 @@ class _AgentTabState extends State<AgentTab> {
             ListTile(
               leading: Icon(Icons.attach_file_rounded, color: Pal.textMuted),
               title: const Text('Any file'),
-              subtitle:
-                  const Text('Text, PDF or zip — copied into the project'),
+              subtitle: const Text('Text, PDF or zip, copied into the project'),
               onTap: () => Navigator.of(sheetContext).pop('file'),
             ),
             const SizedBox(height: 8),
@@ -297,11 +296,19 @@ class _AgentTabState extends State<AgentTab> {
                     : SelectionArea(
                         child: ListView.builder(
                           controller: _scroll,
+                          // Anchoring the list at its bottom is what keeps a
+                          // reopened project on the latest message. Building a
+                          // tall transcript forward and jumping once landed
+                          // somewhere in the middle while the list estimated
+                          // the height of unbuilt entries.
+                          reverse: true,
                           padding: const EdgeInsets.fromLTRB(
                               Sp.x4, Sp.x4, Sp.x4, Sp.x2),
                           itemCount: thread.length + (showLive ? 1 : 0),
                           itemBuilder: (context, index) {
-                            if (index >= thread.length) {
+                            final position =
+                                thread.length + (showLive ? 1 : 0) - 1 - index;
+                            if (position >= thread.length) {
                               return _LiveReply(
                                 text: state.liveText,
                                 thinking: state.liveThinking,
@@ -313,7 +320,7 @@ class _AgentTabState extends State<AgentTab> {
                                 ),
                               );
                             }
-                            final entry = thread[index];
+                            final entry = thread[position];
                             return _EntryView(
                               entry: entry,
                               project: widget.project,
@@ -368,10 +375,18 @@ class _AgentTabState extends State<AgentTab> {
             loading: _loadingFollowUps,
             onTap: _showFollowUps,
           ),
+        if (state.retryAttempt > 0)
+          _RetryBanner(
+            message: state.retryError,
+            attempt: state.retryAttempt,
+            total: state.retryTotal,
+            seconds: state.retrySeconds,
+          ),
         _Composer(
           project: widget.project,
           controller: _composer,
           busy: state.busy,
+          stopping: state.stopping,
           attachments: _attachments,
           onAttach: _pickAttachments,
           onRemove: (path) => setState(() => _attachments.remove(path)),
@@ -449,12 +464,8 @@ class _TodoBar extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'TASK · $done/${todos.length} COMPLETE',
-                      style: Txt.meta.copyWith(
-                        fontSize: 8.5,
-                        letterSpacing: 0.8,
-                        fontWeight: FontWeight.w700,
-                      ),
+                      '$done of ${todos.length} steps done',
+                      style: Txt.meta.copyWith(fontSize: 9.5),
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -505,8 +516,7 @@ class _TodoSheet extends StatelessWidget {
                         Text('Task checklist', style: Txt.headline),
                         const SizedBox(height: 2),
                         Text(
-                          '$done of ${todos.length} complete · maintained by the '
-                          'agent and kept when a run is paused',
+                          '$done of ${todos.length} complete',
                           style: Txt.meta.copyWith(fontSize: 10),
                         ),
                       ],
@@ -570,11 +580,10 @@ class _TodoSheet extends StatelessWidget {
                                 ),
                                 if (todo.status == AgentTodoStatus.inProgress)
                                   Text(
-                                    'IN PROGRESS',
+                                    'In progress',
                                     style: Txt.meta.copyWith(
-                                      fontSize: 8.5,
+                                      fontSize: 9,
                                       color: Pal.ember,
-                                      fontWeight: FontWeight.w700,
                                     ),
                                   ),
                               ],
@@ -642,13 +651,7 @@ class _EmptyAgent extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Sp.page, Sp.x6, Sp.page, Sp.x4),
       children: [
         Text('Ask for a change.', style: Txt.headline),
-        const SizedBox(height: 8),
-        Text(
-          'Praxis reads and writes real files in this project. Replies stream in; '
-          'tool calls become pills you can open to see the exact diff.',
-          style: Txt.bodySoft,
-        ),
-        const SizedBox(height: Sp.x5),
+        const SizedBox(height: Sp.x4),
         for (final suggestion in suggestions)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
@@ -658,14 +661,7 @@ class _EmptyAgent extends StatelessWidget {
               child: Panel(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-                child: Row(
-                  children: [
-                    Icon(Icons.arrow_outward_rounded,
-                        size: 15, color: Pal.ember),
-                    const SizedBox(width: 9),
-                    Expanded(child: Text(suggestion, style: Txt.bodySoft)),
-                  ],
-                ),
+                child: Text(suggestion, style: Txt.bodySoft),
               ),
             ),
           ),
@@ -698,7 +694,6 @@ class _EntryView extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const _AgentLabel(),
               if (entry.thinking.trim().isNotEmpty) ...[
                 const SizedBox(height: 7),
                 _ThinkingPill(
@@ -763,24 +758,6 @@ class _EntryView extends StatelessWidget {
           ),
         );
     }
-  }
-}
-
-class _AgentLabel extends StatelessWidget {
-  const _AgentLabel();
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        const BrandMark(size: 12),
-        const SizedBox(width: 6),
-        Text(
-          'PRAXIS',
-          style: Txt.overline.copyWith(color: Pal.textMuted),
-        ),
-      ],
-    );
   }
 }
 
@@ -883,7 +860,6 @@ class _LiveReply extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _AgentLabel(),
           if (thinking.isNotEmpty) ...[
             const SizedBox(height: 7),
             _ThinkingPill(
@@ -1724,11 +1700,65 @@ class _FollowUpsSheet extends StatelessWidget {
                 ),
               ),
             ],
-            const SizedBox(height: 2),
-            Text(
-              'Suggestions come from the changed files, the open checklist and '
-              'this project type — no extra model request.',
-              style: Txt.meta.copyWith(fontSize: 9.5, height: 1.4),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RetryBanner extends StatelessWidget {
+  const _RetryBanner({
+    required this.message,
+    required this.attempt,
+    required this.total,
+    required this.seconds,
+  });
+
+  final String message;
+  final int attempt;
+  final int total;
+  final int seconds;
+
+  @override
+  Widget build(BuildContext context) {
+    final detail = message.trim();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Sp.x4, 0, Sp.x4, Sp.x2),
+      child: Container(
+        padding: const EdgeInsets.all(Sp.x3),
+        decoration: BoxDecoration(
+          color: Pal.rose.withOpacity(0.08),
+          borderRadius: Rd.sm,
+          border: Border.all(color: Pal.rose.withOpacity(0.40)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.error_outline_rounded, size: 16, color: Pal.rose),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Retrying $attempt/$total in ${seconds}s',
+                    style: Txt.label.copyWith(
+                      color: Pal.rose,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (detail.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      detail,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: Txt.meta.copyWith(fontSize: 9.5),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ],
         ),
@@ -1742,6 +1772,7 @@ class _Composer extends StatefulWidget {
     required this.project,
     required this.controller,
     required this.busy,
+    required this.stopping,
     required this.attachments,
     required this.onAttach,
     required this.onRemove,
@@ -1752,6 +1783,7 @@ class _Composer extends StatefulWidget {
   final Project project;
   final TextEditingController controller;
   final bool busy;
+  final bool stopping;
   final List<String> attachments;
   final VoidCallback onAttach;
   final ValueChanged<String> onRemove;
@@ -2023,9 +2055,7 @@ class _ComposerState extends State<_Composer> {
                       const SizedBox(width: 5),
                       Expanded(
                         child: Text(
-                          _trigger == '/'
-                              ? 'Skills · click to complete'
-                              : 'Project files · click to tag',
+                          _trigger == '/' ? 'Skills' : 'Project files',
                           style: Txt.meta.copyWith(fontSize: 8.5),
                         ),
                       ),
@@ -2081,6 +2111,7 @@ class _ComposerState extends State<_Composer> {
         _ComposerBody(
           controller: widget.controller,
           busy: widget.busy,
+          stopping: widget.stopping,
           attachments: widget.attachments,
           onAttach: widget.onAttach,
           onRemove: widget.onRemove,
@@ -2110,6 +2141,7 @@ class _ComposerBody extends StatelessWidget {
   const _ComposerBody({
     required this.controller,
     required this.busy,
+    required this.stopping,
     required this.attachments,
     required this.onAttach,
     required this.onRemove,
@@ -2119,6 +2151,7 @@ class _ComposerBody extends StatelessWidget {
 
   final TextEditingController controller;
   final bool busy;
+  final bool stopping;
   final List<String> attachments;
   final VoidCallback onAttach;
   final ValueChanged<String> onRemove;
@@ -2226,7 +2259,9 @@ class _ComposerBody extends StatelessWidget {
                       border: InputBorder.none,
                       filled: true,
                       fillColor: Pal.raised,
-                      hintText: busy ? 'Working…' : 'Ask for a change',
+                      hintText: busy
+                          ? (stopping ? 'Stopping…' : 'Working…')
+                          : 'Ask for a change',
                       hintStyle: Txt.bodySoft.copyWith(color: Pal.textDim),
                       contentPadding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 11),
@@ -2244,20 +2279,36 @@ class _ComposerBody extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 7),
-                GestureDetector(
-                  onTap: busy ? onStop : onSend,
-                  behavior: HitTestBehavior.opaque,
-                  child: Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: busy ? Pal.rose : Pal.ember,
-                      borderRadius: Rd.md,
-                    ),
-                    child: Icon(
-                      busy ? Icons.stop_rounded : Icons.arrow_upward_rounded,
-                      size: 20,
-                      color: Pal.onEmber,
+                Semantics(
+                  button: true,
+                  label: busy
+                      ? (stopping ? 'Stopping' : 'Stop this response')
+                      : 'Send',
+                  child: GestureDetector(
+                    onTap: busy ? (stopping ? null : onStop) : onSend,
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: busy ? Pal.rose : Pal.ember,
+                        borderRadius: Rd.md,
+                      ),
+                      child: stopping
+                          ? Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Pal.onEmber,
+                              ),
+                            )
+                          : Icon(
+                              busy
+                                  ? Icons.stop_rounded
+                                  : Icons.arrow_upward_rounded,
+                              size: 20,
+                              color: Pal.onEmber,
+                            ),
                     ),
                   ),
                 ),

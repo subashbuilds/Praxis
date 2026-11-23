@@ -92,7 +92,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     style: Txt.title.copyWith(fontSize: 15)),
                                 const SizedBox(height: 2),
                                 Text(
-                                  'Alpine 3.21.7 · proot shell, apk and runtimes',
+                                  'Alpine 3.21.7',
                                   style: Txt.meta.copyWith(fontSize: 9.5),
                                 ),
                               ],
@@ -137,7 +137,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 Text(
                                   state.usage.events.isEmpty
                                       ? 'No model calls yet'
-                                      : '${state.usage.events.length} calls · ${compactTokens(state.usage.todayTokens)} today',
+                                      : '${compactTokens(state.usage.todayTokens)} tokens today',
                                   style: Txt.meta.copyWith(fontSize: 9.5),
                                 ),
                               ],
@@ -155,12 +155,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   SectionLabel(
                     'PROVIDERS',
                     trailing: Text('${configured.length}', style: Txt.meta),
-                  ),
-                  Text(
-                    'Only providers you have connected appear here. Add several '
-                    'keys to one provider and Praxis can move through them when '
-                    'a limit is reached.',
-                    style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x3),
                   if (configured.isEmpty)
@@ -254,8 +248,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       Text(
                                         state.skills.isEmpty
                                             ? 'Reusable instructions for the agent'
-                                            : '${state.skills.length} installed · '
-                                                '${state.skills.where((skill) => skill.enabled).length} on',
+                                            : '${state.skills.length} installed',
                                         style: Txt.meta.copyWith(fontSize: 9.5),
                                       ),
                                     ],

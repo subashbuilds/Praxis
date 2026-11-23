@@ -398,14 +398,11 @@ class _ProviderFormSheetState extends State<ProviderFormSheet> {
                 ),
               ),
             Text(
-              'The active key is used first. When it hits its limit the agent '
-              'moves down this list — asking first unless automatic key '
-              'switching is on in Settings.',
+              'The active key is used first. When it hits its limit, the agent '
+              'can move to the next one.',
               style: Txt.meta.copyWith(height: 1.5),
             ),
             const SizedBox(height: 16),
-            Text('MODEL', style: Txt.overline.copyWith(fontSize: 9.5)),
-            const SizedBox(height: 8),
             TextField(
               controller: _model,
               style: Txt.code.copyWith(fontSize: 12),

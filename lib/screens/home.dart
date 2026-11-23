@@ -45,11 +45,11 @@ class HomeScreen extends StatelessWidget {
                 padding:
                     const EdgeInsets.fromLTRB(Sp.page, Sp.x5, Sp.page, Sp.x8),
                 children: [
-                  Text('Your pocket\ndev box.', style: Txt.display),
+                  Text('Code on your\nphone.', style: Txt.display),
                   const SizedBox(height: 12),
                   Text(
-                    'Edit files, run a shell, preview the app, and let an agent change '
-                    'it — all on this phone, in one folder you can read.',
+                    'Edit files, run a shell, preview the app, and let an agent '
+                    'change the code. Projects are ordinary folders on the device.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: 18),
@@ -78,7 +78,7 @@ class HomeScreen extends StatelessWidget {
                         icon: Icons.folder_open_rounded,
                         title: 'No projects yet',
                         body:
-                            'Create one and it appears here as a real folder on disk.',
+                            'Create one and it appears here as a folder on disk.',
                       ),
                     )
                   else
@@ -782,7 +782,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
               textInputAction: TextInputAction.done,
               decoration: appField(
                 _clone
-                    ? 'Optional — defaults to repository name'
+                    ? 'Optional. Defaults to the repository name.'
                     : 'project name',
                 label: _clone ? 'Project name (optional)' : null,
               ),
@@ -1024,7 +1024,6 @@ class _RepositoryPickerSheet extends StatelessWidget {
                       ],
                     ),
                   ),
-                  StatusPill('Private included', color: Pal.mint),
                 ],
               ),
             ),

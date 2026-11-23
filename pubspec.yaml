@@ -1,7 +1,7 @@
 name: praxis
 description: "Praxis — an on-device AI coding workbench."
 publish_to: "none"
-version: 2.2.0+7
+version: 2.2.1+8
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -31,7 +31,6 @@ flutter:
   assets:
     - assets/icons/
     - assets/icons/files/
-    - assets/images/
     - assets/alpine/
   fonts:
     - family: Inter

@@ -162,6 +162,17 @@ class AppState extends ChangeNotifier {
   Integrations integrations = const Integrations();
   String activeProviderId = '';
   bool busy = false;
+
+  /// True between tapping stop and the run actually ending. The composer uses
+  /// it to show a spinner instead of letting the same tap queue another stop.
+  bool _stopping = false;
+  bool get stopping => _stopping;
+
+  /// Filled while a transient provider failure waits for its next attempt.
+  String retryError = '';
+  int retryAttempt = 0;
+  int retryTotal = 0;
+  int retrySeconds = 0;
   bool wordWrap = false;
   int editorFontSize = 10;
   bool autoNextKey = false;
@@ -992,6 +1003,13 @@ class AppState extends ChangeNotifier {
 
   String? _activeProjectId;
 
+  void _clearRetry() {
+    retryError = '';
+    retryAttempt = 0;
+    retryTotal = 0;
+    retrySeconds = 0;
+  }
+
   void _clearLive() {
     _liveNotify?.cancel();
     _liveNotify = null;
@@ -1210,6 +1228,8 @@ class AppState extends ChangeNotifier {
     // Send or Resume gives immediate feedback on a large conversation.
     busy = true;
     _cancelled = false;
+    _stopping = false;
+    _clearRetry();
     notifyListeners();
     unawaited(_persistChat(projectId));
 
@@ -1334,6 +1354,8 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       },
       onReply: (reply, usedProvider) {
+        _clearRetry();
+        notifyListeners();
         final tokens = reply.usage;
         if (tokens == null) return;
         _recordUsage(usedProvider, tokens, projectId);
@@ -1350,7 +1372,14 @@ class AppState extends ChangeNotifier {
         return prompt(title, body, acceptLabel);
       },
       onEvent: (event) {
-        if (event.kind == AgentEventKind.text) {
+        if (event.kind == AgentEventKind.retry) {
+          retryError = event.text;
+          retryAttempt = event.attempt;
+          retryTotal = event.total;
+          retrySeconds = event.seconds;
+          notifyListeners();
+        } else if (event.kind == AgentEventKind.text) {
+          _clearRetry();
           _clearLive();
           checkpoint = checkpoint.copyWith(
             pendingStep: TaskCheckpoint.sanitize(event.text),
@@ -1457,6 +1486,7 @@ class AppState extends ChangeNotifier {
       // Stop is not an error. The finally block keeps the streamed text.
     } on AiProviderException catch (error) {
       checkpointError = error.message;
+      _clearRetry();
       thread.add(_entry(role: ChatRole.error, text: error.message, ok: false));
     } catch (error) {
       if (!_cancelled) {
@@ -1561,6 +1591,8 @@ class AppState extends ChangeNotifier {
         }
       }
       busy = false;
+      _stopping = false;
+      _clearRetry();
       _activeProjectId = null;
       _chatPersistTimer?.cancel();
       _chatPersistTimer = null;
@@ -2004,7 +2036,8 @@ Continue seamlessly from the remaining step. Do not restart the task from the be
   }
 
   void stop() {
-    if (!busy) return;
+    if (!busy || _stopping) return;
+    _stopping = true;
     _cancelled = true;
     final projectId = _activeProjectId;
     if (projectId != null &&

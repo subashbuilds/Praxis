@@ -29,12 +29,12 @@ extension ProjectKindX on ProjectKind {
       };
 
   String get blurb => switch (this) {
-        ProjectKind.web => 'index.html, style.css, app.js — previews live',
+        ProjectKind.web => 'index.html, style.css, app.js. Previews live.',
         ProjectKind.flutter => 'Dart sources, edited on device',
-        ProjectKind.python => 'main.py — Python starter, run from the shell',
-        ProjectKind.node => 'server.js — Node.js starter, run from the shell',
-        ProjectKind.php => 'index.php — PHP starter, run from the shell',
-        ProjectKind.go => 'main.go — Go starter, run from the shell',
+        ProjectKind.python => 'main.py. Python starter, run from the shell.',
+        ProjectKind.node => 'server.js. Node.js starter, run from the shell.',
+        ProjectKind.php => 'index.php. PHP starter, run from the shell.',
+        ProjectKind.go => 'main.go. Go starter, run from the shell.',
         ProjectKind.blank => 'Nothing but a folder',
       };
 
@@ -440,6 +440,24 @@ class AiProviderException implements Exception {
   AiProviderException(this.message, {this.status});
   final String message;
   final int? status;
+
+  /// True when waiting could fix the request: a rate limit, a provider
+  /// outage or a network timeout. A rejected key, missing model or invalid
+  /// base URL is not retried.
+  bool get isTransient {
+    if (status == 429 || status == 408) return true;
+    if (status != null && status! >= 500) return true;
+    if (status != null) return false;
+    final text = message.toLowerCase();
+    return text.contains('network') ||
+        text.contains('connection') ||
+        text.contains('timed out') ||
+        text.contains('timeout') ||
+        text.contains('did not answer') ||
+        text.contains('did not start answering') ||
+        text.contains('stalled') ||
+        text.contains('unavailable');
+  }
 
   /// True when the provider said the key is rate-limited or out of credit,
   /// which is the only case where another key can help.
@@ -907,7 +925,7 @@ const kIndexHtml = '''<!doctype html>
   <main>
     <p class="eyebrow">PRAXIS PREVIEW</p>
     <h1>Your project runs<br />on your phone.</h1>
-    <p class="lede">Edit these files in the Files tab, then refresh. The agent can change them too — ask it to.</p>
+    <p class="lede">Edit these files in the Files tab, then refresh. The agent can change them too. Ask it to.</p>
     <button id="tap">Tap me</button>
     <p id="count" class="count">0 taps</p>
   </main>

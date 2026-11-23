@@ -319,7 +319,7 @@ class _EnvironmentBody extends StatelessWidget {
         children: [
           _AlpineCard(linux: linux),
           const SectionLabel('RESOURCE USAGE'),
-          _ResourceCard(snapshot: snapshot, ready: linux.ready),
+          _ResourceCard(snapshot: snapshot),
           const SectionLabel('INSTALLED RUNTIMES'),
           for (final runtime in LinuxRuntime.values)
             Padding(
@@ -512,10 +512,9 @@ class _Legend extends StatelessWidget {
 }
 
 class _ResourceCard extends StatelessWidget {
-  const _ResourceCard({required this.snapshot, required this.ready});
+  const _ResourceCard({required this.snapshot});
 
   final LinuxSnapshot snapshot;
-  final bool ready;
 
   @override
   Widget build(BuildContext context) {
@@ -529,36 +528,9 @@ class _ResourceCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              GlyphBadge(
-                icon: Icons.monitor_heart_outlined,
-                color: Pal.ember,
-                size: 42,
-                iconSize: 21,
-              ),
-              const SizedBox(width: 11),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Linux Usage',
-                        style: Txt.title.copyWith(fontSize: 17)),
-                    const SizedBox(height: 2),
-                    Text(
-                      count == 0
-                          ? 'Idle · run a command to wake the guest'
-                          : '$count active guest processes',
-                      style: Txt.meta.copyWith(fontSize: 9.5),
-                    ),
-                  ],
-                ),
-              ),
-              StatusPill(
-                ready ? 'LIVE' : 'OFFLINE',
-                color: ready ? Pal.mint : Pal.textDim,
-              ),
-            ],
+          Text(
+            count == 0 ? 'No guest processes' : '$count guest processes',
+            style: Txt.meta.copyWith(fontSize: 9.5),
           ),
           const SizedBox(height: Sp.x3),
           Row(
@@ -567,12 +539,10 @@ class _ResourceCard extends StatelessWidget {
               Expanded(
                 child: _Metric(
                   icon: Icons.memory_rounded,
-                  label: 'RAM',
-                  badge: 'RAM',
+                  label: 'Memory',
                   value: ram == null ? '—' : humanBytes(ram),
-                  detail:
-                      count == 0 ? 'No guest processes' : 'Processes: $count',
-                  fraction: ram == null ? 0 : null,
+                  detail: count == 0 ? 'No guest processes' : 'Guest RSS',
+                  fraction: null,
                   color: Pal.ember,
                 ),
               ),
@@ -580,12 +550,10 @@ class _ResourceCard extends StatelessWidget {
               Expanded(
                 child: _Metric(
                   icon: Icons.speed_rounded,
-                  label: 'CPU Load',
-                  badge: 'GUEST',
+                  label: 'CPU',
                   value: cpu == null ? '—' : '${cpu.toStringAsFixed(1)}%',
-                  detail:
-                      count == 0 ? 'No guest load yet' : 'Guest process CPU',
-                  fraction: cpu == null ? 0 : (cpu / 100).clamp(0.0, 1.0),
+                  detail: count == 0 ? 'No guest load' : 'Guest process CPU',
+                  fraction: cpu == null ? null : (cpu / 100).clamp(0.0, 1.0),
                   color: Pal.mint,
                 ),
               ),
@@ -620,11 +588,6 @@ class _ResourceCard extends StatelessWidget {
             const SizedBox(height: 2),
             for (final process in processes.take(7))
               _ProcessRow(process: process),
-            const SizedBox(height: Sp.x2),
-            Text(
-              'Live values from inside Alpine, not the phone.',
-              style: Txt.meta.copyWith(fontSize: 8.5, color: Pal.textDim),
-            ),
           ],
         ],
       ),
@@ -721,7 +684,6 @@ class _Metric extends StatelessWidget {
   const _Metric({
     required this.icon,
     required this.label,
-    required this.badge,
     required this.value,
     required this.detail,
     required this.fraction,
@@ -730,7 +692,6 @@ class _Metric extends StatelessWidget {
 
   final IconData icon;
   final String label;
-  final String badge;
   final String value;
   final String detail;
   final double? fraction;
@@ -755,21 +716,6 @@ class _Metric extends StatelessWidget {
               Expanded(
                 child: Text(label, style: Txt.meta.copyWith(fontSize: 9.5)),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.14),
-                  borderRadius: Rd.pill,
-                ),
-                child: Text(
-                  badge,
-                  style: Txt.overline.copyWith(
-                    fontSize: 7.5,
-                    color: color,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-              ),
             ],
           ),
           const SizedBox(height: 10),
@@ -779,16 +725,18 @@ class _Metric extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: Txt.title.copyWith(fontSize: 24, letterSpacing: -0.8),
           ),
-          const SizedBox(height: 7),
-          ClipRRect(
-            borderRadius: Rd.pill,
-            child: LinearProgressIndicator(
-              value: fraction,
-              minHeight: 4,
-              backgroundColor: Pal.line,
-              valueColor: AlwaysStoppedAnimation(color),
+          if (fraction != null) ...[
+            const SizedBox(height: 7),
+            ClipRRect(
+              borderRadius: Rd.pill,
+              child: LinearProgressIndicator(
+                value: fraction,
+                minHeight: 4,
+                backgroundColor: Pal.line,
+                valueColor: AlwaysStoppedAnimation(color),
+              ),
             ),
-          ),
+          ],
           const SizedBox(height: 6),
           Text(
             detail,
@@ -1491,18 +1439,15 @@ class _CachingSheet extends StatelessWidget {
           ),
           const SizedBox(height: Sp.x3),
           Text(
-            'The first project of each type installs the runtime it needs '
-            '(for example Node.js) — this takes time and requires internet. '
-            'After that it is cached on the device, and later projects of the '
-            'same type start faster.',
+            'The first project of each type installs the runtime it needs, such '
+            'as Node.js. This takes time and needs internet. Later projects '
+            'reuse the cache.',
             style: Txt.bodySoft.copyWith(height: 1.6),
           ),
           const SizedBox(height: Sp.x4),
           Text(
-            'Package caching only controls downloaded apk archives and package '
-            'manager downloads. Turning it off does not stop an active '
-            'install; it clears those downloads the next time the environment '
-            'starts. Installed runtimes and project files are never removed.',
+            'Package caching covers downloaded apk archives and package manager '
+            'downloads. Installed runtimes and project files are never removed.',
             style: Txt.bodySoft.copyWith(height: 1.6),
           ),
           const SizedBox(height: Sp.x4),

@@ -113,9 +113,7 @@ class UsageScreen extends StatelessWidget {
                       child: EmptyState(
                         icon: Icons.bar_chart_rounded,
                         title: 'Nothing measured yet',
-                        body:
-                            'Each completed model call records prompt and output '
-                            'tokens here, grouped by provider and key.',
+                        body: 'Usage appears after the first model request.',
                       ),
                     )
                   else
@@ -126,8 +124,8 @@ class UsageScreen extends StatelessWidget {
                       ),
                   const SizedBox(height: Sp.x3),
                   Text(
-                    'Counts are reported by the provider with each reply. '
-                    'Praxis never stores the key itself in usage history.',
+                    'Counts come from each provider reply. Keys are never stored '
+                    'in usage history.',
                     style: Txt.meta.copyWith(height: 1.55),
                   ),
                 ],

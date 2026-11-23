@@ -135,18 +135,76 @@ void main() {
     });
   });
 
-  test('a quota error fails over to the second key', () async {
+  test('a rate limit retries five times, then reports the error', () async {
     final auths = <String>[];
     var calls = 0;
+    var switched = false;
     final client = MockClient((request) async {
       calls++;
       auths.add(request.headers['Authorization'] ?? '');
+      return http.Response(
+        jsonEncode({
+          'error': {'message': 'quota exceeded for this key'},
+        }),
+        429,
+      );
+    });
+    final temp = await Directory.systemTemp.createTemp('devnest_keys_');
+    addTearDown(() => temp.delete(recursive: true));
+    final fs = ProjectFs(temp);
+    final events = <AgentEvent>[];
+
+    await expectLater(
+      Agent(
+        client: AiClient(client: client),
+        provider: const ProviderConfig(
+          id: 'p',
+          name: 'P',
+          icon: 'x',
+          baseUrl: 'https://example.test/v1',
+          model: 'm',
+          flavor: ApiFlavor.openai,
+          keys: ['first', 'second'],
+        ),
+        fs: fs,
+        shell: Shell(fs),
+        skills: const [],
+        onEvent: events.add,
+        retryDelay: const Duration(milliseconds: 100),
+        onProviderLimit: (current, error) async {
+          switched = true;
+          return current.copyWith(keyIndex: 1);
+        },
+      ).run(history: const [], prompt: 'hello'),
+      throwsA(
+        isA<AiProviderException>().having(
+          (error) => error.message,
+          'message',
+          contains('quota exceeded'),
+        ),
+      ),
+    );
+
+    expect(calls, Agent.defaultMaxTransientRetries + 1);
+    expect(auths.toSet(), {'Bearer first'});
+    expect(switched, isFalse);
+    final retries =
+        events.where((event) => event.kind == AgentEventKind.retry).toList();
+    expect(retries, hasLength(Agent.defaultMaxTransientRetries));
+    expect(retries.map((event) => event.attempt), [1, 2, 3, 4, 5]);
+  });
+
+  test('a transient failure retries the same model and reports the wait',
+      () async {
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
       if (calls == 1) {
         return http.Response(
           jsonEncode({
-            'error': {'message': 'quota exceeded for this key'},
+            'error': {'message': 'service unavailable'}
           }),
-          429,
+          503,
         );
       }
       return http.Response(
@@ -160,7 +218,7 @@ void main() {
         200,
       );
     });
-    final temp = await Directory.systemTemp.createTemp('devnest_keys_');
+    final temp = await Directory.systemTemp.createTemp('devnest_retry_');
     addTearDown(() => temp.delete(recursive: true));
     final fs = ProjectFs(temp);
     final events = <AgentEvent>[];
@@ -174,17 +232,22 @@ void main() {
         baseUrl: 'https://example.test/v1',
         model: 'm',
         flavor: ApiFlavor.openai,
-        keys: ['first', 'second'],
+        keys: ['first'],
       ),
       fs: fs,
       shell: Shell(fs),
       skills: const [],
       onEvent: events.add,
-      onProviderLimit: (current, error) async => current.copyWith(keyIndex: 1),
+      retryDelay: const Duration(milliseconds: 200),
     ).run(history: const [], prompt: 'hello');
 
+    final retries =
+        events.where((event) => event.kind == AgentEventKind.retry).toList();
     expect(calls, 2);
-    expect(auths.last, 'Bearer second');
+    expect(retries, hasLength(1));
+    expect(retries.single.attempt, 1);
+    expect(retries.single.total, Agent.defaultMaxTransientRetries);
+    expect(retries.single.seconds, greaterThan(0));
     expect(events.last.text, 'Recovered.');
   });
 
@@ -194,13 +257,14 @@ void main() {
     var calls = 0;
     final client = MockClient((request) async {
       calls++;
-      auths.add(request.headers['Authorization'] ?? '');
-      if (calls <= 5) {
+      final auth = request.headers['Authorization'] ?? '';
+      auths.add(auth);
+      if (auth != 'Bearer fallback-key') {
         return http.Response(
           jsonEncode({
             'error': {'message': 'quota exceeded for this key'},
           }),
-          429,
+          401,
         );
       }
       return http.Response(
@@ -243,6 +307,7 @@ void main() {
       shell: Shell(fs),
       skills: const [],
       onEvent: events.add,
+      retryDelay: Duration.zero,
       onProviderLimit: (current, error) async {
         attempts.add('${current.id}:${current.keyIndex}');
         if (current.hasMoreKeys) {

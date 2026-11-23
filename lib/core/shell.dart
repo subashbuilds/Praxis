@@ -281,7 +281,7 @@ class Shell {
           ShellLine(
               'Runs on the project folder on this device. Node, Python and git',
               ShellTone.muted),
-          ShellLine('are not bundled — the agent writes files instead.',
+          ShellLine('are not bundled. The agent writes files instead.',
               ShellTone.muted),
         ],
         cwd: cwd,

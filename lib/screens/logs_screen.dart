@@ -243,8 +243,7 @@ class _LogList extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(Sp.page, Sp.x4, Sp.page, Sp.x10),
       children: [
         Text(
-          'One entry per model request. This view is local-only and contains '
-          'no prompts, tool arguments, file contents or API keys.',
+          'Local only. No prompts, tool arguments, file contents or API keys.',
           style: Txt.bodySoft,
         ),
         const SectionLabel('AGGREGATE'),
@@ -294,8 +293,7 @@ class _AggregateCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${stats.totalTasks} task${stats.totalTasks == 1 ? '' : 's'} · '
-                      '${stats.averageRounds.toStringAsFixed(1)} rounds per task',
+                      '${stats.totalTasks} task${stats.totalTasks == 1 ? '' : 's'}',
                       style: Txt.meta.copyWith(fontSize: 9.5),
                     ),
                   ],

@@ -63,9 +63,9 @@ class _TerminalTabState extends State<TerminalTab> {
       ];
     }
     return const [
-      ShellLine('Praxis · Alpine Linux 3.21.7', ShellTone.accent),
+      ShellLine('Alpine Linux 3.21.7', ShellTone.accent),
       ShellLine(
-        'A real Alpine rootfs under proot. You are root; the project is /workspace.',
+        'Alpine runs under proot. You are root; the project is /workspace.',
         ShellTone.output,
       ),
       ShellLine('', ShellTone.output),
@@ -261,7 +261,7 @@ class _TerminalTabState extends State<TerminalTab> {
     final cpu = linux.snapshot.cpuPercent;
     final memory = ram == null ? '—' : humanBytes(ram);
     final guestCpu = cpu == null ? '—' : '${cpu.toStringAsFixed(1)}%';
-    return 'Alpine $guestCpu · $memory';
+    return 'CPU $guestCpu  RAM $memory';
   }
 
   Color _tone(ShellTone tone) => switch (tone) {
@@ -359,9 +359,9 @@ class _TerminalTabState extends State<TerminalTab> {
                 border: InputBorder.none,
                 contentPadding: const EdgeInsets.symmetric(vertical: 8),
                 hintText: _ctrlArmed
-                    ? 'Ctrl is armed — press a key'
+                    ? 'Ctrl is armed. Press a key.'
                     : _running
-                        ? 'Command running — Ctrl+C interrupts'
+                        ? 'Command running. Ctrl+C stops it.'
                         : 'Run a command',
                 hintStyle:
                     Txt.code.copyWith(fontSize: 11.5, color: Pal.textDim),
@@ -421,13 +421,19 @@ class _TerminalTabState extends State<TerminalTab> {
                 if (linux != null && ready)
                   Padding(
                     padding: const EdgeInsets.only(right: 5),
-                    child: Text(
-                      _resources(linux),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Txt.meta.copyWith(
-                        fontSize: 8.5,
-                        color: Pal.textDim,
+                    // The Linux environment samples every few seconds on its
+                    // own notifier, which this header has to listen to or it
+                    // keeps showing the first (idle) reading.
+                    child: AnimatedBuilder(
+                      animation: linux,
+                      builder: (context, _) => Text(
+                        _resources(linux),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Txt.meta.copyWith(
+                          fontSize: 8.5,
+                          color: Pal.textDim,
+                        ),
                       ),
                     ),
                   ),

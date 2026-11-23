@@ -211,16 +211,17 @@ void main() {
         onEvent: (_) {},
         roundLog: log,
         taskId: 'task-quota',
+        retryDelay: Duration.zero,
       ).run(history: const [], prompt: 'update the README'),
       throwsA(isA<AiProviderException>()),
     );
 
     final task = (await log.loadTasks()).single;
     expect(task.outcome, AgentOutcome.quotaError);
-    expect(task.rounds, hasLength(1));
-    expect(task.rounds.single.toolNames, isEmpty);
-    expect(task.rounds.single.inputTokens, isNull);
-    expect(task.rounds.single.finishReason, 'error');
+    expect(task.rounds, hasLength(Agent.defaultMaxTransientRetries + 1));
+    expect(task.rounds.last.toolNames, isEmpty);
+    expect(task.rounds.last.inputTokens, isNull);
+    expect(task.rounds.last.finishReason, 'error');
   });
 
   test('file round log persists rounds and task outcome as JSONL', () async {

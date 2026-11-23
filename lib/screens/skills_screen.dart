@@ -141,11 +141,9 @@ class _SkillsScreenState extends State<SkillsScreen> {
                   ),
                   const SectionLabel('DISCOVER ONLINE'),
                   Text(
-                    'Search public GitHub repositories for skills. Opening a '
-                    'repository lists its SKILL.md files, and installing one '
-                    'adds it to this device. GitHub’s free API allows a limited '
-                    'number of anonymous requests per hour; add a GitHub token '
-                    'in Integrations for more.',
+                    'Search public GitHub repositories for SKILL.md files. '
+                    'GitHub limits anonymous requests per hour; a token from '
+                    'Integrations raises the limit.',
                     style: Txt.bodySoft.copyWith(fontSize: 12),
                   ),
                   const SizedBox(height: Sp.x3),
@@ -561,7 +559,7 @@ class _RepositoryCard extends StatelessWidget {
                   ],
                   const SizedBox(height: 3),
                   Text(
-                    '★ ${repository.stars}  ·  browse SKILL.md',
+                    '${repository.stars} stars',
                     style: Txt.meta.copyWith(fontSize: 9),
                   ),
                 ],

@@ -95,18 +95,6 @@ class _ModelSheet extends StatelessWidget {
                 ],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x3),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Only the models you kept in each provider are listed. '
-                  'Request counts are local and reset at midnight. '
-                  'Context is the window, not the tokens used.',
-                  style: Txt.bodySoft,
-                ),
-              ),
-            ),
             if (models.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(Sp.page),
@@ -395,7 +383,7 @@ class _ProviderFallbackSheet extends StatelessWidget {
               child: SizedBox(
                 width: double.infinity,
                 child: GhostButton(
-                  label: 'Stop this task',
+                  label: 'Keep current model',
                   icon: Icons.stop_circle_outlined,
                   onTap: () => Navigator.of(context).pop(),
                 ),

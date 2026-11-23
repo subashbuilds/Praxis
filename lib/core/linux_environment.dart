@@ -636,7 +636,14 @@ class LinuxEnvironment extends ChangeNotifier {
 
   void cancel() {
     _cancelled = true;
-    _active?.kill(ProcessSignal.sigint);
+    final active = _active;
+    if (active == null) return;
+    active.kill(ProcessSignal.sigint);
+    // Package managers usually stop on SIGINT. A process that ignores it kept
+    // the agent's stop button waiting until the whole timeout expired.
+    Timer(const Duration(seconds: 2), () {
+      active.kill(ProcessSignal.sigkill);
+    });
   }
 
   Future<void> install(LinuxRuntime runtime) async {
@@ -748,6 +755,7 @@ class LinuxEnvironment extends ChangeNotifier {
   Future<void> refresh({
     String? projectRoot,
     List<String>? projectRoots,
+    bool resourcesOnly = false,
   }) async {
     if (projectRoot != null && projectRoot.isNotEmpty) {
       _lastProjectRoot = projectRoot;
@@ -767,26 +775,54 @@ class LinuxEnvironment extends ChangeNotifier {
           : (_lastProjectRoot == null || _lastProjectRoot!.isEmpty
               ? const <String>[]
               : <String>[_lastProjectRoot!]);
-      final ps = await run(
-        'ps -o pid,user,pcpu,rss,comm 2>/dev/null || ps aux 2>/dev/null || ps',
+      // BusyBox ps has no pcpu column, so asking for one rejected the whole
+      // selection and every memory value read as zero. Ask only for the
+      // columns it does support, then merge in top's live CPU percentages.
+      final sample = await run(
+        "ps -o pid,user,rss,comm 2>/dev/null || ps -l 2>/dev/null || "
+        "ps 2>/dev/null; echo '@@TOP'; "
+        'top -b -n 1 2>/dev/null | head -n 40',
         projectRoot: project,
         timeout: const Duration(seconds: 12),
       );
-      final processes = _parseProcesses(ps.output);
-      final ramBytes = processes.isEmpty
-          ? null
-          : processes.fold<int>(0, (sum, item) => sum + item.rssKb) * 1024;
+      final marker = sample.output.indexOf('@@TOP');
+      final processText =
+          marker < 0 ? sample.output : sample.output.substring(0, marker);
+      final topText = marker < 0 ? '' : sample.output.substring(marker + 5);
+      final rssProcesses = _parseProcesses(processText);
+      final topProcesses = _parseTopProcesses(topText);
+      final rssByPid = {for (final item in rssProcesses) item.pid: item};
+      final processes = topProcesses.isNotEmpty
+          ? [
+              for (final item in topProcesses)
+                LinuxProcess(
+                  pid: item.pid,
+                  name: item.name,
+                  user: rssByPid[item.pid]?.user ?? item.user,
+                  cpu: item.cpu,
+                  memory: rssByPid[item.pid]?.memory ?? item.memory,
+                  rssKb: rssByPid[item.pid]?.rssKb ?? 0,
+                ),
+            ]
+          : rssProcesses;
+      final rssTotal =
+          rssProcesses.fold<int>(0, (sum, item) => sum + item.rssKb);
+      final ramBytes = rssTotal > 0 ? rssTotal * 1024 : null;
       final cpu = processes.isEmpty
           ? null
           : processes.fold<double>(
               0,
-              (sum, item) => sum + (double.tryParse(item.cpu) ?? 0),
+              (sum, item) =>
+                  sum + (double.tryParse(item.cpu.replaceAll('%', '')) ?? 0),
             );
       snapshot = LinuxSnapshot(
-        diskBytes: await _directorySize(Directory(rootfsPath)),
-        cacheBytes: await _cacheSize(),
-        projectBytes: await _projectBytes(roots),
-        projectCount: roots.length,
+        diskBytes: resourcesOnly
+            ? snapshot.diskBytes
+            : await _directorySize(Directory(rootfsPath)),
+        cacheBytes: resourcesOnly ? snapshot.cacheBytes : await _cacheSize(),
+        projectBytes:
+            resourcesOnly ? snapshot.projectBytes : await _projectBytes(roots),
+        projectCount: roots.isEmpty ? snapshot.projectCount : roots.length,
         ramUsedBytes: ramBytes,
         cpuPercent: cpu,
         processes: processes,
@@ -798,6 +834,64 @@ class LinuxEnvironment extends ChangeNotifier {
     } finally {
       _refreshing = false;
     }
+  }
+
+  /// Reads the live CPU column from BusyBox top. The header appears after the
+  /// memory, CPU and load lines, so the parser waits for a row that names both
+  /// PID and a CPU percentage.
+  List<LinuxProcess> _parseTopProcesses(String output) {
+    final result = <LinuxProcess>[];
+    var seenHeader = false;
+    var pidIndex = -1;
+    var userIndex = -1;
+    var cpuIndex = -1;
+    var vszIndex = -1;
+    var commandIndex = -1;
+    for (final line in output.split('\n')) {
+      final columns = line
+          .trim()
+          .split(RegExp(r'\s+'))
+          .where((value) => value.isNotEmpty)
+          .toList();
+      if (columns.isEmpty) continue;
+      final lower = columns.map((value) => value.toLowerCase()).toList();
+      if (!seenHeader) {
+        if (!lower.contains('pid') ||
+            (!lower.contains('%cpu') && !lower.contains('cpu'))) {
+          continue;
+        }
+        seenHeader = true;
+        pidIndex = lower.indexOf('pid');
+        userIndex = lower.indexOf('user');
+        cpuIndex = lower.contains('%cpu')
+            ? lower.indexOf('%cpu')
+            : lower.indexOf('cpu');
+        vszIndex = lower.indexOf('vsz');
+        commandIndex = lower.indexOf('command');
+        if (commandIndex < 0) commandIndex = columns.length - 1;
+        continue;
+      }
+      if (pidIndex < 0 || columns.length <= pidIndex) continue;
+      final pid = columns[pidIndex];
+      if (int.tryParse(pid) == null) continue;
+      String at(int index) =>
+          index >= 0 && index < columns.length ? columns[index] : '';
+      final name = columns
+          .sublist(commandIndex.clamp(0, columns.length))
+          .join(' ')
+          .trim();
+      final rawCpu = at(cpuIndex);
+      result.add(LinuxProcess(
+        pid: pid,
+        name: name.isEmpty ? 'process' : name,
+        user: at(userIndex).isEmpty ? 'root' : at(userIndex),
+        cpu: rawCpu.isEmpty
+            ? '0.0%'
+            : (rawCpu.endsWith('%') ? rawCpu : '$rawCpu%'),
+        memory: at(vszIndex).isEmpty ? '' : at(vszIndex),
+      ));
+    }
+    return result;
   }
 
   List<LinuxProcess> _parseProcesses(String output) {
@@ -838,7 +932,7 @@ class LinuxEnvironment extends ChangeNotifier {
       final pid = at(pidIndex);
       final user = at(userIndex);
       final cpu = at(cpuIndex);
-      final rss = int.tryParse(at(rssIndex)) ?? 0;
+      final rss = _rssKb(at(rssIndex));
       final start = nameIndex >= 0 ? nameIndex : columns.length - 1;
       final rawName = columns.sublist(start.clamp(0, columns.length)).join(' ');
       final name = rawName.split('/').last.trim();
@@ -853,6 +947,22 @@ class LinuxEnvironment extends ChangeNotifier {
       ));
     }
     return result;
+  }
+
+  /// BusyBox prints RSS in kilobytes but humanises large values (12m).
+  int _rssKb(String raw) {
+    final match = RegExp(r'^([0-9]+(?:\.[0-9]+)?)([kmgt]?)$')
+        .firstMatch(raw.trim().toLowerCase());
+    if (match == null) return 0;
+    final value = double.tryParse(match.group(1)!) ?? 0;
+    final unit = match.group(2)!;
+    final factor = switch (unit) {
+      't' => 1024 * 1024 * 1024,
+      'g' => 1024 * 1024,
+      'm' => 1024,
+      _ => 1,
+    };
+    return (value * factor).round();
   }
 
   Future<int> _projectBytes(List<String> roots) async {
@@ -1008,8 +1118,8 @@ class LinuxEnvironment extends ChangeNotifier {
 
   void _startRefreshTimer() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 8), (_) {
-      unawaited(refresh());
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(refresh(resourcesOnly: true));
     });
   }
 

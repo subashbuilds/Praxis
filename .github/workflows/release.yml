@@ -219,6 +219,7 @@ jobs:
             echo "| APK | Size | SHA-256 |"
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
+          : > SHA256SUMS
           for arch in arm64-v8a armeabi-v7a universal; do
             SRC="${SOURCES[$arch]}"
             NAME="Praxis-${VERSION}-${arch}.apk"
@@ -226,8 +227,10 @@ jobs:
             cp "$SRC" "$NAME"
             "$APKSIGNER" verify --print-certs "$NAME" > /dev/null
             SHA="$(sha256sum "$NAME" | cut -d' ' -f1)"
+            echo "$SHA  $NAME" >> SHA256SUMS
             echo "| $NAME | $(du -h "$NAME" | cut -f1) | \`$SHA\` |" >> "$GITHUB_STEP_SUMMARY"
           done
+          cat SHA256SUMS
 
       - name: Upload signed APKs
         uses: actions/upload-artifact@v6
@@ -237,6 +240,7 @@ jobs:
             Praxis-${{ steps.version.outputs.version }}-arm64-v8a.apk
             Praxis-${{ steps.version.outputs.version }}-armeabi-v7a.apk
             Praxis-${{ steps.version.outputs.version }}-universal.apk
+            SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
@@ -254,6 +258,7 @@ jobs:
             "Praxis-${VERSION}-arm64-v8a.apk"
             "Praxis-${VERSION}-armeabi-v7a.apk"
             "Praxis-${VERSION}-universal.apk"
+            "SHA256SUMS"
           )
           NOTES_FILE="${NOTES_FILE:-.github/RELEASE_NOTES.md}"
           if [ ! -f "$NOTES_FILE" ]; then

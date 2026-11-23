@@ -132,24 +132,22 @@ class AboutScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: Sp.x4),
                   Text(
-                    'A local-first coding workbench for Android. Real files, a '
-                    'real shell, a live preview, and an agent that edits the '
-                    'project with your own model key. Praxis is open source and '
-                    'lives on GitHub.',
+                    'A coding workbench for Android. Projects are folders on the '
+                    'device, and the agent edits them with your own model key. '
+                    'Praxis is open source.',
                     style: Txt.bodySoft,
                   ),
                   const SizedBox(height: Sp.x4),
                   Text(
-                    'No account. No telemetry. Your projects live in the app’s '
-                    'documents directory and belong to you.',
+                    'No account and no telemetry. Projects live in the app '
+                    'documents directory.',
                     style: Txt.meta.copyWith(height: 1.55),
                   ),
                   const SectionLabel('OPEN SOURCE'),
                   _AboutLink(
                     icon: Icons.fork_right_rounded,
                     title: 'Praxis on GitHub',
-                    body:
-                        '$kGitHubRepositoryLabel · source, issues and releases',
+                    body: 'Source, issues and releases',
                     onTap: () => _openRepository(context),
                   ),
                   const SizedBox(height: 8),
