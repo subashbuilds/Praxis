@@ -186,6 +186,11 @@ class AppState extends ChangeNotifier {
   String liveThinking = '';
   final List<ToolDraft> liveTools = [];
 
+  /// The failed attempt is still on screen while the same request is retried.
+  /// The first delta of the retry replaces it in one step, so the user never
+  /// sees a blank reply or two replies stacked on top of each other.
+  bool liveInterrupted = false;
+
   /// Set by the agent tab while it is on screen. Without it a limit stops the
   /// run instead of guessing.
   LimitPrompt? limitPrompt;
@@ -1017,6 +1022,7 @@ class AppState extends ChangeNotifier {
     _liveDraftTimer = null;
     liveText = '';
     liveThinking = '';
+    liveInterrupted = false;
     liveTools.clear();
     _lastLiveDraftText = '';
     _liveDraftVersion++;
@@ -1041,6 +1047,27 @@ class AppState extends ChangeNotifier {
   bool _restoringLiveDraft = false;
   Timer? _chatPersistTimer;
   String? _chatPersistProject;
+
+  /// Moves whatever the user already read into the transcript. Called on a
+  /// failed or interrupted exit so a partial reply is never thrown away.
+  void _commitPartialLive(List<ChatEntry> thread) {
+    final text = liveText.trim();
+    final thinking = liveThinking.trim();
+    if (text.isEmpty && thinking.isEmpty) return;
+    for (final tool in List<ToolDraft>.from(liveTools)) {
+      thread.add(_entry(
+        role: ChatRole.tool,
+        text: tool.detail,
+        tool: tool.tool,
+        detail: tool.detail,
+      ));
+    }
+    thread.add(_entry(
+      role: ChatRole.assistant,
+      text: text,
+      thinking: thinking,
+    ));
+  }
 
   /// Streaming replies produce dozens of deltas a second. Repainting the whole
   /// workspace for each one made large projects stutter, so live text is
@@ -1328,10 +1355,21 @@ class AppState extends ChangeNotifier {
       },
       skipActionFingerprints: skipActionFingerprints,
       onTextDelta: (delta) {
+        if (liveInterrupted) {
+          // Swap the failed attempt for the retried one atomically.
+          liveText = '';
+          liveThinking = '';
+          liveInterrupted = false;
+        }
         liveText += delta;
         _notifyLive();
       },
       onThinkingDelta: (delta) {
+        if (liveInterrupted) {
+          liveText = '';
+          liveThinking = '';
+          liveInterrupted = false;
+        }
         liveThinking += delta;
         _notifyLive();
       },
@@ -1360,8 +1398,10 @@ class AppState extends ChangeNotifier {
         if (tokens == null) return;
         _recordUsage(usedProvider, tokens, projectId);
       },
-      onDiscardLive: () {
-        _clearLive();
+      onRetryBegin: () {
+        liveInterrupted = liveText.trim().isNotEmpty ||
+            liveThinking.trim().isNotEmpty ||
+            liveTools.isNotEmpty;
         notifyListeners();
       },
       toolApproval: (title, body, acceptLabel) async {
@@ -1445,6 +1485,9 @@ class AppState extends ChangeNotifier {
             ok: event.ok,
           ));
         } else {
+          // A terminal error must not take the reply the user already read
+          // down with it.
+          _commitPartialLive(thread);
           _clearLive();
           thread.add(_entry(
             role: ChatRole.error,
@@ -1551,7 +1594,7 @@ class AppState extends ChangeNotifier {
         );
         _queueCheckpoint(checkpoint);
       }
-      if (_cancelled && partialText.isNotEmpty) {
+      if (interrupted && partialText.isNotEmpty) {
         for (final tool in partialTools) {
           thread.add(_entry(
             role: ChatRole.tool,

@@ -367,7 +367,6 @@ void main() {
       );
     });
 
-    var discarded = 0;
     final events = <AgentEvent>[];
     await Agent(
       client: AiClient(client: client),
@@ -376,11 +375,16 @@ void main() {
       shell: Shell(fs),
       skills: const [],
       onEvent: events.add,
-      onDiscardLive: () => discarded++,
     ).run(history: const [], prompt: 'fix the README');
 
     expect(calls, 3);
-    expect(discarded, 1);
+    expect(
+      events.where((event) =>
+          event.kind == AgentEventKind.text &&
+          event.thinking.contains('Long reasoning')),
+      isNotEmpty,
+      reason: 'the cut-off reasoning is committed, not discarded',
+    );
     expect(await fs.read('README.md'), contains('Edited after retry.'));
     expect(events.last.text, contains('README is updated'));
     expect(
@@ -500,12 +504,12 @@ void main() {
       onEvent: events.add,
     ).run(history: const [], prompt: 'read it forever');
 
-    expect(calls, 3);
+    expect(calls, 5);
     expect(
-        events.where((event) => event.kind == AgentEventKind.tool).length, 2);
+        events.where((event) => event.kind == AgentEventKind.tool).length, 4);
     expect(
       events.any((event) =>
-          event.kind == AgentEventKind.error && event.text.contains('3 times')),
+          event.kind == AgentEventKind.error && event.text.contains('5 times')),
       isTrue,
     );
   });

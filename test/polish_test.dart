@@ -368,7 +368,6 @@ void main() {
       );
     });
 
-    var discarded = 0;
     String? paused;
     final events = <AgentEvent>[];
     await Agent(
@@ -386,12 +385,10 @@ void main() {
       shell: Shell(fs),
       skills: const [],
       onEvent: events.add,
-      onDiscardLive: () => discarded++,
       onPause: (message) => paused = message,
     ).run(history: const [], prompt: 'update the README');
 
     expect(calls, 1);
-    expect(discarded, 0);
     expect(await fs.read('README.md'), '# Project');
     expect(events.last.kind, AgentEventKind.text);
     expect(events.last.text, contains('No changes were needed'));
@@ -425,7 +422,6 @@ void main() {
       );
     });
 
-    var discarded = 0;
     String? paused;
     final events = <AgentEvent>[];
     await Agent(
@@ -443,12 +439,10 @@ void main() {
       shell: Shell(fs),
       skills: const [],
       onEvent: events.add,
-      onDiscardLive: () => discarded++,
       onPause: (message) => paused = message,
     ).run(history: const [], prompt: 'update the README');
 
     expect(calls, 1);
-    expect(discarded, 0);
     expect(events.last.text, contains('Let me know'));
     expect(events.any((event) => event.kind == AgentEventKind.error), isFalse);
     expect(paused, isNull);
@@ -481,7 +475,6 @@ void main() {
       );
     });
 
-    var discarded = 0;
     final events = <AgentEvent>[];
     await Agent(
       client: AiClient(client: client),
@@ -498,11 +491,9 @@ void main() {
       shell: Shell(fs),
       skills: const [],
       onEvent: events.add,
-      onDiscardLive: () => discarded++,
     ).run(history: const [], prompt: 'explain how the update flow works');
 
     expect(calls, 1);
-    expect(discarded, 0);
     expect(await fs.read('README.md'), '# Project');
     expect(events.last.text, contains('Let me walk through it'));
   });

@@ -42,7 +42,8 @@ void main() {
           'choices': [
             {
               'message': {'role': 'assistant', ...message},
-              'finish_reason': 'tool_calls',
+              'finish_reason':
+                  message.containsKey('tool_calls') ? 'tool_calls' : 'stop',
             },
           ],
           if (usage != null) 'usage': usage,

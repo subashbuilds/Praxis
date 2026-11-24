@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import '../models.dart';
 import 'ai.dart';
@@ -8,6 +9,7 @@ import 'diff.dart';
 import 'file_types.dart';
 import 'patch.dart';
 import 'phase1_flags.dart';
+import 'reply_classifier.dart';
 import 'agent_todos.dart';
 import 'project_env.dart';
 import 'project_skills.dart';
@@ -461,6 +463,15 @@ const _compoundTools = <AiToolSpec>[
   ),
 ];
 
+/// Providers whose docs list a forced tool choice (OpenAI `required`,
+/// Anthropic `any`, Groq `required`, Mistral `required`). Others keep the text
+/// nudge instead of receiving a field they may reject: DeepSeek returns 400 in
+/// thinking mode, and OpenRouter and Together depend on the model behind them.
+bool providerSupportsRequiredToolChoice(ProviderConfig provider) {
+  const supported = {'openai', 'anthropic', 'groq', 'mistral'};
+  return supported.contains(provider.id);
+}
+
 bool providerSupportsParallelToolCalls(ProviderConfig provider) {
   const supported = {
     'openai',
@@ -503,7 +514,7 @@ class Agent {
     this.onThinkingDelta,
     this.onToolStart,
     this.onReply,
-    this.onDiscardLive,
+    this.onRetryBegin,
     this.roundLog,
     this.taskId,
     this.flags = Phase1Flags.defaults,
@@ -549,10 +560,10 @@ class Agent {
   final void Function(AiToolCall call)? onToolStart;
   final void Function(AiReply reply, ProviderConfig provider)? onReply;
 
-  /// Clears streamed text when the agent has to retry a completion that made
-  /// no file change. Without this, a premature "Done" would stay in the live
-  /// reply above the corrective round.
-  final void Function()? onDiscardLive;
+  /// The request failed and is about to be retried. The host keeps the text
+  /// already on screen, dimmed as interrupted, until the retry produces its
+  /// first delta and can replace it atomically.
+  final void Function()? onRetryBegin;
 
   /// Phase 0 instrumentation. Null disables logging; no behavior depends on it.
   final RoundLogStore? roundLog;
@@ -610,6 +621,18 @@ class Agent {
   int _todoGateRejections = 0;
   int _checklistNudges = 0;
   int _summaryNudges = 0;
+  int _toolRounds = 0;
+  String _lastToolResult = '';
+  bool _forceToolChoice = false;
+  bool _protocolRetryUsed = false;
+  final Set<String> _repeatHints = {};
+  final Random _random = Random();
+
+  /// A corrective nudge is not a fresh budget: it is bounded per streak and
+  /// once per run, so a model that never acts pauses instead of looping.
+  static const _maxAnnouncementStreak = 5;
+  static const _maxAnnouncementNudges = 10;
+  static const _repeatPauseLimit = 5;
 
   bool get _planMode => mode == AgentMode.plan;
 
@@ -776,7 +799,8 @@ class Agent {
     // as mutated so the checklist and summary rules apply to the work that is
     // already on disk.
     var mutated = skipActionFingerprints.isNotEmpty;
-    var actionNudges = 0;
+    var announcementStreak = 0;
+    var announcementNudges = 0;
     var limitNudges = 0;
     final log = roundLog;
     final task = taskId ?? 'task-${DateTime.now().microsecondsSinceEpoch}';
@@ -811,6 +835,8 @@ class Agent {
           final requestProvider = current;
           onModelRequest?.call(current);
           try {
+            final forceTool = _forceToolChoice;
+            _forceToolChoice = false;
             reply = await client.stream(
               provider: current,
               system: system,
@@ -820,6 +846,7 @@ class Agent {
               onText: onTextDelta,
               onThinking: onThinkingDelta,
               isCancelled: isCancelled,
+              toolChoice: forceTool ? 'required' : null,
             );
           } on AiCancelledException {
             outcome = AgentOutcome.userCancelled;
@@ -838,7 +865,12 @@ class Agent {
                 toolNames: const [],
                 type: RoundType.other,
                 repeatedCall: false,
-                finishReason: 'error',
+                finishReason: error.message.contains('stream ended before')
+                    ? 'truncated'
+                    : error.isTransient &&
+                            transientRetries < maxTransientRetries
+                        ? 'retry'
+                        : 'error',
               ),
             );
             if (error.isTransient) {
@@ -869,7 +901,7 @@ class Agent {
             }
             if (next.id != current.id &&
                 !providerSupportsParallelToolCalls(next)) {
-              turns.add(const AiTurn.user(
+              turns.add(const AiTurn.internalUser(
                 'Capability update: the new provider does not support parallel '
                 'read calls. Do not batch tool calls; request one at a time.',
               ));
@@ -880,6 +912,36 @@ class Agent {
           }
           _lastPromptTokens = reply.usage?.promptTokens ?? 0;
           onReply?.call(reply, current);
+
+          if (reply.droppedCalls > 0) {
+            onEvent(const AgentEvent.activity(
+              tool: 'protocol',
+              text: 'Ignored a tool call without a name',
+            ));
+          }
+          // The provider said this turn ended with tool calls but none parsed.
+          // That is a protocol failure, not an answer: retry once without
+          // spending a corrective nudge.
+          if (reply.calls.isEmpty &&
+              reply.finishReason == 'tool_calls' &&
+              !_protocolRetryUsed) {
+            _protocolRetryUsed = true;
+            await _recordRound(
+              log,
+              AgentRound(
+                taskId: task,
+                roundIndex: thisRound,
+                at: requestedAt,
+                provider: current.id,
+                model: current.model,
+                toolNames: const [],
+                type: RoundType.other,
+                repeatedCall: false,
+                finishReason: 'protocol_error',
+              ),
+            );
+            continue;
+          }
 
           final signatures = reply.calls
               .map((call) => '${call.name}:${jsonEncode(call.arguments)}')
@@ -918,17 +980,37 @@ class Agent {
                   _looksLikeContinueRequest(prompt) ||
                   (!_answerOnly && _looksLikeChangeRequest(prompt)));
           final openTodos = _todos.where((todo) => !todo.done).toList();
+          final ranTool = _toolRounds > 0;
+          // Announcement nudging depends on the run's state, not on a verb in
+          // the user's prompt: a tool that already ran, a changed file, a
+          // change request or a resumed task all expect another action.
+          final actExpected = !_planMode &&
+              (mutated || ranTool || wantsChange || expectChanges);
+          final kind = ReplyClassifier.classify(
+            text: text.isEmpty ? reply.thinking.trim() : text,
+            hitOutputLimit: reply.hitOutputLimit,
+            answerOnly: _answerOnly,
+            planMode: _planMode,
+            actExpected: actExpected,
+            openSteps: !_answerOnly && mutated ? openTodos.length : 0,
+          );
+
+          if (reply.finishReason == 'content_filter') {
+            outcome = AgentOutcome.error;
+            const message = 'The provider blocked this reply with its content '
+                'filter. Rephrase the request or choose another model.';
+            onEvent(const AgentEvent.error(message));
+            onPause?.call(message);
+            return;
+          }
 
           // A reasoning model can spend the entire output budget before it emits
           // its tool call. That is not a completed answer, so never print the
           // old "Done — no changes were needed" placeholder for it.
-          if (reply.hitOutputLimit && limitNudges < 2) {
+          if (kind == ReplyOutcome.outputLimit && limitNudges < 2) {
             limitNudges++;
-            onDiscardLive?.call();
-            if (text.isNotEmpty) {
-              turns.add(AiTurn.assistant(reply.text, const []));
-            }
-            turns.add(AiTurn.user(
+            _commitVisible(reply, turns);
+            turns.add(AiTurn.internalUser(
               _planMode
                   ? 'Your plan was cut off by the model output limit. Continue '
                       'from where it stopped and finish with the complete plan, '
@@ -943,39 +1025,49 @@ class Agent {
             continue;
           }
 
+          if (kind == ReplyOutcome.outputLimit) {
+            outcome = AgentOutcome.error;
+            const message = 'The reply kept hitting the model output limit '
+                'before it acted. Send “continue” to resume with a smaller '
+                'step.';
+            onEvent(const AgentEvent.error(message));
+            onPause?.call(message);
+            return;
+          }
+
           // Reasoning models sometimes describe the next step ("Let me read
           // the SVG…") and end the turn without calling a tool. That is not an
           // answer, so ask for the action it just announced instead of leaving
-          // the task stopped until the user types "continue". This applies
-          // after edits too: "Let me write the workflow" following successful
-          // writes is still an unfinished task, not a result.
-          if (!reply.hitOutputLimit &&
-              actionNudges < 3 &&
-              !_answerOnly &&
-              wantsChange &&
-              _announcesAction(text.isEmpty ? reply.thinking : text)) {
-            actionNudges++;
-            onDiscardLive?.call();
-            turns.add(AiTurn.assistant(reply.text, const []));
-            turns.add(AiTurn.user(
-              'You described the next step but did not run it. Call the tool '
-              'you just described now. Do not repeat the plan or the '
-              'explanation${mutated ? '; the work already done stays as it is' : ''}.',
-            ));
-            continue;
+          // the task stopped until the user types "continue". The visible text
+          // is committed first so the user never loses what they read.
+          if (kind == ReplyOutcome.unfinishedAnnouncement) {
+            if (announcementStreak < _maxAnnouncementStreak &&
+                announcementNudges < _maxAnnouncementNudges) {
+              announcementStreak++;
+              announcementNudges++;
+              _commitVisible(reply, turns);
+              onEvent(const AgentEvent.activity(
+                tool: 'continue',
+                text: 'Continuing',
+              ));
+              turns.add(AiTurn.internalUser(_announcementNudge()));
+              _forceToolChoice = providerSupportsRequiredToolChoice(current);
+              continue;
+            }
+            outcome = AgentOutcome.error;
+            const message = 'The model keeps announcing steps without acting. '
+                'Send “continue” to resume from a specific step.';
+            onEvent(const AgentEvent.error(message));
+            onPause?.call(message);
+            return;
           }
 
           // The checklist is the task's contract. A turn cannot end while
           // steps are open; the model must finish them or update the list.
-          if (!reply.hitOutputLimit &&
-              !_answerOnly &&
-              mutated &&
-              openTodos.isNotEmpty &&
-              _checklistNudges < 2) {
+          if (kind == ReplyOutcome.openChecklist && _checklistNudges < 2) {
             _checklistNudges++;
-            onDiscardLive?.call();
-            turns.add(AiTurn.assistant(reply.text, const []));
-            turns.add(AiTurn.user(
+            _commitVisible(reply, turns);
+            turns.add(AiTurn.internalUser(
               'Your checklist still has ${openTodos.length} unfinished '
               '${openTodos.length == 1 ? 'step' : 'steps'}: '
               '${openTodos.map((todo) => todo.text).join('; ')}. Continue '
@@ -989,16 +1081,15 @@ class Agent {
           // A multi-file change ends with an account of what was asked and
           // what changed, not a bare "Done". A one-file edit does not spend
           // another model round on this: the reply is already the result.
-          if (!reply.hitOutputLimit &&
+          if (kind == ReplyOutcome.finalAnswer &&
               !_answerOnly &&
               _changedPaths.length > 1 &&
               openTodos.isEmpty &&
               _summaryNudges < 1 &&
               !_mentionsChangedPath(text, _changedPaths)) {
             _summaryNudges++;
-            onDiscardLive?.call();
-            turns.add(AiTurn.assistant(reply.text, const []));
-            turns.add(const AiTurn.user(
+            _commitVisible(reply, turns);
+            turns.add(const AiTurn.internalUser(
               'Finish with a short summary for the user: restate what they '
               'asked for, list the exact files you changed, and say how you '
               'verified the result. If a requested change is still missing, '
@@ -1040,7 +1131,9 @@ class Agent {
         final calls = reply.calls;
         final validations = <String?>[
           for (final call in calls)
-            flags.loopGuards ? validateToolArguments(call, _tools) : null,
+            flags.loopGuards && call.argumentsError == null
+                ? validateToolArguments(call, _tools)
+                : null,
         ];
         var schemaStop = false;
         for (var index = 0; index < calls.length; index++) {
@@ -1061,22 +1154,29 @@ class Agent {
           return;
         }
 
-        // Repeated-call detection only applies to providers the user gave a
-        // request limit. Without a limit the agent keeps working instead of
-        // stopping mid-task on a repeated read or edit.
+        // Identical calls are watched with or without a provider limit: a hint
+        // at three, a resumable pause at five. A limit only changes the
+        // provider's own quota, not whether a loop can run to the round cap.
         var repeatedStop = false;
-        if (flags.loopGuards && current.dailyLimit > 0) {
+        var repeatHint = '';
+        if (flags.loopGuards) {
           for (final call in calls) {
             final signature = '${call.name}:${jsonEncode(call.arguments)}';
             final count = (_signatureCounts[signature] ?? 0) + 1;
             _signatureCounts[signature] = count;
-            if (count >= repeatLimit) repeatedStop = true;
+            if (count == 3 && _repeatHints.add(signature)) {
+              repeatHint = 'You have sent the same ${call.name} call three '
+                  'times with identical arguments. Use the result you already '
+                  'have; if it did not contain what you need, change the '
+                  'request or the approach instead of repeating it.';
+            }
+            if (count >= _repeatPauseLimit) repeatedStop = true;
           }
         }
         if (repeatedStop) {
           outcome = AgentOutcome.loopDetected;
           final message = 'Stopped: the model repeated the same '
-              '${calls.last.name} call $repeatLimit times with identical '
+              '${calls.last.name} call $_repeatPauseLimit times with identical '
               'arguments. This usually means the edit or read did not give it '
               'the result it expected. Send “continue” to retry with a '
               'different approach.';
@@ -1125,6 +1225,7 @@ class Agent {
         }
 
         var roundFailed = false;
+        var progressed = false;
         for (var index = 0; index < calls.length; index++) {
           final call = calls[index];
           final result = results[index];
@@ -1139,6 +1240,13 @@ class Agent {
             continue;
           }
           if (result.failed) roundFailed = true;
+          if (!result.failed) progressed = true;
+          final resultText = result.text.trim();
+          if (resultText.isNotEmpty) {
+            _lastToolResult = resultText.length > 240
+                ? resultText.substring(0, 240)
+                : resultText;
+          }
           if (!result.failed && _mutableTools.contains(call.name)) {
             mutated = true;
             _mutationCount++;
@@ -1173,6 +1281,17 @@ class Agent {
           turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
         previousToolFailed = roundFailed;
+        _toolRounds++;
+        // Progress clears the corrective budget: a model that acted is not the
+        // model that kept announcing without acting.
+        if (progressed) {
+          announcementStreak = 0;
+          _checklistNudges = 0;
+          _summaryNudges = 0;
+        }
+        if (repeatHint.isNotEmpty) {
+          turns.add(AiTurn.internalUser(repeatHint));
+        }
         final readOnlyRound = calls
             .every((call) => Phase1Flags.readOnlyTools.contains(call.name));
         if (readOnlyRound && !mutated) {
@@ -1186,7 +1305,7 @@ class Agent {
             readOnlyNudges < 2) {
           readOnlyNudges++;
           readOnlyRounds = 0;
-          turns.add(const AiTurn.user(
+          turns.add(const AiTurn.internalUser(
             'DECISION POINT: you already have enough context. Do not issue '
             'more exploration calls now. Make the first change with edit_file '
             'or write_file using the files already read. Only read again if a '
@@ -1222,15 +1341,17 @@ class Agent {
     int attempt,
     bool Function()? isCancelled,
   ) async {
-    onDiscardLive?.call();
-    final end = DateTime.now().add(retryDelay);
+    onRetryBegin?.call();
+    final end = DateTime.now().add(_retryWait(error, attempt));
     var lastSeconds = -1;
     while (true) {
       if (isCancelled?.call() ?? false) throw const AiCancelledException();
       final left = end.difference(DateTime.now()).inMilliseconds;
-      if (left <= 0) return;
-      final seconds = (left / 1000).ceil();
-      if (seconds != lastSeconds) {
+      final seconds = left <= 0 ? 0 : (left / 1000).ceil();
+      // The first report is sent even when the wait rounded to zero, so the
+      // retry banner never appears without its countdown. A zero report after
+      // a real countdown would only repeat the last one.
+      if (seconds != lastSeconds && (left > 0 || lastSeconds == -1)) {
         lastSeconds = seconds;
         onEvent(AgentEvent.retry(
           value: error.message,
@@ -1239,6 +1360,7 @@ class Agent {
           seconds: seconds,
         ));
       }
+      if (left <= 0) return;
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
   }
@@ -1307,7 +1429,8 @@ class Agent {
             'faithful working summary. Preserve file paths, decisions, '
             'constraints, failed attempts, verified results and unfinished '
             'work. Do not add new facts, do not call tools, and return only '
-            'the summary.',
+            'the summary. End with a "Current state" section and a "Next step" '
+            'section so the loop can continue without restarting the task.',
         turns: [
           AiTurn.user(
             'Condense this earlier conversation. Keep details a developer '
@@ -1322,7 +1445,11 @@ class Agent {
       if (summary.isNotEmpty) {
         final replacement = <AiTurn>[
           ...turns.take(split.headEnd),
-          AiTurn.user('CONTEXT SUMMARY (older messages compacted)\n$summary'),
+          AiTurn.internalUser(
+            'CONTEXT SUMMARY of earlier messages. This is background, not a '
+            'new request. Continue the original task from the current state.\n'
+            '$summary',
+          ),
           ...turns.skip(split.tailStart),
         ];
         turns
@@ -1511,8 +1638,10 @@ Mode: ${mode.label}.
 ${_planMode ? 'Plan mode is active. This turn is read-only: inspect the project and return a plan. Never call write_file, edit_file, apply_patch, install_skill, download_file, commit_and_push or a command that changes files. Your final answer must be a complete Markdown plan with these headings: "## Goal", "## Steps" (numbered, naming the exact files and the change for each), "## Verification" and "## Risks". Do not claim any change was made and do not ask to switch modes.' : 'Build mode is active. Read, edit, run commands and verify the project normally.'}
 
 How to work:
-- Finish the request with the fewest model rounds. Do not narrate a plan before
-  acting, and do not run a command just to confirm something already visible.
+- Finish the request with the fewest model rounds. You may write one short
+  sentence before a tool call, but the tool call must be in the same response.
+  A response with no tool call is your FINAL answer. Do not run a command just
+  to confirm something already visible.
 - Keep reasoning short. Once you know the edit, call edit_file or write_file;
   a long internal monologue can consume the output budget before you act.
 - The project tree below is current. Skip list_files for simple edits. Read only
@@ -1541,9 +1670,10 @@ ${parallelTools ? '- Batch independent reads and searches in one response so the
 - When the request does call for a change, finish it: do not answer “Done”
   until edit_file or write_file has succeeded.
 - Do not claim to have changed a file unless a file-writing tool succeeded.
-- Never end a turn on an announcement (“Let me read…”, “Let me write…”). Call
-  that tool in the same turn; an announcement without a tool call leaves the
-  task stopped.
+- Never end on “Let me…”, “Now I'll…” or “Next…”. Call that tool in the same
+  response; an announcement without a tool call leaves the task stopped.
+- If you are a reasoning model, emit tool calls as tool calls, not described in
+  your reasoning text.
 ${_answerOnly ? '- ANSWER-ONLY: the user asked a question or for an explanation or recommendation. The answer is the deliverable. Reply in prose only. Never call write_file, write_files, edit_file, apply_patch, download_file, install_skill, commit_and_push or update_todos; do not run a command that changes files; never claim a file changed. Reading and searching are allowed.' : '- TASK CHECKLIST: for a change touching more than one file, call update_todos first with 2-7 concrete steps; the first file-changing tool is refused until it exists. Mark a step in_progress when it starts and completed immediately after it finishes. Never end the turn while a step is open; finish it or rewrite the list. Every step must be completed before the final answer.'}
 - End every task that changed files with a short summary: what the user asked
   for, the exact files changed, and how you verified it. A bare “Done” is not
@@ -1575,15 +1705,6 @@ Environment:
 - Secrets and API keys live in settings; never write them into project files.
 ${integrationContext.isEmpty ? '' : '\nConnected integrations (credentials are hidden):\n$integrationContext\nUse integration_status for these accounts: service "github", "cloudflare" or "vercel" for deployments, workflows and build logs; service "supabase" with action "projects" for database projects; service "expo" with action "projects" or "builds" for EAS apps and builds; service "tavily" with action "search" and the query as target for live web search. For GitHub Actions logs, call it with service "github", action "logs" and either a run id, a full Actions run URL, or an empty target to use the latest run for the project repository. Every result lists each job with its id: pass "<run-id>/job/<job-id>" (or "<run-id>/job/<job-name>") to read any specific job, not only the failing ones. It downloads the job logs for you; never ask the user for a numeric run id first. Never ask for a token. Long build logs are returned in slices: when a result ends with "[log continues at offset N]", call integration_status again with the same service, action and target plus offset N to read the rest. Read the actual log before naming a cause; if the log is empty or not available yet, say that instead of guessing. If the provider itself expired or omitted the log, say so plainly and work from the job names and steps rather than inventing output.'}
 
-Context policy (the host enforces this automatically):
-- Below about 60% of the model window: do nothing.
-- At 60–75%: compact cheaply without a model call. Replace old, large tool
-  results with one-line stubs such as `read src/auth.ts, 412 lines, see file`,
-  and drop duplicate reads and old directory listings.
-- Above 75%, or when cheap compaction is not enough: summarize older context.
-- Always keep the system prompt, the first user request and the last 4–6
-  messages verbatim. Tool calls and their results always stay paired.
-- Never compact while a tool call or approval is pending.
 ${skillIndex.isEmpty ? '' : '\nSkills available (use /skill-name to invoke one explicitly):\n$skillIndex'}
 ${todoContext.isEmpty ? '' : '\n$todoContext'}\n${projectEnv.isEmpty ? '' : '\nProject environment (values are available to build and shell commands; secret values are hidden from you):\n${projectEnv.map((entry) => entry.secret ? '- ${entry.name} (secret)' : '- ${entry.name}=${entry.value}').join('\n')}\nNever ask the user to paste a secret; use the variable name in commands.'}
 ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillText'}
@@ -1909,6 +2030,13 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     String? validation,
   ) async {
     if (validation != null) return _ToolOutcome('Error: $validation');
+    final argumentsError = call.argumentsError;
+    if (argumentsError != null) {
+      return _ToolOutcome(
+        'Error: $argumentsError. The call was not executed. Resend a shorter '
+        'call, for example edit_file with a small old_text and new_text.',
+      );
+    }
     if (_answerOnly) {
       final writes = _mutableTools.contains(call.name) ||
           call.name == 'update_todos' ||
@@ -1986,36 +2114,63 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         caseSensitive: false,
       ).hasMatch(prompt.trim());
 
-  /// True when a reply reads like the model is about to do something rather
-  /// than reporting a finished result.
-  bool _announcesAction(String reply) {
-    final text = reply.trim();
-    if (text.isEmpty) return false;
-    final lower = text.toLowerCase();
-    // Only a trailing announcement means the turn ended before acting. A
-    // complete answer can start with "I'll explain…" or "First, I checked…"
-    // without being unfinished, so the lead is not a reliable signal.
-    // "Let me know if…" and similar closings are finished answers, not a
-    // promise to act. Remove them before looking for an announcement.
-    final tail =
-        (lower.length > 160 ? lower.substring(lower.length - 160) : lower)
-            .replaceAll(RegExp(r'\blet me know\b'), '');
-    const intent = [
-      'let me ',
-      "let's ",
-      'i will ',
-      "i'll ",
-      'i am going to ',
-      'i need to ',
-      'next, i',
-      'first, i',
-      'now i',
-    ];
-    if (!intent.any(tail.contains)) return false;
-    return RegExp(
-      r'\b(read|open|check|inspect|look|search|list|run|write|edit|update|'
-      r'verify|grep|find|fetch|test|build|fix)\b',
-    ).hasMatch(tail);
+  /// Commits the reply the user has already read as its own transcript entry.
+  /// The host clears the live draft in the same event, so the text appears
+  /// exactly once and survives the corrective round.
+  void _commitVisible(AiReply reply, List<AiTurn> turns) {
+    final text = reply.text.trim();
+    final thinking = reply.thinking.trim();
+    if (text.isEmpty && thinking.isEmpty) return;
+    // The model keeps its own words in context, and the user keeps them in the
+    // transcript. The corrective nudge follows as an internal turn.
+    if (text.isNotEmpty) turns.add(AiTurn.assistant(reply.text, const []));
+    onEvent(AgentEvent.text(text, thinking: thinking));
+  }
+
+  /// The corrective round names what is already done so the model does not
+  /// restart the task, then asks for the call it just described.
+  String _announcementNudge() {
+    final ledger = _progressLedger();
+    return 'You described the next step but did not run it. '
+        '${ledger.isEmpty ? '' : '$ledger '}'
+        'Continue; do not restate or redo completed work. Call the tool you '
+        'just described now, in this same response.';
+  }
+
+  String _progressLedger() {
+    final rows = <String>[];
+    if (_changedPaths.isNotEmpty) {
+      rows.add('Files already changed: '
+          '${_changedPaths.take(8).join(', ')}.');
+    }
+    if (_lastToolResult.isNotEmpty) {
+      rows.add('Last tool result: '
+          '${_lastToolResult.replaceAll(RegExp(r'\s+'), ' ')}');
+    }
+    final open =
+        _todos.where((todo) => !todo.done).map((todo) => todo.text).toList();
+    if (open.isNotEmpty) {
+      rows.add('Open checklist steps: ${open.join('; ')}.');
+    }
+    if (rows.isEmpty) return '';
+    return 'Progress so far. ${rows.join(' ')}';
+  }
+
+  /// Exponential backoff with jitter, capped so a retry chain stays bounded.
+  /// A provider's Retry-After wins when it sends one.
+  Duration _retryWait(AiProviderException error, int attempt) {
+    final server = error.retryAfter;
+    if (server != null && server > Duration.zero) {
+      return server > const Duration(minutes: 2)
+          ? const Duration(minutes: 2)
+          : server;
+    }
+    final factor = 1 << (attempt - 1).clamp(0, 3);
+    final floor =
+        retryDelay.inMilliseconds <= 0 ? 100 : retryDelay.inMilliseconds;
+    final capped = (retryDelay.inMilliseconds * factor).clamp(floor, 30000);
+    final jitter = 0.85 + (_random.nextDouble() * 0.3);
+    return Duration(milliseconds: (capped * jitter).round());
   }
 
   /// Only patches that delete a file need permission. Ordinary edits and

@@ -437,14 +437,27 @@ const kProviderPresets = <ProviderConfig>[
 ];
 
 class AiProviderException implements Exception {
-  AiProviderException(this.message, {this.status});
+  AiProviderException(
+    this.message, {
+    this.status,
+    this.transient,
+    this.retryAfter,
+  });
   final String message;
   final int? status;
+
+  /// Set where the failure is raised when the adapter knows whether waiting
+  /// can help. The message check below is only a fallback for errors that
+  /// arrive without a status or a classification.
+  final bool? transient;
+  final Duration? retryAfter;
 
   /// True when waiting could fix the request: a rate limit, a provider
   /// outage or a network timeout. A rejected key, missing model or invalid
   /// base URL is not retried.
   bool get isTransient {
+    final explicit = transient;
+    if (explicit != null) return explicit;
     if (status == 429 || status == 408) return true;
     if (status != null && status! >= 500) return true;
     if (status != null) return false;
@@ -483,11 +496,10 @@ class QuotaExceeded extends AiProviderException {
   QuotaExceeded(
     super.message, {
     super.status,
-    this.retryAfter,
+    super.retryAfter,
     this.providerId = '',
   });
 
-  final Duration? retryAfter;
   final String providerId;
 
   @override

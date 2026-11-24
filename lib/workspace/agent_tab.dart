@@ -314,6 +314,7 @@ class _AgentTabState extends State<AgentTab> {
                                 thinking: state.liveThinking,
                                 tools: state.liveTools,
                                 busy: state.busy,
+                                interrupted: state.liveInterrupted,
                                 thinkingOpen: _liveThinkingOpen,
                                 onToggleThinking: () => setState(
                                   () => _liveThinkingOpen = !_liveThinkingOpen,
@@ -839,6 +840,7 @@ class _LiveReply extends StatelessWidget {
     required this.thinking,
     required this.tools,
     required this.busy,
+    required this.interrupted,
     required this.thinkingOpen,
     required this.onToggleThinking,
   });
@@ -847,6 +849,7 @@ class _LiveReply extends StatelessWidget {
   final String thinking;
   final List<ToolDraft> tools;
   final bool busy;
+  final bool interrupted;
   final bool thinkingOpen;
   final VoidCallback onToggleThinking;
 
@@ -869,19 +872,31 @@ class _LiveReply extends StatelessWidget {
               onToggle: onToggleThinking,
             ),
           ],
+          if (interrupted) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Interrupted, reconnecting…',
+              style: Txt.meta.copyWith(color: Pal.ember),
+            ),
+          ],
           if (text.isNotEmpty) ...[
             const SizedBox(height: 6),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(child: _MessageText(text)),
+                Expanded(
+                  child: Opacity(
+                    opacity: interrupted ? 0.55 : 1,
+                    child: _MessageText(text),
+                  ),
+                ),
                 const _StreamCaret(),
               ],
             ),
           ] else if (busy && tools.isEmpty) ...[
             const SizedBox(height: 7),
             Text(
-              'Thinking…',
+              interrupted ? 'Reconnecting…' : 'Thinking…',
               style: Txt.meta.copyWith(color: Pal.textDim),
             ),
           ],

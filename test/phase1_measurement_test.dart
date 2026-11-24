@@ -235,7 +235,7 @@ void main() {
     expect(on, 3);
   });
 
-  test('scripted loop-guard measurement: 8 rounds off, 3 rounds on', () async {
+  test('scripted loop-guard measurement: 8 rounds off, 5 rounds on', () async {
     await fs.write('README.md', '# Project');
     final client = MockClient((request) async {
       return jsonResponse({
@@ -274,6 +274,6 @@ void main() {
     final off = await run(false);
     final on = await run(true);
     expect(off, 8);
-    expect(on, 3);
+    expect(on, 5);
   });
 }

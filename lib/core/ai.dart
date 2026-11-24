@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -11,12 +12,20 @@ import '../models.dart';
 const kDefaultMaxOutputTokens = 8192;
 
 class AiToolCall {
-  const AiToolCall(
-      {required this.id, required this.name, required this.arguments});
+  const AiToolCall({
+    required this.id,
+    required this.name,
+    required this.arguments,
+    this.argumentsError,
+  });
 
   final String id;
   final String name;
   final Map<String, dynamic> arguments;
+
+  /// Set when the provider's arguments were cut off or were not valid JSON.
+  /// The call must not be executed with guessed arguments.
+  final String? argumentsError;
 }
 
 class AiTurn {
@@ -24,22 +33,36 @@ class AiTurn {
       : role = 'user',
         calls = const [],
         toolCallId = '',
-        toolName = '';
+        toolName = '',
+        internal = false;
+
+  /// A corrective instruction from the agent loop. The model sees it, but it
+  /// is not a user message: it is never shown in the transcript and never
+  /// stored in chat history or a checkpoint tail.
+  const AiTurn.internalUser(this.text)
+      : role = 'user',
+        calls = const [],
+        toolCallId = '',
+        toolName = '',
+        internal = true;
 
   const AiTurn.assistant(this.text, this.calls)
       : role = 'assistant',
         toolCallId = '',
-        toolName = '';
+        toolName = '',
+        internal = false;
 
   const AiTurn.tool(this.toolCallId, this.toolName, this.text)
       : role = 'tool',
-        calls = const [];
+        calls = const [],
+        internal = false;
 
   final String role;
   final String text;
   final List<AiToolCall> calls;
   final String toolCallId;
   final String toolName;
+  final bool internal;
 }
 
 class AiToolSpec {
@@ -76,9 +99,14 @@ class AiReply {
     this.thinking = '',
     this.usage,
     this.finishReason = '',
+    this.droppedCalls = 0,
   });
   final String text;
   final List<AiToolCall> calls;
+
+  /// Tool calls the provider sent without a name. They are discarded instead of
+  /// being executed as a tool named "".
+  final int droppedCalls;
 
   /// Reasoning returned by models that expose it (deepseek-reasoner,
   /// OpenRouter reasoning models, Anthropic thinking blocks).
@@ -100,7 +128,14 @@ class AiCancelledException implements Exception {
 }
 
 class AiClient {
-  AiClient({http.Client? client}) : _client = client ?? http.Client();
+  AiClient({http.Client? client, this.idleTimeout = _defaultIdleTimeout})
+      : _client = client ?? http.Client();
+
+  /// A reasoning model can be silent while it thinks. The timeout only fires
+  /// when no bytes arrive for this long, and SSE keep-alive comments count as
+  /// activity.
+  static const _defaultIdleTimeout = Duration(seconds: 120);
+  final Duration idleTimeout;
 
   final http.Client _client;
 
@@ -157,6 +192,7 @@ class AiClient {
     AiDelta? onText,
     AiDelta? onThinking,
     bool Function()? isCancelled,
+    String? toolChoice,
   }) async {
     if (isCancelled?.call() ?? false) throw const AiCancelledException();
     final uri = _uriFor(provider);
@@ -164,9 +200,9 @@ class AiClient {
     request.headers.addAll(_headers(provider));
     request.body = jsonEncode(provider.flavor == ApiFlavor.anthropic
         ? _anthropicPayload(provider, system, turns, tools, maxTokens,
-            stream: true)
+            stream: true, toolChoice: toolChoice)
         : _openAiPayload(provider, system, turns, tools, maxTokens,
-            stream: true));
+            stream: true, toolChoice: toolChoice));
 
     http.StreamedResponse response;
     try {
@@ -177,10 +213,19 @@ class AiClient {
       }
     } on TimeoutException {
       throw AiProviderException(
-          '${provider.name} did not start answering within 45s.');
+        '${provider.name} did not start answering within 45s.',
+        transient: true,
+      );
     } on http.ClientException catch (error) {
       throw AiProviderException(
-          'Network error talking to ${provider.name}: ${error.message}');
+        'Network error talking to ${provider.name}: ${error.message}',
+        transient: true,
+      );
+    } on SocketException catch (error) {
+      throw AiProviderException(
+        'The connection to ${provider.name} failed: ${error.message}',
+        transient: true,
+      );
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -233,7 +278,7 @@ class AiClient {
     final lines = response.stream
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .timeout(const Duration(seconds: 60));
+        .timeout(idleTimeout);
     final controller = StreamController<String>();
     final subscription = lines.listen(
       controller.add,
@@ -260,12 +305,14 @@ class AiClient {
               onText,
               onThinking,
               isCancelled: isCancelled,
+              requireTerminator: true,
             )
           : _consumeOpenAi(
               controller.stream,
               onText,
               onThinking,
               isCancelled: isCancelled,
+              requireTerminator: true,
             );
       return await Future.any<AiReply>([
         consumed,
@@ -274,7 +321,35 @@ class AiClient {
       ]);
     } on TimeoutException {
       throw AiProviderException(
-          '${provider.name} stalled mid-response. Try again.');
+        '${provider.name} has sent no data for ${idleTimeout.inSeconds}s. '
+        'The model may still be thinking.',
+        transient: true,
+      );
+    } on http.ClientException catch (error) {
+      throw AiProviderException(
+        'The connection to ${provider.name} dropped: ${error.message}',
+        transient: true,
+      );
+    } on SocketException catch (error) {
+      throw AiProviderException(
+        'The connection to ${provider.name} dropped: ${error.message}',
+        transient: true,
+      );
+    } on HandshakeException catch (error) {
+      throw AiProviderException(
+        'Secure connection to ${provider.name} failed: ${error.message}',
+        transient: true,
+      );
+    } on TlsException catch (error) {
+      throw AiProviderException(
+        'Secure connection to ${provider.name} failed: ${error.message}',
+        transient: true,
+      );
+    } on HttpException catch (error) {
+      throw AiProviderException(
+        'HTTP error from ${provider.name}: ${error.message}',
+        transient: true,
+      );
     } finally {
       cancellationTimer?.cancel();
       await subscription.cancel();
@@ -324,19 +399,26 @@ class AiClient {
     AiDelta? onThinking, {
     String? seeded,
     bool Function()? isCancelled,
+    bool requireTerminator = false,
   }) async {
     final text = StringBuffer();
     final thinking = StringBuffer();
     final calls = <int, _CallBuilder>{};
     AiUsage? usage;
     var finishReason = '';
+    var sawDone = false;
+    var sawFinish = false;
 
     Future<void> consume(String line) async {
       if (isCancelled?.call() ?? false) throw const AiCancelledException();
       final trimmed = line.trim();
       if (!trimmed.startsWith('data:')) return;
       final data = trimmed.substring(5).trim();
-      if (data.isEmpty || data == '[DONE]') return;
+      if (data.isEmpty) return;
+      if (data == '[DONE]') {
+        sawDone = true;
+        return;
+      }
       Map<String, dynamic> json;
       try {
         json = jsonDecode(data) as Map<String, dynamic>;
@@ -344,9 +426,12 @@ class AiClient {
         return;
       }
       if (json['error'] is Map) {
-        final message =
-            (json['error'] as Map)['message']?.toString() ?? 'Provider error';
-        throw AiProviderException(message);
+        final error = json['error'] as Map;
+        final message = error['message']?.toString() ?? 'Provider error';
+        final rawCode = error['code'] ?? error['status'];
+        final status =
+            rawCode is num ? rawCode.toInt() : int.tryParse('${rawCode ?? ''}');
+        throw AiProviderException(message, status: status);
       }
       final rawUsage = json['usage'];
       if (rawUsage is Map) {
@@ -359,6 +444,13 @@ class AiClient {
       final rawFinish = choice['finish_reason'];
       if (rawFinish is String && rawFinish.isNotEmpty) {
         finishReason = rawFinish;
+        sawFinish = true;
+        if (rawFinish == 'error') {
+          throw AiProviderException(
+            'The provider stopped the response with an error.',
+            transient: true,
+          );
+        }
       }
       final delta = choice['delta'] ?? choice['message'];
       if (delta is! Map) return;
@@ -401,15 +493,27 @@ class AiClient {
       await consume(line);
     }
 
+    if (requireTerminator && !sawDone && !sawFinish) {
+      throw AiProviderException(
+        'The response stream ended before the reply was complete.',
+        transient: true,
+      );
+    }
     final parsedCalls = <AiToolCall>[];
+    var dropped = 0;
     for (final entry in (calls.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key)))) {
       final call = entry.value;
-      if (call.name.isEmpty) continue;
+      if (call.name.isEmpty) {
+        dropped++;
+        continue;
+      }
+      final parsed = _parseArguments(call.arguments.toString());
       parsedCalls.add(AiToolCall(
         id: call.id.isEmpty ? 'call_${entry.key}' : call.id,
         name: call.name,
-        arguments: _arguments(call.arguments.toString()),
+        arguments: parsed.arguments,
+        argumentsError: parsed.error,
       ));
     }
     return AiReply(
@@ -418,6 +522,7 @@ class AiClient {
       thinking: thinking.toString().trim(),
       usage: usage,
       finishReason: finishReason,
+      droppedCalls: dropped,
     );
   }
 
@@ -427,6 +532,7 @@ class AiClient {
     AiDelta? onThinking, {
     String? seeded,
     bool Function()? isCancelled,
+    bool requireTerminator = false,
   }) async {
     final text = StringBuffer();
     final thinking = StringBuffer();
@@ -434,6 +540,7 @@ class AiClient {
     var promptTokens = 0;
     var completionTokens = 0;
     var finishReason = '';
+    var sawFinish = false;
 
     Future<void> consume(String line) async {
       if (isCancelled?.call() ?? false) throw const AiCancelledException();
@@ -489,16 +596,28 @@ class AiClient {
           final delta = json['delta'];
           if (delta is Map && delta['stop_reason'] is String) {
             finishReason = delta['stop_reason'] as String;
+            sawFinish = true;
           }
           final usage = json['usage'];
           if (usage is Map) {
             completionTokens =
                 usage['output_tokens'] as int? ?? completionTokens;
           }
+        case 'message_stop':
+          sawFinish = true;
         case 'error':
           final error = json['error'];
+          final type = error is Map ? '${error['type'] ?? ''}' : '';
+          final status = switch (type) {
+            'overloaded_error' => 529,
+            'rate_limit_error' => 429,
+            'api_error' => 500,
+            _ => null,
+          };
           throw AiProviderException(
-              error is Map ? '${error['message']}' : 'Provider error');
+            error is Map ? '${error['message']}' : 'Provider error',
+            status: status,
+          );
       }
     }
 
@@ -511,15 +630,27 @@ class AiClient {
       await consume(line);
     }
 
+    if (requireTerminator && !sawFinish) {
+      throw AiProviderException(
+        'The response stream ended before the reply was complete.',
+        transient: true,
+      );
+    }
     final calls = <AiToolCall>[];
+    var dropped = 0;
     for (final entry in (blocks.entries.toList()
       ..sort((a, b) => a.key.compareTo(b.key)))) {
       final call = entry.value;
-      if (call.name.isEmpty) continue;
+      if (call.name.isEmpty) {
+        dropped++;
+        continue;
+      }
+      final parsed = _parseArguments(call.arguments.toString());
       calls.add(AiToolCall(
         id: call.id.isEmpty ? 'tool_${entry.key}' : call.id,
         name: call.name,
-        arguments: _arguments(call.arguments.toString()),
+        arguments: parsed.arguments,
+        argumentsError: parsed.error,
       ));
     }
     return AiReply(
@@ -533,6 +664,7 @@ class AiClient {
               completionTokens: completionTokens,
             ),
       finishReason: finishReason,
+      droppedCalls: dropped,
     );
   }
 
@@ -707,6 +839,7 @@ class AiClient {
     List<AiToolSpec> tools,
     int maxTokens, {
     bool stream = false,
+    String? toolChoice,
   }) {
     final messages = <Map<String, dynamic>>[
       {'role': 'system', 'content': system},
@@ -727,7 +860,7 @@ class AiClient {
                 },
               })
           .toList(),
-      'tool_choice': 'auto',
+      'tool_choice': toolChoice ?? 'auto',
       if (stream) 'stream': true,
       if (stream) 'stream_options': {'include_usage': true},
     };
@@ -784,6 +917,7 @@ class AiClient {
     List<AiToolSpec> tools,
     int maxTokens, {
     bool stream = false,
+    String? toolChoice,
   }) {
     final messages = <Map<String, dynamic>>[];
     for (final turn in turns) {
@@ -839,6 +973,9 @@ class AiClient {
                 'input_schema': tool.parameters,
               })
           .toList(),
+      // "any" makes the next round a tool call. It is sent only for the
+      // corrective round after an unfinished announcement.
+      if (toolChoice == 'required') 'tool_choice': {'type': 'any'},
       if (stream) 'stream': true,
     };
   }
@@ -854,13 +991,21 @@ class AiClient {
     final reasoning = message['reasoning_content'] ?? message['reasoning'];
     final thinking = reasoning is String ? reasoning.trim() : '';
     final calls = <AiToolCall>[];
+    var dropped = 0;
     for (final raw in (message['tool_calls'] as List? ?? const [])) {
       final call = raw as Map<String, dynamic>;
       final function = call['function'] as Map<String, dynamic>? ?? const {};
+      final name = function['name'] as String? ?? '';
+      if (name.isEmpty) {
+        dropped++;
+        continue;
+      }
+      final parsed = _parseArguments(function['arguments']);
       calls.add(AiToolCall(
         id: call['id'] as String? ?? 'call_${calls.length}',
-        name: function['name'] as String? ?? '',
-        arguments: _arguments(function['arguments']),
+        name: name,
+        arguments: parsed.arguments,
+        argumentsError: parsed.error,
       ));
     }
     return AiReply(
@@ -869,6 +1014,7 @@ class AiClient {
       thinking: thinking,
       usage: _usageFrom(body['usage']),
       finishReason: choices.first['finish_reason'] as String? ?? '',
+      droppedCalls: dropped,
     );
   }
 
@@ -877,6 +1023,7 @@ class AiClient {
     final buffer = StringBuffer();
     final reason = StringBuffer();
     final calls = <AiToolCall>[];
+    var dropped = 0;
     for (final raw in content) {
       final block = raw as Map<String, dynamic>;
       if (block['type'] == 'text') {
@@ -884,11 +1031,18 @@ class AiClient {
       } else if (block['type'] == 'thinking') {
         reason.write(block['thinking'] as String? ?? '');
       } else if (block['type'] == 'tool_use') {
+        final name = block['name'] as String? ?? '';
+        if (name.isEmpty) {
+          dropped++;
+          continue;
+        }
+        final input = block['input'];
         calls.add(AiToolCall(
           id: block['id'] as String? ?? 'tool_${calls.length}',
-          name: block['name'] as String? ?? '',
-          arguments:
-              (block['input'] as Map?)?.cast<String, dynamic>() ?? const {},
+          name: name,
+          arguments: input is Map ? input.cast<String, dynamic>() : const {},
+          argumentsError:
+              input == null || input is Map ? null : 'arguments were not a map',
         ));
       }
     }
@@ -907,6 +1061,7 @@ class AiClient {
           ? null
           : AiUsage(promptTokens: prompt, completionTokens: completion),
       finishReason: body['stop_reason'] as String? ?? '',
+      droppedCalls: dropped,
     );
   }
 
@@ -921,17 +1076,31 @@ class AiClient {
     );
   }
 
-  Map<String, dynamic> _arguments(Object? raw) {
-    if (raw is Map) return raw.cast<String, dynamic>();
+  /// Parses tool arguments without inventing a value for a broken payload.
+  /// The call is still returned so the loop can answer with a precise error.
+  ({Map<String, dynamic> arguments, String? error}) _parseArguments(
+      Object? raw) {
+    if (raw is Map) {
+      return (arguments: raw.cast<String, dynamic>(), error: null);
+    }
     if (raw is String && raw.trim().isNotEmpty) {
       try {
         final decoded = jsonDecode(raw);
-        if (decoded is Map) return decoded.cast<String, dynamic>();
+        if (decoded is Map) {
+          return (arguments: decoded.cast<String, dynamic>(), error: null);
+        }
+        return (
+          arguments: const {},
+          error: 'the tool arguments were not a JSON object',
+        );
       } catch (_) {
-        // fall through to empty args
+        return (
+          arguments: const {},
+          error: 'the tool arguments were cut off or not valid JSON',
+        );
       }
     }
-    return const {};
+    return (arguments: const {}, error: null);
   }
 
   AiProviderException _failure(

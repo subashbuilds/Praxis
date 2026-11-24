@@ -190,8 +190,12 @@ void main() {
     expect(switched, isFalse);
     final retries =
         events.where((event) => event.kind == AgentEventKind.retry).toList();
-    expect(retries, hasLength(Agent.defaultMaxTransientRetries));
-    expect(retries.map((event) => event.attempt), [1, 2, 3, 4, 5]);
+    // The countdown emits once per remaining second, so a short test delay can
+    // report the start and the final second of the same attempt.
+    expect(
+      retries.map((event) => event.attempt).toSet(),
+      {1, 2, 3, 4, 5},
+    );
   });
 
   test('a transient failure retries the same model and reports the wait',
@@ -336,13 +340,13 @@ void main() {
     expect(events.last.text, 'Recovered.');
   });
 
-  test('repeated calls are only stopped when the provider sets a limit',
+  test('identical calls pause at five with or without a provider limit',
       () async {
     Future<List<AgentEvent>> run({required int dailyLimit}) async {
       var calls = 0;
       final client = MockClient((request) async {
         calls++;
-        if (calls <= 3) {
+        if (calls <= 6) {
           return http.Response(
             jsonEncode({
               'choices': [
@@ -406,11 +410,12 @@ void main() {
       return events;
     }
 
+    // Three identical calls add a hint; the fifth pauses the task whether or
+    // not the provider has a daily limit.
     final unlimited = await run(dailyLimit: 0);
-    expect(unlimited.last.text, 'Finished reading.');
     expect(
       unlimited.any((event) => event.text.contains('repeated the same')),
-      isFalse,
+      isTrue,
     );
 
     final limited = await run(dailyLimit: 3);
