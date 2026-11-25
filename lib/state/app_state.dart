@@ -1196,15 +1196,31 @@ class AppState extends ChangeNotifier {
     // A paused task must continue from its checkpoint. Sending a fresh prompt
     // with only the recent transcript made the model restart the whole task.
     if (attachments.isEmpty && !busy && _looksLikeContinuePrompt(raw)) {
+      // "continue, and also change the header" is a resume plus new work. The
+      // words after the keyword must reach the model, not be dropped by the
+      // resume path.
+      final instructions = _continueInstructions(raw);
+      void recordInstructions() {
+        if (instructions.isEmpty) return;
+        threadOf(projectId).add(_entry(
+          role: ChatRole.user,
+          text: instructions,
+        ));
+        notifyListeners();
+        unawaited(_persistChat(projectId));
+      }
+
       if (hasResumableCheckpoint(projectId)) {
-        await resumeTask(projectId);
+        recordInstructions();
+        await resumeTask(projectId, instructions: instructions);
         return;
       }
       // No checkpoint was kept, but the project already has this conversation.
       // Send an explicit continuation brief so the model resumes instead of
       // starting the task again from its first step.
-      final continued = _continuePrompt(projectId);
+      final continued = _continuePrompt(projectId, instructions: instructions);
       if (continued != null) {
+        recordInstructions();
         threadOf(projectId).add(_entry(
           role: ChatRole.note,
           text: 'Continuing the previous task from the last unfinished step.',
@@ -1672,7 +1688,21 @@ class AppState extends ChangeNotifier {
   /// Builds a continuation brief from the visible transcript. It names the
   /// original request, the work already recorded, and the open checklist so a
   /// "continue" after a stop picks up instead of restarting the task.
-  String? _continuePrompt(String projectId) {
+  /// The part of a continue prompt that is new work. Everything after the
+  /// leading keyword is kept so extra instructions are not silently lost.
+  String _continueInstructions(String raw) => raw
+      .trim()
+      .replaceFirst(
+        RegExp(
+          r'^(?:please\s+)?(?:continue|resume|keep going|go on|carry on)\b',
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .replaceFirst(RegExp(r'^[\s,.;:!–—-]+'), '')
+      .trim();
+
+  String? _continuePrompt(String projectId, {String instructions = ''}) {
     final thread = threadOf(projectId);
     final requests = thread
         .where((entry) =>
@@ -1704,6 +1734,10 @@ class AppState extends ChangeNotifier {
         .toList();
     final lastReply =
         replies.isEmpty ? '' : replies.last.text.trim().replaceAll('\n', ' ');
+    final extra = instructions.trim().isEmpty
+        ? ''
+        : '\n\nThe user added this when asking to continue. Do it as part of the '
+            'task, not after restarting it:\n$instructions';
     return '''CONTINUE THE PREVIOUS TASK
 Do not restart this task. The transcript above is the same task and the project already contains the work done so far.
 
@@ -1717,7 +1751,7 @@ ${changed.isEmpty ? '- None recorded.' : changed.take(12).map((path) => '- $path
 Open checklist steps:
 ${open.isEmpty ? '- None recorded. Continue from the last unfinished step.' : open.take(12).join('\n')}
 
-Resume from the last unfinished step now. Re-read a file before editing it. Do not repeat a write or command that already succeeded, and do not begin the task again from the first step.'''
+Resume from the last unfinished step now. Re-read a file before editing it. Do not repeat a write or command that already succeeded, and do not begin the task again from the first step.$extra'''
         .trim();
   }
 
@@ -1958,7 +1992,7 @@ Resume from the last unfinished step now. Re-read a file before editing it. Do n
   bool hasResumableCheckpoint(String projectId) =>
       _checkpoints[projectId]?.resumable ?? false;
 
-  Future<void> resumeTask(String projectId) async {
+  Future<void> resumeTask(String projectId, {String instructions = ''}) async {
     if (busy) return;
     final checkpoint = _checkpoints[projectId];
     if (checkpoint == null || !checkpoint.resumable) return;
@@ -1984,7 +2018,7 @@ Resume from the last unfinished step now. Re-read a file before editing it. Do n
     unawaited(_reportExternalChanges(project, checkpoint));
     await _runPrompt(
       projectId,
-      _resumeSummary(checkpoint, const []),
+      _resumeSummary(checkpoint, const [], instructions: instructions),
       historyOverride: _historyFor(thread),
       skipActionFingerprints: skip,
       resumeFrom: checkpoint,
@@ -2041,7 +2075,11 @@ Resume from the last unfinished step now. Re-read a file before editing it. Do n
     return changed.take(20).toList();
   }
 
-  String _resumeSummary(TaskCheckpoint checkpoint, List<String> external) {
+  String _resumeSummary(
+    TaskCheckpoint checkpoint,
+    List<String> external, {
+    String instructions = '',
+  }) {
     final completed = checkpoint.completed.isEmpty
         ? '- No completed steps were recorded.'
         : checkpoint.completed.map((step) => '- $step').join('\n');
@@ -2051,6 +2089,10 @@ Resume from the last unfinished step now. Re-read a file before editing it. Do n
     final externalText = external.isEmpty
         ? '- None.'
         : external.map((path) => '- $path').join('\n');
+    final extra = instructions.trim().isEmpty
+        ? ''
+        : '\n\nThe user added this when asking to continue. Do it as part of the '
+            'same task:\n$instructions';
     return '''RESUME TASK
 Original request: ${checkpoint.originalPrompt}
 
@@ -2066,7 +2108,7 @@ $externalText
 Remaining step: ${checkpoint.pendingStep.isEmpty ? 'Continue the original request from the last completed step.' : checkpoint.pendingStep}
 Git branch: ${checkpoint.gitBranch.isEmpty ? 'unknown' : checkpoint.gitBranch}
 
-Continue seamlessly from the remaining step. Do not restart the task from the beginning and do not repeat a write or destructive action that already completed. Use the current files on disk, not assumptions from before the interruption.'''
+Continue seamlessly from the remaining step. Do not restart the task from the beginning and do not repeat a write or destructive action that already completed. Use the current files on disk, not assumptions from before the interruption.$extra'''
         .trim();
   }
 

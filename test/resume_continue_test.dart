@@ -275,6 +275,101 @@ void main() {
     );
   });
 
+  test('instructions typed with continue reach the resumed task', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_resume_extra_');
+    addTearDown(() => temp.delete(recursive: true));
+    final store = MemoryStore();
+    final checkpoints = MemoryTaskCheckpointStore();
+
+    final setup = AppState(
+      root: temp,
+      store: store,
+      checkpointStore: checkpoints,
+      seedWelcome: false,
+    );
+    await setup.init();
+    final project =
+        await setup.createProject('resume-extra', ProjectKind.blank);
+    setup.dispose();
+
+    await checkpoints.save(TaskCheckpoint(
+      taskId: 'resume-extra-task',
+      projectId: project.id,
+      providerId: 'test',
+      providerName: 'Test',
+      model: 'test-model',
+      originalPrompt: 'Implement the saved feature.',
+      createdAt: DateTime.now().subtract(const Duration(minutes: 3)),
+      updatedAt: DateTime.now(),
+      status: TaskCheckpointStatus.resumable,
+      completed: const ['created lib/main.dart'],
+      pendingStep:
+          'Continue the original request from the last completed step.',
+      changedFiles: const {'lib/main.dart': 'digest'},
+    ));
+
+    final requests = <Map<String, dynamic>>[];
+    final client = MockClient((request) async {
+      requests.add((jsonDecode(request.body) as Map).cast<String, dynamic>());
+      return http.Response(
+        jsonEncode({
+          'choices': [
+            {
+              'message': {
+                'role': 'assistant',
+                'content': 'Applied the extra instruction too.',
+              },
+            },
+          ],
+        }),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    final state = AppState(
+      root: temp,
+      store: store,
+      checkpointStore: checkpoints,
+      seedWelcome: false,
+      httpClient: client,
+    );
+    addTearDown(state.dispose);
+    await state.init();
+    await state.saveProvider(const ProviderConfig(
+      id: 'test',
+      name: 'Test',
+      icon: 'x',
+      baseUrl: 'https://example.test/v1',
+      model: 'test-model',
+      flavor: ApiFlavor.openai,
+      keys: ['key'],
+    ));
+
+    await state.send(
+      project.id,
+      'continue, and rename the header to Welcome',
+    );
+
+    final contents = (requests.first['messages'] as List)
+        .whereType<Map>()
+        .map((message) => '${message['content']}')
+        .toList();
+    expect(contents.any((text) => text.contains('RESUME TASK')), isTrue);
+    expect(
+      contents.any((text) => text.contains('rename the header to Welcome')),
+      isTrue,
+    );
+    expect(
+      state.threadOf(project.id).any(
+            (entry) =>
+                entry.role == ChatRole.user &&
+                entry.text.contains('rename the header to Welcome'),
+          ),
+      isTrue,
+    );
+  });
+
   test('context usage reads the latest matching request', () async {
     final temp = await Directory.systemTemp.createTemp('praxis_context_');
     addTearDown(() => temp.delete(recursive: true));

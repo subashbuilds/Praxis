@@ -310,6 +310,7 @@ class _AgentTabState extends State<AgentTab> {
                                 thread.length + (showLive ? 1 : 0) - 1 - index;
                             if (position >= thread.length) {
                               return _LiveReply(
+                                key: const ValueKey('live-reply'),
                                 text: state.liveText,
                                 thinking: state.liveThinking,
                                 tools: state.liveTools,
@@ -322,7 +323,12 @@ class _AgentTabState extends State<AgentTab> {
                               );
                             }
                             final entry = thread[position];
+                            // Without a key, the reversed list reuses the
+                            // element at an index for a different entry when a
+                            // new one arrives. An open pill then jumped to the
+                            // next tool call while the user was reading it.
                             return _EntryView(
+                              key: ValueKey(entry.id),
                               entry: entry,
                               project: widget.project,
                               thinkingOpen: _openThinking.contains(entry.id) ||
@@ -500,9 +506,15 @@ class _TodoSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final done = todos.where((todo) => todo.done).length;
+    // The sheet is only as tall as the checklist needs. A two-step plan used
+    // to open at 62% of the screen, far away from the bar that was tapped.
+    final screen = MediaQuery.sizeOf(context).height;
+    final content = 84.0 + todos.length * 44.0;
+    final height = (content + MediaQuery.paddingOf(context).bottom)
+        .clamp(screen * 0.22, screen * 0.62);
     return SafeArea(
       child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.62,
+        height: height.toDouble(),
         child: Column(
           children: [
             const SheetHandle(),
@@ -673,6 +685,7 @@ class _EmptyAgent extends StatelessWidget {
 
 class _EntryView extends StatelessWidget {
   const _EntryView({
+    super.key,
     required this.entry,
     required this.project,
     required this.thinkingOpen,
@@ -836,6 +849,7 @@ class _MessageText extends StatelessWidget {
 
 class _LiveReply extends StatelessWidget {
   const _LiveReply({
+    super.key,
     required this.text,
     required this.thinking,
     required this.tools,

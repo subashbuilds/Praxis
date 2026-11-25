@@ -986,6 +986,91 @@ class _PushSheetState extends State<PushSheet> {
     }
   }
 
+  /// Commits that are ready to push sit at the top of the sheet, newest
+  /// first, so a commit made a moment ago is visible without scrolling to the
+  /// bottom past the file list.
+  List<Widget> _pendingCommitSection() {
+    if (_pendingForTarget == 0) return const [];
+    final commits = _push.pending
+        .where((commit) => commit.matches(_ownerText, _repoText, _branchText))
+        .toList()
+        .reversed;
+    final last = _push.lastPendingFor(_ownerText, _repoText, _branchText);
+    return [
+      Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Pal.amber.withOpacity(0.07),
+          borderRadius: Rd.sm,
+          border: Border.all(color: Pal.amber.withOpacity(0.28)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.commit_rounded, size: 15, color: Pal.amber),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '$_pendingForTarget commit${_pendingForTarget == 1 ? '' : 's'} waiting to push.',
+                style: Txt.meta.copyWith(color: Pal.amber),
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 6),
+      for (final commit in commits)
+        Container(
+          margin: const EdgeInsets.only(bottom: 5),
+          padding: const EdgeInsets.fromLTRB(10, 7, 6, 7),
+          decoration: BoxDecoration(
+            color: Pal.raised,
+            borderRadius: Rd.sm,
+            border: Border.all(color: Pal.line),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.commit_rounded, size: 13, color: Pal.textDim),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      commit.message,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Txt.meta.copyWith(
+                        fontSize: 10.5,
+                        color: Pal.text,
+                      ),
+                    ),
+                    Text(
+                      '${_shortSha(commit.sha)} · '
+                      '${commit.hashes.length + commit.deleted.length} files',
+                      style: Txt.meta.copyWith(fontSize: 8.5),
+                    ),
+                  ],
+                ),
+              ),
+              if (commit.sha == last?.sha)
+                TextButton(
+                  onPressed:
+                      _pushBusy || _commitBusy ? null : _revertLatestCommit,
+                  child: Text(
+                    'Revert',
+                    style: Txt.meta.copyWith(
+                      color: Pal.rose,
+                      fontSize: 9.5,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      const SizedBox(height: 14),
+    ];
+  }
+
   Future<void> _showDiff(RepoChange change) => showDialog<void>(
         context: context,
         builder: (_) => _PushDiffDialog(change: change),
@@ -1054,6 +1139,7 @@ class _PushSheetState extends State<PushSheet> {
                   padding:
                       const EdgeInsets.fromLTRB(Sp.page, Sp.x3, Sp.page, Sp.x3),
                   children: [
+                    ..._pendingCommitSection(),
                     if (_accounts.length > 1) ...[
                       const _SheetLabel('ACCOUNT'),
                       _AccountSelect(
@@ -1283,90 +1369,6 @@ class _PushSheetState extends State<PushSheet> {
                         ),
                         const SizedBox(height: 6),
                       ],
-                    if (_pendingForTarget > 0) ...[
-                      const SizedBox(height: 8),
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Pal.amber.withOpacity(0.07),
-                          borderRadius: Rd.sm,
-                          border:
-                              Border.all(color: Pal.amber.withOpacity(0.28)),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(Icons.commit_rounded,
-                                size: 15, color: Pal.amber),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                '$_pendingForTarget commit${_pendingForTarget == 1 ? '' : 's'} waiting to push.',
-                                style: Txt.meta.copyWith(color: Pal.amber),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      for (final commit in _push.pending
-                          .where((commit) => commit.matches(
-                              _ownerText, _repoText, _branchText))
-                          .toList()
-                          .reversed)
-                        Container(
-                          margin: const EdgeInsets.only(bottom: 5),
-                          padding: const EdgeInsets.fromLTRB(10, 7, 6, 7),
-                          decoration: BoxDecoration(
-                            color: Pal.raised,
-                            borderRadius: Rd.sm,
-                            border: Border.all(color: Pal.line),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(Icons.commit_rounded,
-                                  size: 13, color: Pal.textDim),
-                              const SizedBox(width: 7),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      commit.message,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: Txt.meta.copyWith(
-                                        fontSize: 10.5,
-                                        color: Pal.text,
-                                      ),
-                                    ),
-                                    Text(
-                                      '${_shortSha(commit.sha)} · '
-                                      '${commit.hashes.length + commit.deleted.length} files',
-                                      style: Txt.meta.copyWith(fontSize: 8.5),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              if (commit.sha ==
-                                  _push
-                                      .lastPendingFor(
-                                          _ownerText, _repoText, _branchText)
-                                      ?.sha)
-                                TextButton(
-                                  onPressed:
-                                      _pushBusy ? null : _revertLatestCommit,
-                                  child: Text(
-                                    'Revert',
-                                    style: Txt.meta.copyWith(
-                                      color: Pal.rose,
-                                      fontSize: 9.5,
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                    ],
                     if (_error != null) ...[
                       const SizedBox(height: 10),
                       _PushError(text: _error!),
@@ -1394,20 +1396,53 @@ class _PushSheetState extends State<PushSheet> {
                 child: Row(
                   children: [
                     Expanded(
-                      child: GhostButton(
-                        label: 'Commit',
-                        icon: Icons.commit_rounded,
-                        onTap: _commitBusy || _pushBusy || _changes.isEmpty
-                            ? null
-                            : _commit,
-                      ),
+                      child: _commitBusy
+                          ? Container(
+                              height: 40,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                borderRadius: Rd.sm,
+                                border: Border.all(color: Pal.lineStrong),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SizedBox(
+                                    width: 13,
+                                    height: 13,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 1.8,
+                                      color: Pal.ember,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Committing…',
+                                    style: Txt.label.copyWith(
+                                      color: Pal.text,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 12.5,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : GhostButton(
+                              label: 'Commit',
+                              icon: Icons.commit_rounded,
+                              onTap: _pushBusy || _changes.isEmpty
+                                  ? null
+                                  : _commit,
+                            ),
                     ),
                     const SizedBox(width: 9),
                     Expanded(
                       child: Opacity(
                         opacity: _pendingForTarget > 0 ? 1 : 0.38,
                         child: GestureDetector(
-                          onTap: _pendingForTarget > 0 && !_pushBusy
+                          onTap: _pendingForTarget > 0 &&
+                                  !_pushBusy &&
+                                  !_commitBusy
                               ? _pushCommits
                               : null,
                           behavior: HitTestBehavior.opaque,
