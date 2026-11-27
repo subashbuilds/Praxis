@@ -8,10 +8,12 @@ import '../core/agent_todos.dart';
 import '../core/diff.dart';
 import '../core/follow_ups.dart';
 import '../core/task_checkpoint.dart';
+import '../core/undo_store.dart';
 import '../models.dart';
 import '../state/app_state.dart';
 import '../theme/tokens.dart';
 import '../widgets/chat_markdown.dart';
+import '../widgets/confirm_dialog.dart';
 import '../widgets/ui.dart';
 
 /// Styles slash skills and @file tags inside the composer itself, so a command
@@ -83,6 +85,10 @@ class _AgentTabState extends State<AgentTab> {
   bool _draftRestored = false;
   bool _todosLoaded = false;
   bool _loadingFollowUps = false;
+  UndoTask? _undoTask;
+  bool _undoLoaded = false;
+  bool _undoBusy = false;
+  bool _lastBusy = false;
   AppState? _state;
 
   @override
@@ -106,6 +112,61 @@ class _AgentTabState extends State<AgentTab> {
     if (!_todosLoaded) {
       _todosLoaded = true;
       unawaited(state.loadTodos(widget.project));
+    }
+    if (!_undoLoaded) {
+      _undoLoaded = true;
+      unawaited(_loadUndo());
+    }
+  }
+
+  Future<void> _loadUndo() async {
+    final state = _state;
+    if (state == null) return;
+    try {
+      final task = await state.undoableTask(widget.project);
+      if (!mounted) return;
+      setState(() => _undoTask = task);
+    } catch (_) {
+      if (mounted) setState(() => _undoTask = null);
+    }
+  }
+
+  Future<void> _undoLastTask() async {
+    final state = _state;
+    final task = _undoTask;
+    if (state == null || task == null || _undoBusy) return;
+    final count = task.fileCount;
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Undo the last task?',
+      body: 'Every file that task changed goes back to how it was before it '
+          'started. Files changed by shell commands are not part of this.',
+      confirmLabel: 'Undo task',
+      destructive: true,
+      icon: Icons.undo_rounded,
+      details: [
+        ConfirmDetail('Files', '$count'),
+        if (task.label.isNotEmpty) ConfirmDetail('Task', task.label),
+      ],
+    );
+    if (!confirmed || !mounted) return;
+    setState(() => _undoBusy = true);
+    try {
+      final message = await state.undoLastTask(widget.project);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not undo: $error')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _undoBusy = false);
+        unawaited(_loadUndo());
+      }
     }
   }
 
@@ -279,6 +340,9 @@ class _AgentTabState extends State<AgentTab> {
     final showLive = state.busy || state.hasLiveReply;
     final autoOpenThinkingId = _autoOpenThinkingId(thread);
     final todos = state.todosFor(widget.project.id);
+    // A run that just ended may have left new snapshots behind.
+    if (_lastBusy && !state.busy) unawaited(_loadUndo());
+    _lastBusy = state.busy;
     return Column(
       children: [
         Expanded(
@@ -376,6 +440,12 @@ class _AgentTabState extends State<AgentTab> {
             checkpoint: state.checkpointFor(widget.project.id)!,
             onResume: () => state.resumeTask(widget.project.id),
             onDismiss: () => state.dismissCheckpoint(widget.project.id),
+          ),
+        if (!state.busy && _undoTask != null)
+          _UndoBar(
+            task: _undoTask!,
+            busy: _undoBusy,
+            onUndo: _undoLastTask,
           ),
         if (!state.busy && _hasCompletedRun(thread))
           _FollowUpBar(
@@ -724,7 +794,7 @@ class _EntryView extends StatelessWidget {
           ),
         );
       case ChatRole.tool:
-        return _ToolPill(entry: entry);
+        return _ToolPill(entry: entry, project: project);
       case ChatRole.activity:
         return _ActivityPill(entry: entry);
       case ChatRole.error:
@@ -1280,10 +1350,104 @@ class _ThinkingPillState extends State<_ThinkingPill> {
   }
 }
 
+/// Puts every file the last task changed back the way it was. Only shown when
+/// a snapshot exists, so it never offers an undo that cannot happen.
+class _UndoBar extends StatelessWidget {
+  const _UndoBar({
+    required this.task,
+    required this.busy,
+    required this.onUndo,
+  });
+
+  final UndoTask task;
+  final bool busy;
+  final VoidCallback onUndo;
+
+  @override
+  Widget build(BuildContext context) {
+    final count = task.fileCount;
+    final label = task.label.isEmpty ? 'Last task' : task.label;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Sp.x4, 0, Sp.x4, Sp.x2),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(11, 8, 8, 8),
+        decoration: BoxDecoration(
+          color: Pal.raised,
+          borderRadius: Rd.sm,
+          border: Border.all(color: Pal.line),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.undo_rounded, size: 16, color: Pal.textMuted),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Undo last task',
+                    style: Txt.meta.copyWith(fontSize: 9.5),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '$count ${count == 1 ? 'file' : 'files'} · $label',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Txt.body.copyWith(
+                      fontSize: 11.5,
+                      color: Pal.text,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: busy ? null : onUndo,
+              behavior: HitTestBehavior.opaque,
+              child: Semantics(
+                button: true,
+                label: 'Undo the last task',
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                  decoration: BoxDecoration(
+                    borderRadius: Rd.pill,
+                    border: Border.all(color: Pal.lineStrong),
+                  ),
+                  child: busy
+                      ? SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.6,
+                            color: Pal.textMuted,
+                          ),
+                        )
+                      : Text(
+                          'Undo',
+                          style: Txt.meta.copyWith(
+                            fontSize: 10.5,
+                            color: Pal.text,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ToolPill extends StatefulWidget {
-  const _ToolPill({required this.entry});
+  const _ToolPill({required this.entry, required this.project});
 
   final ChatEntry entry;
+  final Project project;
 
   @override
   State<_ToolPill> createState() => _ToolPillState();
@@ -1291,8 +1455,49 @@ class _ToolPill extends StatefulWidget {
 
 class _ToolPillState extends State<_ToolPill> {
   bool _open = false;
+  bool _reverting = false;
 
   ChatEntry get entry => widget.entry;
+
+  bool get _canRevert =>
+      entry.ok && entry.undoIds.isNotEmpty && !entry.reverted;
+
+  Future<void> _revert() async {
+    if (_reverting) return;
+    final state = AppScope.of(context);
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Revert this change?',
+      body: entry.tool.startsWith('write_files') || entry.tool == 'apply_patch'
+          ? 'Every file this call wrote goes back to how it was just before '
+              'it ran. Later changes to the same files are left alone.'
+          : '${entry.detail} goes back to how it was just before this call. '
+              'Later changes to the same file are left alone.',
+      confirmLabel: 'Revert change',
+      destructive: true,
+      icon: Icons.undo_rounded,
+      details: [
+        ConfirmDetail('Tool', entry.tool),
+        ConfirmDetail('Path', entry.detail)
+      ],
+    );
+    if (!confirmed || !mounted) return;
+    setState(() => _reverting = true);
+    try {
+      final message = await state.revertChanges(widget.project, entry);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not revert: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _reverting = false);
+    }
+  }
 
   IconData get _icon => switch (entry.tool) {
         'write_file' => Icons.edit_note_rounded,
@@ -1367,6 +1572,77 @@ class _ToolPillState extends State<_ToolPill> {
                     ),
                     const SizedBox(width: 2),
                   ],
+                  if (entry.reverted)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 2),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.check_circle_outline_rounded,
+                            size: 12,
+                            color: Pal.mint,
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            'Reverted',
+                            style: Txt.meta.copyWith(
+                              fontSize: 9.5,
+                              color: Pal.mint,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (_canRevert)
+                    GestureDetector(
+                      onTap: _reverting ? null : _revert,
+                      behavior: HitTestBehavior.opaque,
+                      child: Semantics(
+                        button: true,
+                        label: 'Revert ${entry.detail}',
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 4),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 7,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            borderRadius: Rd.pill,
+                            border: Border.all(color: Pal.lineStrong),
+                          ),
+                          child: _reverting
+                              ? SizedBox(
+                                  width: 10,
+                                  height: 10,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.4,
+                                    color: Pal.textMuted,
+                                  ),
+                                )
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.undo_rounded,
+                                      size: 11,
+                                      color: Pal.textMuted,
+                                    ),
+                                    const SizedBox(width: 3),
+                                    Text(
+                                      'Revert',
+                                      style: Txt.meta.copyWith(
+                                        fontSize: 9.5,
+                                        color: Pal.textMuted,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
                   Icon(
                     _open
                         ? Icons.keyboard_arrow_up_rounded

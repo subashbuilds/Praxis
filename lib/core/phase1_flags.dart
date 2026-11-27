@@ -15,6 +15,7 @@ class Phase1Flags {
     this.batchedExecution = true,
     this.loopGuards = true,
     this.resultSizing = true,
+    this.finishTask = true,
   });
 
   static const defaults = Phase1Flags(
@@ -38,6 +39,10 @@ class Phase1Flags {
       'PRAXIS_RESULT_SIZING',
       defaultValue: true,
     ),
+    finishTask: bool.fromEnvironment(
+      'PRAXIS_FINISH_TASK',
+      defaultValue: true,
+    ),
   );
 
   static const disabled = Phase1Flags(
@@ -46,6 +51,7 @@ class Phase1Flags {
     batchedExecution: false,
     loopGuards: false,
     resultSizing: false,
+    finishTask: false,
   );
 
   final bool contextPrefetch;
@@ -53,6 +59,11 @@ class Phase1Flags {
   final bool batchedExecution;
   final bool loopGuards;
   final bool resultSizing;
+
+  /// Phase 4: the agent ends a task with a `finish_task` call that carries the
+  /// summary, instead of ending whenever a round happens to have no tool
+  /// calls. Off restores the previous behaviour exactly.
+  final bool finishTask;
 
   /// Repeated calls are stopped on the third identical attempt by default.
   static const int repeatLimit = 3;

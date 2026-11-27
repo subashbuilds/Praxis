@@ -961,18 +961,27 @@ class AiClient {
         ],
       });
     }
+    // Prompt caching: the system prompt and the tool list are the stable
+    // prefix of every request in a task, so one breakpoint after the tools
+    // and one on the system block reuse that prefix across rounds. The
+    // conversation itself stays uncached and is never truncated here.
+    const cache = {'type': 'ephemeral'};
     return {
       'model': provider.model,
       'max_tokens': maxTokens,
-      'system': system,
+      'system': [
+        {'type': 'text', 'text': system, 'cache_control': cache},
+      ],
       'messages': messages,
-      'tools': tools
-          .map((tool) => {
-                'name': tool.name,
-                'description': tool.description,
-                'input_schema': tool.parameters,
-              })
-          .toList(),
+      'tools': [
+        for (var index = 0; index < tools.length; index++)
+          {
+            'name': tools[index].name,
+            'description': tools[index].description,
+            'input_schema': tools[index].parameters,
+            if (index == tools.length - 1) 'cache_control': cache,
+          },
+      ],
       // "any" makes the next round a tool call. It is sent only for the
       // corrective round after an unfinished announcement.
       if (toolChoice == 'required') 'tool_choice': {'type': 'any'},

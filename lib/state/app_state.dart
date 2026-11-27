@@ -33,10 +33,12 @@ import '../core/push_state.dart';
 import '../core/quota_tracker.dart';
 import '../core/repo_clone.dart';
 import '../core/round_log.dart';
+import '../core/secrets.dart';
 import '../core/task_checkpoint.dart';
 import '../core/shell.dart';
 import '../core/store.dart';
 import '../core/system_shell.dart';
+import '../core/undo_store.dart';
 import '../core/usage.dart';
 import '../core/vfs.dart';
 import '../models.dart';
@@ -65,18 +67,69 @@ typedef ProviderChoicePrompt = Future<ProviderChoice?> Function(
   String reason,
 );
 
+/// What to do with one file that changed locally and on GitHub.
+enum PullChoice { mine, theirs, both }
+
+/// One file a pull could not merge by itself, with both versions so the sheet
+/// can show them and offer keep mine / take theirs / open both.
+extension PullChoiceLabel on PullChoice {
+  String get label => switch (this) {
+        PullChoice.mine => 'Keep mine',
+        PullChoice.theirs => 'Take theirs',
+        PullChoice.both => 'Keep both',
+      };
+}
+
+class PullConflict {
+  const PullConflict({
+    required this.path,
+    this.localText,
+    this.remoteText,
+    this.deletedLocally = false,
+    this.deletedRemotely = false,
+  });
+
+  final String path;
+  final String? localText;
+  final String? remoteText;
+  final bool deletedLocally;
+  final bool deletedRemotely;
+
+  bool get isBinary => localText == null && remoteText == null;
+
+  String get reason => deletedRemotely
+      ? 'Deleted on GitHub, changed here'
+      : deletedLocally
+          ? 'Deleted here, changed on GitHub'
+          : 'Changed here and on GitHub';
+
+  /// Which choices make sense for this conflict.
+  List<PullChoice> get choices => deletedRemotely
+      ? const [PullChoice.mine, PullChoice.theirs]
+      : deletedLocally
+          ? const [PullChoice.theirs, PullChoice.mine]
+          : PullChoice.values;
+}
+
 class PullResult {
   const PullResult({
     required this.updated,
     required this.added,
     required this.deleted,
     required this.keptLocal,
+    this.conflicts = const [],
   });
 
   final int updated;
   final int added;
   final int deleted;
   final int keptLocal;
+
+  /// Files that need a choice before the pull can finish. When this is not
+  /// empty nothing was written.
+  final List<PullConflict> conflicts;
+
+  bool get needsResolution => conflicts.isNotEmpty;
 
   int get changed => updated + added + deleted;
 
@@ -123,8 +176,10 @@ class AppState extends ChangeNotifier {
     this.linux,
     this.seedWelcome = true,
     BackgroundJobPlatform? backgroundJobs,
+    SecretSealer? sealer,
   })  : httpClient = httpClient ?? http.Client(),
-        backgroundJobPlatform = backgroundJobs ?? BackgroundJobPlatform();
+        backgroundJobPlatform = backgroundJobs ?? BackgroundJobPlatform(),
+        secretSealer = sealer;
 
   static const _kProviders = 'praxis.providers';
   static const _kSkills = 'praxis.skills';
@@ -150,6 +205,11 @@ class AppState extends ChangeNotifier {
   final LinuxEnvironment? linux;
   final bool seedWelcome;
   final BackgroundJobPlatform backgroundJobPlatform;
+
+  /// Where secrets are sealed. Null uses the Android keystore; tests and
+  /// platforms without one fall back to the plain store.
+  final SecretSealer? secretSealer;
+  late final SecretsVault secrets = SecretsVault(store, sealer: secretSealer);
 
   late final AiClient ai = AiClient(client: httpClient);
   late final RepoCloneService repoClone = RepoCloneService(client: httpClient);
@@ -208,6 +268,7 @@ class AppState extends ChangeNotifier {
   final Map<String, Shell> _shells = {};
   final Map<String, SystemShell> _systemShells = {};
   final Map<String, PushState> _pushStates = {};
+  final Map<String, UndoStore> _undoStores = {};
   final Map<String, TaskCheckpoint> _checkpoints = {};
   final Map<String, List<AgentTodo>> _todos = {};
   final Map<String, DeployJob> _deployJobs = {};
@@ -291,9 +352,13 @@ class AppState extends ChangeNotifier {
     }
     projects.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
-    _loadProviders();
+    await _loadProviders();
     _loadSkills();
-    _loadIntegrations();
+    await _loadIntegrations();
+    // Providers and integrations were plaintext in older builds. Seal them in
+    // place so an upgrade needs no user action.
+    await secrets.upgrade(_kProviders);
+    await secrets.upgrade(_kIntegrations);
     _loadUsage();
     _loadQuota();
     await _loadCheckpoints();
@@ -482,6 +547,56 @@ class AppState extends ChangeNotifier {
         project.id,
         () => ProjectFs(Directory('${root.path}/projects/${project.id}')),
       );
+
+  // ------------------------------------------------------------------- undo
+
+  UndoStore undoStoreFor(Project project) => _undoStores.putIfAbsent(
+        project.id,
+        () => UndoStore(fsFor(project)),
+      );
+
+  /// The newest task snapshot that still has changes applied, for the "Undo
+  /// last task" bar. Null hides the bar.
+  Future<UndoTask?> undoableTask(Project project) async {
+    final task = await undoStoreFor(project).latest();
+    if (task == null || task.pending.isEmpty) return null;
+    return task;
+  }
+
+  /// Reverts every change the last agent run made, newest first.
+  Future<String> undoLastTask(Project project) async {
+    final store = undoStoreFor(project);
+    final task = await store.latest();
+    if (task == null) return 'This project has no recorded changes to undo.';
+    final outcome = await store.undo(task);
+    _markReverted(project.id, outcome.changeIds);
+    notifyListeners();
+    await _persistChat(project.id);
+    return 'Undid the last task: ${outcome.message}.';
+  }
+
+  /// Reverts exactly the changes one write pill made.
+  Future<String> revertChanges(Project project, ChatEntry entry) async {
+    if (entry.undoIds.isEmpty) return 'This change has no snapshot to revert.';
+    final outcome = await undoStoreFor(project).revertIds(entry.undoIds);
+    _markReverted(project.id, outcome.changeIds);
+    notifyListeners();
+    await _persistChat(project.id);
+    return 'Reverted ${entry.detail}: ${outcome.message}.';
+  }
+
+  void _markReverted(String projectId, List<String> changeIds) {
+    if (changeIds.isEmpty) return;
+    final wanted = changeIds.toSet();
+    final thread = threadOf(projectId);
+    for (var index = 0; index < thread.length; index++) {
+      final entry = thread[index];
+      if (entry.reverted || entry.undoIds.isEmpty) continue;
+      if (entry.undoIds.any(wanted.contains)) {
+        thread[index] = entry.copyWith(reverted: true);
+      }
+    }
+  }
 
   Shell shellFor(Project project) =>
       _shells.putIfAbsent(project.id, () => Shell(fsFor(project)));
@@ -983,6 +1098,7 @@ class AppState extends ChangeNotifier {
     int removed = 0,
     List<String> attachments = const [],
     bool ok = true,
+    List<String> undoIds = const [],
   }) =>
       ChatEntry(
         id: _nextId(),
@@ -996,6 +1112,7 @@ class AppState extends ChangeNotifier {
         removed: removed,
         attachments: attachments,
         ok: ok,
+        undoIds: undoIds,
         at: DateTime.now(),
       );
 
@@ -1370,6 +1487,7 @@ class AppState extends ChangeNotifier {
         unawaited(_recordModelRequest(used));
       },
       skipActionFingerprints: skipActionFingerprints,
+      undo: undoStoreFor(project),
       onTextDelta: (delta) {
         if (liveInterrupted) {
           // Swap the failed attempt for the retried one atomically.
@@ -1499,6 +1617,7 @@ class AppState extends ChangeNotifier {
             added: event.added,
             removed: event.removed,
             ok: event.ok,
+            undoIds: event.undoIds,
           ));
         } else {
           // A terminal error must not take the reply the user already read
@@ -2220,9 +2339,9 @@ Continue seamlessly from the remaining step. Do not restart the task from the be
   bool isPresetAdded(String id) =>
       providers.any((provider) => provider.id == id);
 
-  void _loadProviders() {
+  Future<void> _loadProviders() async {
     providers.clear();
-    final raw = store.read(_kProviders);
+    final raw = await secrets.read(_kProviders);
     if (raw != null) {
       try {
         for (final item in jsonDecode(raw) as List) {
@@ -2345,7 +2464,7 @@ Continue seamlessly from the remaining step. Do not restart the task from the be
         : 'Connected: $text';
   }
 
-  Future<void> _persistProviders() => store.write(
+  Future<void> _persistProviders() => secrets.write(
         _kProviders,
         jsonEncode(providers.map((provider) => provider.toJson()).toList()),
       );
@@ -2427,8 +2546,8 @@ Continue seamlessly from the remaining step. Do not restart the task from the be
 
   // ----------------------------------------------------------- integrations
 
-  void _loadIntegrations() {
-    final raw = store.read(_kIntegrations);
+  Future<void> _loadIntegrations() async {
+    final raw = await secrets.read(_kIntegrations);
     if (raw == null) return;
     try {
       integrations = Integrations.fromJson(
@@ -2440,7 +2559,7 @@ Continue seamlessly from the remaining step. Do not restart the task from the be
 
   Future<void> saveIntegrations(Integrations next) async {
     integrations = next;
-    await store.write(_kIntegrations, jsonEncode(next.toJson()));
+    await secrets.write(_kIntegrations, jsonEncode(next.toJson()));
     notifyListeners();
   }
 
@@ -2896,6 +3015,7 @@ query CurrentUser {
     String? owner,
     String? repo,
     String? branch,
+    Map<String, PullChoice> resolutions = const {},
   }) async {
     final parts = project.repo.split('/');
     final resolvedOwner = owner?.trim().isNotEmpty == true
@@ -2949,7 +3069,7 @@ query CurrentUser {
 
     final writes = <String, List<int>>{};
     final deletes = <String>[];
-    final conflicts = <String>[];
+    final conflictPaths = <String>[];
     var keptLocal = 0;
     for (final path in remoteHashes.keys) {
       final remoteHash = remoteHashes[path];
@@ -2960,8 +3080,8 @@ query CurrentUser {
           writes[path] = cloned.files[path]!;
         } else if (remoteHash != base) {
           // Deleted locally, but GitHub also changed the file. Keeping either
-          // side would silently lose the other, so stop and report it.
-          conflicts.add(path);
+          // side would silently lose the other, so ask the user.
+          conflictPaths.add(path);
         } else {
           // Deleted on this device since the last sync. Keep that deletion; a
           // pull must not bring a file the user removed back to life.
@@ -2974,7 +3094,7 @@ query CurrentUser {
       } else if (base == remoteHash) {
         keptLocal++;
       } else {
-        conflicts.add(path);
+        conflictPaths.add(path);
       }
     }
     for (final path in local.hashes.keys) {
@@ -2985,16 +3105,52 @@ query CurrentUser {
       } else if (base == local.hashes[path]) {
         deletes.add(path);
       } else {
-        conflicts.add(path);
+        conflictPaths.add(path);
       }
     }
-    if (conflicts.isNotEmpty) {
-      final shown = conflicts.take(4).join(', ');
-      final more =
-          conflicts.length > 4 ? ' and ${conflicts.length - 4} more' : '';
-      throw IntegrationException(
-          'Pull stopped because these files changed locally and on GitHub: '
-          '$shown$more. Commit or stash them first.');
+
+    if (conflictPaths.isNotEmpty) {
+      final conflicts = [
+        for (final path in conflictPaths.toSet())
+          PullConflict(
+            path: path,
+            localText: local.texts[path],
+            remoteText: remoteTexts[path],
+            deletedLocally: !local.hashes.containsKey(path),
+            deletedRemotely: !remoteHashes.containsKey(path),
+          ),
+      ]..sort((a, b) => a.path.compareTo(b.path));
+      // Nothing is written until every conflict has a choice, so a dismissed
+      // sheet leaves the project exactly as it was.
+      if (!conflicts
+          .every((conflict) => resolutions.containsKey(conflict.path))) {
+        return PullResult(
+          updated: 0,
+          added: 0,
+          deleted: 0,
+          keptLocal: 0,
+          conflicts: conflicts,
+        );
+      }
+      for (final conflict in conflicts) {
+        switch (resolutions[conflict.path]!) {
+          case PullChoice.mine:
+            keptLocal++;
+          case PullChoice.theirs:
+            final remote = cloned.files[conflict.path];
+            if (remote != null) {
+              writes[conflict.path] = remote;
+            } else {
+              deletes.add(conflict.path);
+            }
+          case PullChoice.both:
+            final remote = cloned.files[conflict.path];
+            if (remote != null) {
+              writes[_remoteCounterpart(conflict.path)] = remote;
+            }
+            keptLocal++;
+        }
+      }
     }
 
     final added =
@@ -3026,6 +3182,120 @@ query CurrentUser {
       added: added,
       deleted: deletes.length,
       keptLocal: keptLocal,
+    );
+  }
+
+  /// The name a remote copy gets when the user chooses to keep both versions
+  /// of a conflicted file.
+  String _remoteCounterpart(String path) {
+    final slash = path.lastIndexOf('/');
+    final folder = slash >= 0 ? path.substring(0, slash + 1) : '';
+    final name = path.substring(slash + 1);
+    final dot = name.lastIndexOf('.');
+    final stem = dot > 0 ? name.substring(0, dot) : name;
+    final extension = dot > 0 ? name.substring(dot) : '';
+    return '$folder$stem.github$extension';
+  }
+
+  /// Switches the project to another branch by replacing its tracked files
+  /// with that branch's tree. There is no git binary on the device, so this is
+  /// a full tree swap; it refuses while local edits or unpushed commits exist,
+  /// because either would be lost.
+  Future<PullResult> switchBranch(
+    Project project,
+    IntegrationAccount account, {
+    required String branch,
+  }) async {
+    final parts = project.repo.split('/');
+    if (parts.length != 2) {
+      throw IntegrationException('Connect a GitHub repository first.');
+    }
+    final owner = parts.first;
+    final repo = parts.last;
+    final target = branch.trim();
+    if (target.isEmpty) throw IntegrationException('Choose a branch first.');
+    if (target == project.branch.trim()) {
+      throw IntegrationException('This project is already on $target.');
+    }
+    final state = await pushStateFor(project);
+    if (state.pendingFor(owner, repo, project.branch) > 0) {
+      throw IntegrationException(
+          'Push your waiting commits before switching branches, so nothing is '
+          'overwritten.');
+    }
+    final fs = fsFor(project);
+    final local = await fs.localSnapshot();
+    final base = state.comparisonBase;
+    // Only tracked files can be lost by the swap. A new local file is not in
+    // the merge base and is left on disk, so it does not block the switch.
+    final dirty = <String>[];
+    for (final path in base.keys) {
+      if (local.hashes[path] != base[path]) dirty.add(path);
+    }
+    if (dirty.isNotEmpty) {
+      final shown = dirty.take(3).join(', ');
+      final more = dirty.length > 3 ? ' and ${dirty.length - 3} more' : '';
+      throw IntegrationException(
+          'Commit or revert your changes before switching branches: '
+          '$shown$more.');
+    }
+    final cloned = await repoClone.clone(
+      repo: RepoRef(owner: owner, name: repo),
+      branch: target,
+      token: account.token,
+    );
+    final remoteHashes = <String, String>{};
+    final remoteTexts = <String, String>{};
+    for (final entry in cloned.files.entries) {
+      final bytes = entry.value;
+      remoteHashes[entry.key] = gitBlobSha(bytes);
+      if (bytes.length <= 200000 && classifyFile(entry.key).isText) {
+        final text = decodeUtf8(bytes, allowEmpty: true);
+        if (text != null) remoteTexts[entry.key] = text;
+      }
+    }
+    // Files that belonged to the old branch and are not on the new one are
+    // removed. Untracked local files are left alone.
+    final removed = <String>[];
+    for (final path in base.keys) {
+      if (remoteHashes.containsKey(path)) continue;
+      if (await fs.exists(path)) {
+        await fs.delete(path);
+        removed.add(path);
+      }
+    }
+    var added = 0;
+    var updated = 0;
+    for (final entry in cloned.files.entries) {
+      final localHash = local.hashes[entry.key];
+      if (localHash == null) {
+        added++;
+      } else if (localHash != remoteHashes[entry.key]) {
+        updated++;
+      }
+      await fs.writeBytes(entry.key, entry.value);
+    }
+    final next = state.copyWith(
+      owner: owner,
+      repo: repo,
+      branch: target,
+      baseline: remoteTexts,
+      hashes: remoteHashes,
+      baseHashes: remoteHashes,
+      synced: true,
+    );
+    await savePushState(project, next);
+    await updateProjectGit(
+      projectById(project.id),
+      repo: '$owner/$repo',
+      branch: target,
+    );
+    notifyListeners();
+    return PullResult(
+      updated: updated,
+      added: added,
+      deleted: removed.length,
+      keptLocal: 0,
     );
   }
 

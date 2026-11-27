@@ -866,6 +866,8 @@ class ChatEntry {
     this.removed = 0,
     this.attachments = const [],
     this.ok = true,
+    this.undoIds = const [],
+    this.reverted = false,
     required this.at,
   });
 
@@ -887,7 +889,29 @@ class ChatEntry {
   /// Project-relative paths of files the user attached to this message.
   final List<String> attachments;
   final bool ok;
+
+  /// Snapshot ids for the files this tool call changed, so the pill can offer
+  /// a revert after the run has moved on.
+  final List<String> undoIds;
+  final bool reverted;
   final DateTime at;
+
+  ChatEntry copyWith({bool? reverted}) => ChatEntry(
+        id: id,
+        role: role,
+        text: text,
+        tool: tool,
+        detail: detail,
+        thinking: thinking,
+        patch: patch,
+        added: added,
+        removed: removed,
+        attachments: attachments,
+        ok: ok,
+        undoIds: undoIds,
+        reverted: reverted ?? this.reverted,
+        at: at,
+      );
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -901,6 +925,8 @@ class ChatEntry {
         'removed': removed,
         'attachments': attachments,
         'ok': ok,
+        'undoIds': undoIds,
+        'reverted': reverted,
         'at': at.toIso8601String(),
       };
 
@@ -921,6 +947,10 @@ class ChatEntry {
             ? (json['attachments'] as List).whereType<String>().toList()
             : const [],
         ok: json['ok'] as bool? ?? true,
+        undoIds: json['undoIds'] is List
+            ? (json['undoIds'] as List).whereType<String>().toList()
+            : const [],
+        reverted: json['reverted'] as bool? ?? false,
         at: DateTime.tryParse(json['at'] as String? ?? '') ?? DateTime.now(),
       );
 }

@@ -8,10 +8,18 @@ import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class MainActivity : FlutterActivity() {
     private companion object {
@@ -47,6 +55,26 @@ class MainActivity : FlutterActivity() {
                 "clearImportCache" -> {
                     File(cacheDir, "imports").deleteRecursively()
                     result.success(null)
+                }
+                "sealSecret", "openSecret" -> {
+                    // Keystore work is quick but must not run on the platform
+                    // thread. The reply carries only the transformed value.
+                    val value = call.argument<String>("value") ?: ""
+                    val sealing = call.method == "sealSecret"
+                    Thread {
+                        try {
+                            val output = if (sealing) sealSecret(value) else openSecret(value)
+                            runOnUiThread { result.success(output) }
+                        } catch (error: Exception) {
+                            runOnUiThread {
+                                result.error(
+                                    "keystore",
+                                    error.message ?: "The keystore operation failed.",
+                                    null,
+                                )
+                            }
+                        }
+                    }.start()
                 }
                 else -> result.notImplemented()
             }
@@ -97,6 +125,55 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    /// AES/GCM with a key generated inside the Android Keystore. The key is
+    /// never exported, so a copy of the preferences file is useless on another
+    /// device. The IV is prepended to the ciphertext.
+    private fun keystoreSecret(): SecretKey {
+        val alias = "praxis.secrets.v1"
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let {
+            return it.secretKey
+        }
+        val generator =
+            KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build(),
+        )
+        return generator.generateKey()
+    }
+
+    private fun sealSecret(value: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, keystoreSecret())
+        val iv = cipher.iv
+        val body = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        val combined = ByteArray(iv.size + body.size)
+        System.arraycopy(iv, 0, combined, 0, iv.size)
+        System.arraycopy(body, 0, combined, iv.size, body.size)
+        return Base64.encodeToString(combined, Base64.NO_WRAP)
+    }
+
+    private fun openSecret(sealed: String): String {
+        val combined = Base64.decode(sealed, Base64.NO_WRAP)
+        if (combined.size <= 12) throw IllegalArgumentException("Not a sealed value.")
+        val iv = combined.copyOfRange(0, 12)
+        val body = combined.copyOfRange(12, combined.size)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            keystoreSecret(),
+            GCMParameterSpec(128, iv),
+        )
+        return String(cipher.doFinal(body), Charsets.UTF_8)
     }
 
     private fun askForNotificationPermission() {

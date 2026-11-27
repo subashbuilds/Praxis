@@ -19,6 +19,7 @@ import 'shell.dart';
 import 'task_checkpoint.dart';
 import 'system_shell.dart';
 import 'tool_validation.dart';
+import 'undo_store.dart';
 import 'vfs.dart';
 
 enum AgentEventKind { text, tool, activity, error, retry }
@@ -37,6 +38,7 @@ class AgentEvent {
     this.total = 0,
     this.seconds = 0,
     this.ok = true,
+    this.undoIds = const [],
   });
 
   const AgentEvent.text(String value, {this.thinking = ''})
@@ -50,7 +52,8 @@ class AgentEvent {
         attempt = 0,
         total = 0,
         seconds = 0,
-        ok = true;
+        ok = true,
+        undoIds = const [];
 
   const AgentEvent.tool({
     required this.tool,
@@ -59,6 +62,7 @@ class AgentEvent {
     this.patch = '',
     this.added = 0,
     this.removed = 0,
+    this.undoIds = const [],
   })  : kind = AgentEventKind.tool,
         thinking = '',
         attempt = 0,
@@ -78,7 +82,8 @@ class AgentEvent {
         attempt = 0,
         total = 0,
         seconds = 0,
-        ok = true;
+        ok = true,
+        undoIds = const [];
 
   const AgentEvent.error(String value)
       : kind = AgentEventKind.error,
@@ -92,7 +97,8 @@ class AgentEvent {
         attempt = 0,
         total = 0,
         seconds = 0,
-        ok = false;
+        ok = false,
+        undoIds = const [];
 
   /// A failed request that will be tried again on the same provider and
   /// model. The UI shows the error and the countdown instead of appending a
@@ -110,7 +116,8 @@ class AgentEvent {
         patch = '',
         added = 0,
         removed = 0,
-        ok = false;
+        ok = false,
+        undoIds = const [];
 
   final AgentEventKind kind;
   final String text;
@@ -124,6 +131,10 @@ class AgentEvent {
   final int total;
   final int seconds;
   final bool ok;
+
+  /// Identifiers of the file snapshots this call made. The transcript offers
+  /// a revert for exactly these changes when the list is not empty.
+  final List<String> undoIds;
 }
 
 /// Called when a key fails, whether from quota or another provider error.
@@ -317,6 +328,29 @@ const _gitPullTool = AiToolSpec(
       'Pull the latest commit of the current GitHub branch into this project. Local edits are '
       'preserved when safe; conflicts stop the pull. The user confirms first.',
   parameters: {'type': 'object', 'properties': {}},
+);
+
+/// Phase 4: an explicit end-of-task tool. A prose reply can be an announcement,
+/// a question or a mid-task status; finishing through a tool is unambiguous and
+/// carries the summary the transcript keeps.
+const _finishTaskTool = AiToolSpec(
+  name: 'finish_task',
+  description:
+      'End the task. Call this once the request is complete and verified, with a short '
+      'summary of what changed and how it was checked. Do not call it while a checklist '
+      'step is open, and do not use it for a question that needs only a prose answer.',
+  parameters: {
+    'type': 'object',
+    'properties': {
+      'summary': {
+        'type': 'string',
+        'description':
+            'Two to four sentences: what the user asked for, the files changed and '
+                'how the result was verified.',
+      },
+    },
+    'required': ['summary'],
+  },
 );
 
 const _compoundTools = <AiToolSpec>[
@@ -532,6 +566,7 @@ class Agent {
     this.onPause,
     this.maxTransientRetries = defaultMaxTransientRetries,
     this.retryDelay = defaultRetryDelay,
+    this.undo,
   });
 
   final AiClient client;
@@ -603,6 +638,10 @@ class Agent {
   final int maxTransientRetries;
   final Duration retryDelay;
 
+  /// Snapshots every file before a writing tool touches it, so the transcript
+  /// can revert one change or the whole task.
+  final UndoStore? undo;
+
   late final List<AgentTodo> _todos = List.of(initialTodos);
   final Map<String, int> _readCache = {};
   final Map<String, int> _signatureCounts = {};
@@ -611,6 +650,10 @@ class Agent {
   String? _verificationCommand;
   int _lastPromptTokens = 0;
   bool _toolPending = false;
+
+  /// The user's request, shortened, so an undo snapshot names the task it
+  /// belongs to.
+  String _taskLabel = '';
 
   /// A question, explanation or recommendation. Those turns are read-only:
   /// the answer is the deliverable, so a file-changing tool is refused instead
@@ -663,6 +706,7 @@ class Agent {
         if (fetchBytes != null) _downloadTool,
         if (onCommitAndPush != null) _gitPushTool,
         if (onPullLatest != null) _gitPullTool,
+        if (flags.finishTask) _finishTaskTool,
         if (onIntegrationQuery != null) _integrationTool,
       ]
           .where((tool) => !_planMode || !_planBannedTools.contains(tool.name))
@@ -768,6 +812,10 @@ class Agent {
     _answerOnly = !_planMode &&
         _looksLikeExplanationRequest(prompt) &&
         !_hasExplicitAction(prompt);
+    _taskLabel = prompt.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (_taskLabel.length > 160) {
+      _taskLabel = '${_taskLabel.substring(0, 157)}...';
+    }
     final system = await _systemPrompt(
       prompt: prompt,
       firstTurn: history.isEmpty,
@@ -1277,7 +1325,15 @@ class Agent {
             patch: result.diff?.toJson() ?? '',
             added: result.addedLines,
             removed: result.removedLines,
+            undoIds: result.undoIds,
           ));
+          if (result.finished && result.finalText.trim().isNotEmpty) {
+            // The explicit end of a Phase 4 task. The summary is the final
+            // answer, so nothing else is expected from this run.
+            outcome = AgentOutcome.completed;
+            onEvent(AgentEvent.text(result.finalText.trim()));
+            return;
+          }
           turns.add(AiTurn.tool(call.id, call.name, result.text));
         }
         previousToolFailed = roundFailed;
@@ -1539,6 +1595,35 @@ class Agent {
     ).hasMatch(text);
   }
 
+  /// Records a file's current state before the agent changes it. Returns the
+  /// snapshot id the transcript carries, or an empty string when undo is not
+  /// available for this run or the file cannot be snapshotted.
+  Future<String> _snapshot(String path) async {
+    final store = undo;
+    final id = taskId;
+    if (store == null || id == null || id.isEmpty) return '';
+    try {
+      final change = await store.snapshot(
+        taskId: id,
+        path: path,
+        label: _taskLabel,
+      );
+      return change?.id ?? '';
+    } catch (_) {
+      // Undo is a safety net; a snapshot failure must never block the write.
+      return '';
+    }
+  }
+
+  Future<List<String>> _snapshotAll(Iterable<String> paths) async {
+    final ids = <String>[];
+    for (final path in paths) {
+      final id = await _snapshot(path);
+      if (id.isNotEmpty) ids.add(id);
+    }
+    return ids;
+  }
+
   Set<String> _pathsFor(AiToolCall call) {
     final paths = <String>{};
     void add(Object? value) {
@@ -1675,6 +1760,7 @@ ${parallelTools ? '- Batch independent reads and searches in one response so the
 - If you are a reasoning model, emit tool calls as tool calls, not described in
   your reasoning text.
 ${_answerOnly ? '- ANSWER-ONLY: the user asked a question or for an explanation or recommendation. The answer is the deliverable. Reply in prose only. Never call write_file, write_files, edit_file, apply_patch, download_file, install_skill, commit_and_push or update_todos; do not run a command that changes files; never claim a file changed. Reading and searching are allowed.' : '- TASK CHECKLIST: for a change touching more than one file, call update_todos first with 2-7 concrete steps; the first file-changing tool is refused until it exists. Mark a step in_progress when it starts and completed immediately after it finishes. Never end the turn while a step is open; finish it or rewrite the list. Every step must be completed before the final answer.'}
+${flags.finishTask && !_planMode && !_answerOnly ? '- FINISH: end the task by calling finish_task with a 2-4 sentence summary: what the user asked for, the files changed and how you verified it. A reply without finish_task does not complete a task that changed files.' : ''}
 - End every task that changed files with a short summary: what the user asked
   for, the exact files changed, and how you verified it. A bare “Done” is not
   a finished response.
@@ -1798,7 +1884,10 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       final entries = (await fs.list(includeHidden: true))
           .where((entry) =>
               !isIgnoredPath(entry.path) && !looksLikeSecret(entry.path))
-          .toList();
+          // A stable order keeps the prompt prefix identical between rounds,
+          // which is what lets the provider's prefix cache hit.
+          .toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
       if (entries.isEmpty) return '(empty project)';
       final shown = entries.take(120).map((entry) => entry.isDir
           ? '${entry.path}/'
@@ -1814,6 +1903,14 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
   }
 
   Future<_ToolOutcome> _execute(AiToolCall call) async {
+    // A tool this run did not offer must never run, whether it was hidden by a
+    // flag, by plan mode or by a missing callback.
+    if (!_tools.any((tool) => tool.name == call.name)) {
+      return _ToolOutcome(
+        'Error: Unknown tool "${call.name}". Use one of: '
+        '${_tools.map((tool) => tool.name).join(', ')}.',
+      );
+    }
     if (_planMode && _planBannedTools.contains(call.name)) {
       return const _ToolOutcome(
           'Error: Plan mode cannot change files or repositories. Switch to '
@@ -1821,6 +1918,28 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     }
     try {
       switch (call.name) {
+        case 'finish_task':
+          final summary = (call.arguments['summary'] as String? ?? '').trim();
+          if (summary.isEmpty) {
+            return const _ToolOutcome(
+              'Error: finish_task needs a summary so the user knows what was '
+              'done. Send 2-4 sentences, then call it again.',
+            );
+          }
+          final open = _todos.where((todo) => !todo.done).toList();
+          if (open.isNotEmpty) {
+            return _ToolOutcome(
+              'Error: ${open.length} checklist '
+              '${open.length == 1 ? 'step is' : 'steps are'} still open: '
+              '${open.map((todo) => todo.text).join('; ')}. Finish the work or '
+              'update the list before finishing.',
+            );
+          }
+          return _ToolOutcome(
+            'Task finished.',
+            finished: true,
+            finalText: summary,
+          );
         case 'list_files':
           final path = (call.arguments['path'] as String? ?? '').trim();
           final entries = await fs.list(path: path, includeHidden: true);
@@ -1860,6 +1979,7 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
           final applied = await applyPatch(fs, patchText);
           return _ToolOutcome(
             '${applied.summary}${await _verificationSuffix()}',
+            undoIds: await _snapshotAll(_pathsFor(call)),
           );
         case 'write_file':
           final path = (call.arguments['path'] as String? ?? '').trim();
@@ -1873,11 +1993,13 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
           } on FsError {
             before = '';
           }
+          final undoId = await _snapshot(path);
           final bytes = await fs.write(path, content);
           final diff = computeDiff(before, content);
           return _ToolOutcome(
             'Wrote $bytes bytes to $path${await _verificationSuffix()}',
             diff: diff.isEmpty ? null : diff,
+            undoIds: [if (undoId.isNotEmpty) undoId],
           );
         case 'write_files':
           return await _writeFiles(call);
@@ -2406,6 +2528,7 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     var total = 0;
     var added = 0;
     var removed = 0;
+    final undoIds = <String>[];
     for (final item in raw) {
       if (item is! Map) {
         return const _ToolOutcome('Error: every file must be an object.');
@@ -2421,6 +2544,8 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       } on FsError {
         before = '';
       }
+      final undoId = await _snapshot(path);
+      if (undoId.isNotEmpty) undoIds.add(undoId);
       final bytes = await fs.write(path, content);
       final diff = computeDiff(before, content);
       total += bytes;
@@ -2434,6 +2559,7 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
       '${await _verificationSuffix()}',
       added: added,
       removed: removed,
+      undoIds: undoIds,
     );
   }
 
@@ -2696,12 +2822,14 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
     final after = replaceAll
         ? before.replaceAll(oldText, newText)
         : before.replaceFirst(oldText, newText);
+    final undoId = await _snapshot(path);
     await fs.write(path, after);
     final diff = computeDiff(before, after);
     return _ToolOutcome(
       'Edited $path ✓ ($matches replacement${matches == 1 ? '' : 's'}).'
       '${await _verificationSuffix()}',
       diff: diff.isEmpty ? null : diff,
+      undoIds: [if (undoId.isNotEmpty) undoId],
     );
   }
 
@@ -2803,10 +2931,12 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         'description: ${_yamlLine(description)}\n'
         '---\n\n'
         '$instructions\n';
+    final undoId = await _snapshot(path);
     await fs.write(path, content);
     return _ToolOutcome(
       'Installed skill “$name” at $path. It is available to every future '
       'prompt for this project.',
+      undoIds: [if (undoId.isNotEmpty) undoId],
     );
   }
 
@@ -2827,9 +2957,11 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
           'Error: only http and https URLs are supported.');
     }
     final bytes = await fetch(url);
+    final undoId = await _snapshot(path);
     await fs.writeBytes(path, bytes);
     return _ToolOutcome(
       'Downloaded ${humanFileSize(bytes.length)} to $path.',
+      undoIds: [if (undoId.isNotEmpty) undoId],
     );
   }
 
@@ -2871,6 +3003,8 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
         return '${args['message'] ?? 'commit'}';
       case 'pull_latest':
         return 'latest commit';
+      case 'finish_task':
+        return 'summary';
       case 'list_files':
         return (args['path'] as String? ?? '.').isEmpty
             ? '.'
@@ -2882,9 +3016,25 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
 }
 
 class _ToolOutcome {
-  const _ToolOutcome(this.text, {this.diff, this.added = 0, this.removed = 0});
+  const _ToolOutcome(
+    this.text, {
+    this.diff,
+    this.added = 0,
+    this.removed = 0,
+    this.undoIds = const [],
+    this.finished = false,
+    this.finalText = '',
+  });
   final String text;
   final FileDiff? diff;
+
+  /// Snapshot ids for the files this call changed, in the order they were
+  /// captured. A call that changed no file leaves this empty.
+  final List<String> undoIds;
+
+  /// Set by finish_task: the run is complete and [finalText] is the answer.
+  final bool finished;
+  final String finalText;
 
   /// Change totals for tools that write several files and so have no single
   /// file diff to count them from.

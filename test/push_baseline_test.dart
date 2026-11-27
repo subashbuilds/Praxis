@@ -377,7 +377,7 @@ void main() {
     expect(readme.before, '# Remote\n');
   });
 
-  test('a locally deleted file changed on GitHub stops the pull', () async {
+  test('a conflict asks for a choice before anything is written', () async {
     final temp = await Directory.systemTemp.createTemp('praxis_pull_conflict_');
     final remoteBytes = utf8.encode('# Changed on GitHub\n');
     final archive = Archive()
@@ -432,23 +432,197 @@ void main() {
       token: 'token',
     );
 
-    await expectLater(
-      state.pullProject(
-        project,
-        account,
+    final stopped = await state.pullProject(
+      project,
+      account,
+      owner: 'acme',
+      repo: 'demo',
+      branch: 'main',
+    );
+    expect(stopped.needsResolution, isTrue);
+    final conflict = stopped.conflicts.single;
+    expect(conflict.path, 'README.md');
+    expect(conflict.deletedLocally, isTrue);
+    expect(conflict.remoteText, '# Changed on GitHub\n');
+    expect(conflict.reason, contains('Deleted here'));
+    // Nothing is written until every conflict has a choice.
+    expect(await fs.exists('README.md'), isFalse);
+
+    final resolved = await state.pullProject(
+      project,
+      account,
+      owner: 'acme',
+      repo: 'demo',
+      branch: 'main',
+      resolutions: {'README.md': PullChoice.theirs},
+    );
+    expect(resolved.needsResolution, isFalse);
+    expect(resolved.added, 1);
+    expect(await fs.read('README.md'), '# Changed on GitHub\n');
+  });
+
+  test('keep both writes the GitHub copy beside the local file', () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_pull_both_');
+    final remoteBytes = utf8.encode('# Theirs\n');
+    final archive = Archive()
+      ..addFile(ArchiveFile(
+        'demo-main/README.md',
+        remoteBytes.length,
+        remoteBytes,
+      ));
+    final zip = ZipEncoder().encode(archive)!;
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+      httpClient: MockClient((request) async {
+        if (request.url.host == 'codeload.github.com') {
+          return http.Response.bytes(zip, 200);
+        }
+        fail('unexpected GitHub request: ${request.method} ${request.url}');
+      }),
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    final project = await state.createProject(
+      'both',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    final fs = state.fsFor(project);
+    await fs.write('README.md', '# Mine\n');
+    final base = gitBlobSha(utf8.encode('# Base\n'));
+    await state.savePushState(
+      project,
+      PushState(
         owner: 'acme',
         repo: 'demo',
         branch: 'main',
+        hashes: {'README.md': base},
+        baseHashes: {'README.md': base},
+        baseline: {'README.md': '# Base\n'},
+        synced: true,
       ),
+    );
+    const account = IntegrationAccount(
+      id: 'github-account',
+      kind: IntegrationKind.github,
+      label: '',
+      username: 'acme',
+      token: 'token',
+    );
+
+    final stopped = await state.pullProject(
+      project,
+      account,
+      owner: 'acme',
+      repo: 'demo',
+      branch: 'main',
+    );
+    expect(stopped.needsResolution, isTrue);
+    expect(stopped.conflicts.single.deletedLocally, isFalse);
+
+    await state.pullProject(
+      project,
+      account,
+      owner: 'acme',
+      repo: 'demo',
+      branch: 'main',
+      resolutions: {'README.md': PullChoice.both},
+    );
+
+    expect(await fs.read('README.md'), '# Mine\n');
+    expect(await fs.read('README.github.md'), '# Theirs\n');
+  });
+
+  test('switching branches replaces tracked files and refuses dirty ones',
+      () async {
+    final temp = await Directory.systemTemp.createTemp('praxis_switch_');
+    final archive = Archive();
+    for (final entry in {
+      'demo-feature/README.md': '# Feature\n',
+      'demo-feature/lib/feature.dart': 'void feature() {}\n',
+    }.entries) {
+      final bytes = utf8.encode(entry.value);
+      archive.addFile(ArchiveFile(entry.key, bytes.length, bytes));
+    }
+    final zip = ZipEncoder().encode(archive)!;
+    final state = AppState(
+      root: temp,
+      store: MemoryStore(),
+      seedWelcome: false,
+      httpClient: MockClient((request) async {
+        if (request.url.host == 'codeload.github.com') {
+          return http.Response.bytes(zip, 200);
+        }
+        fail('unexpected GitHub request: ${request.method} ${request.url}');
+      }),
+    );
+    addTearDown(() async {
+      state.dispose();
+      await temp.delete(recursive: true);
+    });
+    await state.init();
+    var project = await state.createProject(
+      'switch',
+      ProjectKind.node,
+      persistChat: false,
+    );
+    project = await state.updateProjectGit(
+      project,
+      repo: 'acme/demo',
+      branch: 'main',
+    );
+    final fs = state.fsFor(project);
+    await fs.write('README.md', '# Main\n');
+    await fs.write('old.txt', 'old\n');
+    final readmeHash = gitBlobSha(utf8.encode('# Main\n'));
+    final oldHash = gitBlobSha(utf8.encode('old\n'));
+    await state.savePushState(
+      project,
+      PushState(
+        owner: 'acme',
+        repo: 'demo',
+        branch: 'main',
+        hashes: {'README.md': readmeHash, 'old.txt': oldHash},
+        baseHashes: {'README.md': readmeHash, 'old.txt': oldHash},
+        baseline: {'README.md': '# Main\n', 'old.txt': 'old\n'},
+        synced: true,
+      ),
+    );
+    const account = IntegrationAccount(
+      id: 'github-account',
+      kind: IntegrationKind.github,
+      label: '',
+      username: 'acme',
+      token: 'token',
+    );
+
+    // A local edit would be lost by the tree swap, so the switch refuses.
+    await fs.write('README.md', '# Local edit\n');
+    await expectLater(
+      state.switchBranch(project, account, branch: 'feature'),
       throwsA(isA<IntegrationException>().having(
         (error) => error.message,
         'message',
-        allOf(
-          contains('README.md'),
-          contains('changed locally and on GitHub'),
-        ),
+        contains('Commit or revert'),
       )),
     );
-    expect(await fs.exists('README.md'), isFalse);
+    expect(await fs.read('README.md'), '# Local edit\n');
+
+    await fs.write('README.md', '# Main\n');
+    final result =
+        await state.switchBranch(project, account, branch: 'feature');
+
+    expect(result.added, 1);
+    expect(result.deleted, 1);
+    expect(await fs.read('README.md'), '# Feature\n');
+    expect(await fs.read('lib/feature.dart'), 'void feature() {}\n');
+    expect(await fs.exists('old.txt'), isFalse);
+    expect(state.projectById(project.id).branch, 'feature');
+    expect((await state.pushStateFor(project)).branch, 'feature');
   });
 }

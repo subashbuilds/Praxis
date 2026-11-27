@@ -53,6 +53,7 @@ class _PushSheetState extends State<PushSheet> {
   List<IntegrationAccount> _accounts = const [];
   List<GitHubRepo> _repos = const [];
   List<String> _branches = const [];
+  String _projectBranch = '';
   IntegrationAccount? _account;
   PushState _push = const PushState();
   final Set<String> _selected = {};
@@ -148,6 +149,7 @@ class _PushSheetState extends State<PushSheet> {
     final sameRepo =
         pushRepo.isEmpty || project.repo.isEmpty || pushRepo == project.repo;
     final projectBranch = project.branch.trim();
+    _projectBranch = projectBranch;
     final projectHasTarget =
         project.repo.isNotEmpty && projectBranch.isNotEmpty;
     // Project metadata is the branch the user last chose. Fall back to the
@@ -400,13 +402,36 @@ class _PushSheetState extends State<PushSheet> {
       _status = null;
     });
     try {
-      final result = await state.pullProject(
+      var result = await state.pullProject(
         widget.project,
         account,
         owner: _ownerText,
         repo: _repoText,
         branch: _branchText,
       );
+      if (result.needsResolution) {
+        if (!mounted) return;
+        final choices = await showModalBottomSheet<Map<String, PullChoice>>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          backgroundColor: Pal.surface,
+          barrierColor: Colors.black.withOpacity(0.65),
+          builder: (_) => _PullConflictSheet(conflicts: result.conflicts),
+        );
+        if (choices == null || !mounted) {
+          setState(() => _status = 'Pull cancelled. Nothing was changed.');
+          return;
+        }
+        result = await state.pullProject(
+          widget.project,
+          account,
+          owner: _ownerText,
+          repo: _repoText,
+          branch: _branchText,
+          resolutions: choices,
+        );
+      }
       final next = await state.pushStateFor(widget.project);
       if (!mounted) return;
       setState(() {
@@ -699,6 +724,56 @@ class _PushSheetState extends State<PushSheet> {
     setState(() => _branch.text = chosen);
     await _rememberTarget(branch: chosen);
     await _syncBaseline();
+  }
+
+  /// Replaces the tracked files with another branch's tree. This is the only
+  /// way to change branches without a git binary; it refuses while local
+  /// edits or unpushed commits exist.
+  Future<void> _switchBranch() async {
+    final state = _state;
+    final account = _account;
+    final target = _branchText;
+    if (state == null || account == null || !_targetReady) return;
+    final from = _projectBranch;
+    final confirmed = await showPraxisConfirm(
+      context,
+      title: 'Switch this project to $target?',
+      body: 'The files this device tracks are replaced with $target. '
+          'Untracked files are kept. Commit or revert local changes first; the '
+          'switch stops before writing anything if there are any.',
+      confirmLabel: 'Switch branch',
+      destructive: true,
+      icon: Icons.swap_horiz_rounded,
+      details: [
+        ConfirmDetail('Repository', '$_ownerText/$_repoText'),
+        ConfirmDetail('From', from.isEmpty ? 'not recorded' : from),
+        ConfirmDetail('To', target),
+      ],
+    );
+    if (!confirmed || !mounted) return;
+    setState(() {
+      _syncing = true;
+      _error = null;
+      _status = null;
+    });
+    try {
+      final result =
+          await state.switchBranch(widget.project, account, branch: target);
+      final next = await state.pushStateFor(widget.project);
+      if (!mounted) return;
+      setState(() {
+        _push = next;
+        _projectBranch = target;
+        _remoteDrift = const [];
+        _status = 'Switched to $target. ${result.summary}.';
+      });
+      await _refreshChanges();
+      await _refreshDrift();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
   }
 
   Future<void> _createBranch() async {
@@ -1187,6 +1262,44 @@ class _PushSheetState extends State<PushSheet> {
                       loading: _loadingBranches,
                       onTap: _pickBranch,
                     ),
+                    if (_targetReady &&
+                        _projectBranch.isNotEmpty &&
+                        _branchText != _projectBranch)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          children: [
+                            Icon(Icons.swap_horiz_rounded,
+                                size: 13, color: Pal.textDim),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'This project works on $_projectBranch.',
+                                style: Txt.meta.copyWith(
+                                  fontSize: 9,
+                                  color: Pal.textDim,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _switchBranch,
+                              style: TextButton.styleFrom(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 6),
+                                minimumSize: const Size(0, 32),
+                              ),
+                              child: Text(
+                                'Switch files',
+                                style: Txt.meta.copyWith(
+                                  fontSize: 9.5,
+                                  color: Pal.ember,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     if (_targetReady) ...[
                       const SizedBox(height: 8),
                       Row(
@@ -2178,6 +2291,246 @@ class _BranchChoiceSheet extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// One choice per file that changed on both sides. Nothing is written until
+/// the sheet is applied, so dismissing it leaves the project untouched.
+class _PullConflictSheet extends StatefulWidget {
+  const _PullConflictSheet({required this.conflicts});
+
+  final List<PullConflict> conflicts;
+
+  @override
+  State<_PullConflictSheet> createState() => _PullConflictSheetState();
+}
+
+class _PullConflictSheetState extends State<_PullConflictSheet> {
+  late final Map<String, PullChoice> _choices = {
+    for (final conflict in widget.conflicts)
+      conflict.path: conflict.choices.first,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final count = widget.conflicts.length;
+    return SafeArea(
+      child: FractionallySizedBox(
+        heightFactor: 0.86,
+        child: Column(
+          children: [
+            const SheetHandle(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Sp.page, 0, Sp.page, Sp.x3),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    count == 1
+                        ? 'One file needs a choice'
+                        : '$count files need a choice',
+                    style: Txt.headline.copyWith(fontSize: 21),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    'Each of these changed here and on GitHub. Nothing has been '
+                    'written yet.',
+                    style: Txt.meta,
+                  ),
+                ],
+              ),
+            ),
+            const Hairline(),
+            Expanded(
+              child: ListView.separated(
+                padding:
+                    const EdgeInsets.fromLTRB(Sp.page, Sp.x3, Sp.page, Sp.x3),
+                itemCount: count,
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                itemBuilder: (context, index) {
+                  final conflict = widget.conflicts[index];
+                  return _ConflictCard(
+                    conflict: conflict,
+                    choice: _choices[conflict.path] ?? conflict.choices.first,
+                    onChanged: (choice) =>
+                        setState(() => _choices[conflict.path] = choice),
+                  );
+                },
+              ),
+            ),
+            const Hairline(),
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                Sp.page,
+                Sp.x2,
+                Sp.x2,
+                Sp.x2 + MediaQuery.paddingOf(context).bottom,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Keep mine is the default.',
+                      style: Txt.meta.copyWith(fontSize: 9.5),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    child: Text(
+                      'Cancel',
+                      style: Txt.meta.copyWith(color: Pal.textMuted),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(context)
+                        .pop(Map<String, PullChoice>.of(_choices)),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    child: Text(
+                      'Apply $count',
+                      style: Txt.meta.copyWith(
+                        color: Pal.ember,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConflictCard extends StatelessWidget {
+  const _ConflictCard({
+    required this.conflict,
+    required this.choice,
+    required this.onChanged,
+  });
+
+  final PullConflict conflict;
+  final PullChoice choice;
+  final ValueChanged<PullChoice> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Pal.raised,
+        borderRadius: Rd.sm,
+        border: Border.all(color: Pal.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                conflict.isBinary
+                    ? Icons.image_outlined
+                    : Icons.description_outlined,
+                size: 14,
+                color: Pal.textDim,
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  conflict.path,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Txt.code.copyWith(
+                    fontSize: 11.5,
+                    color: Pal.text,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            conflict.isBinary ? '${conflict.reason} · binary' : conflict.reason,
+            style: Txt.meta.copyWith(fontSize: 9.5, color: Pal.amber),
+          ),
+          const SizedBox(height: 9),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final option in conflict.choices)
+                _ChoicePill(
+                  label: option.label,
+                  selected: option == choice,
+                  onTap: () => onChanged(option),
+                ),
+            ],
+          ),
+          if (choice == PullChoice.both) ...[
+            const SizedBox(height: 7),
+            Text(
+              'GitHub\'s copy is saved beside the local file with .github in '
+              'its name.',
+              style: Txt.meta.copyWith(fontSize: 9, color: Pal.textDim),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ChoicePill extends StatelessWidget {
+  const _ChoicePill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Semantics(
+        button: true,
+        selected: selected,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 34),
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: selected ? Pal.ember.withOpacity(0.14) : Colors.transparent,
+            borderRadius: Rd.pill,
+            border: Border.all(
+              color: selected ? Pal.ember : Pal.lineStrong,
+            ),
+          ),
+          child: Text(
+            label,
+            style: Txt.meta.copyWith(
+              fontSize: 10.5,
+              color: selected ? Pal.ember : Pal.textMuted,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
       ),
     );
   }

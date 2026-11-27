@@ -39,9 +39,17 @@ controls. Motion is 110–320 ms `easeOutCubic`; no Material elevation or splash
   copy is plain on the canvas. Reasoning is a collapsed **Thinking** pill, and
   tool calls are collapsed pills too. A write pill shows `+added / −removed` in
   mint and rose; opening it reveals a line-numbered GitHub diff. Tapping the
-  open body collapses it. The composer keeps attach, text and send only.
+  open body collapses it. A write pill that has a snapshot carries a hairline
+  **Revert** pill and, once reverted, a mint **Reverted** label; the whole last
+  task can be undone from an **Undo last task** bar above the composer that
+  names the file count and the request. The composer keeps attach, text and
+  send only.
 - **Files / Preview** — both open with a ship bar: **Push** and **Deploy** run
   against the open project. Files explores disk; Preview renders the web entry.
+  The push sheet pulls a branch, and a file changed on both sides opens a
+  **resolve** sheet with **Keep mine / Take theirs / Keep both** pills per file
+  before anything is written. Choosing another branch offers **Switch files**
+  only when it differs from the project branch.
 - **Editor** — GitHub-dark panel, mono type, line-number gutter, language chip,
   saved/unsaved state and the wrap preference from Settings.
 - **Shell** — the device's own `/system/bin/sh` in a near-black well, with a
@@ -66,7 +74,9 @@ controls. Motion is 110–320 ms `easeOutCubic`; no Material elevation or splash
 
 ## Verified
 
-`flutter analyze` clean; eighteen unit tests cover the path sandbox, both
-shells, agent tool execution, diff rows and counts, provider JSON migration,
-reasoning parsing, model-list parsing and key failover. UI is verified by
-analysis only — the headless VM stalls when pumping the app.
+`flutter analyze` clean; the unit suite covers the path sandbox, both shells,
+agent tool execution, diff rows and counts, provider JSON migration, reasoning
+parsing, model-list parsing, key failover, undo snapshots and revert, sealed
+secrets, pull-conflict resolution, branch switching and the Phase 4 finish
+tool. UI is verified by analysis only — the headless VM stalls when pumping the
+app.
