@@ -131,8 +131,6 @@ class PullResult {
 
   bool get needsResolution => conflicts.isNotEmpty;
 
-  int get changed => updated + added + deleted;
-
   String get summary {
     final parts = <String>[
       if (updated > 0) '$updated updated',

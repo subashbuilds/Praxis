@@ -233,4 +233,101 @@ void main() {
     expect(outcome.changedAnything, isTrue);
     expect(await fs.read('README.md'), '# Old\n');
   });
+
+  test('a patch is snapshotted before it runs, so a revert restores', () async {
+    await fs.write('README.md', '# Old\n');
+    http.Response tool(
+            String id, String name, Map<String, Object?> arguments) =>
+        http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'message': {
+                  'role': 'assistant',
+                  'content': '',
+                  'tool_calls': [
+                    {
+                      'id': id,
+                      'type': 'function',
+                      'function': {
+                        'name': name,
+                        'arguments': jsonEncode(arguments),
+                      },
+                    },
+                  ],
+                },
+                'finish_reason': 'tool_calls',
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+    var calls = 0;
+    final client = MockClient((request) async {
+      calls++;
+      switch (calls) {
+        case 1:
+          return tool('t1', 'update_todos', {
+            'todos': [
+              {'text': 'Rename the heading', 'status': 'in_progress'},
+            ],
+          });
+        case 2:
+          return tool('p1', 'apply_patch', {
+            'patch': '*** Begin Patch\n'
+                '*** Update File: README.md\n'
+                '@@\n'
+                '-# Old\n'
+                '+# New\n'
+                '*** End Patch',
+          });
+        default:
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {
+                    'role': 'assistant',
+                    'content': 'Patched README.md and verified it.',
+                  },
+                  'finish_reason': 'stop',
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+      }
+    });
+    final toolEvents = <AgentEvent>[];
+    await Agent(
+      client: AiClient(client: client),
+      provider: const ProviderConfig(
+        id: 'openai',
+        name: 'Test provider',
+        icon: 'x',
+        baseUrl: 'https://example.test/v1',
+        model: 'test-model',
+        flavor: ApiFlavor.openai,
+        keys: ['test-key'],
+      ),
+      fs: fs,
+      shell: Shell(fs),
+      skills: const [],
+      undo: undo,
+      taskId: 'task-patch',
+      onEvent: (event) {
+        if (event.kind == AgentEventKind.tool) toolEvents.add(event);
+      },
+    ).run(history: const [], prompt: 'rename the heading');
+
+    expect(await fs.read('README.md'), '# New\n');
+    final patch = toolEvents.firstWhere((event) => event.tool == 'apply_patch');
+    expect(patch.undoIds, hasLength(1));
+
+    final outcome = await undo.revertIds(patch.undoIds);
+    expect(outcome.changedAnything, isTrue);
+    expect(await fs.read('README.md'), '# Old\n');
+  });
 }

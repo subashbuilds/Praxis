@@ -54,12 +54,7 @@ class SecretsVault {
 
   static const sealedPrefix = 'praxis.sealed.v1:';
 
-  /// True when the last write really was sealed. A device without a keystore
-  /// keeps working, but Settings should not claim otherwise.
-  bool lastWriteSealed = true;
-
-  static bool isSealed(String? raw) =>
-      raw != null && raw.startsWith(sealedPrefix);
+  static bool _isSealed(String raw) => raw.startsWith(sealedPrefix);
 
   /// Returns the plaintext for [key], or null when nothing is stored or the
   /// value cannot be opened on this device. A value that cannot be opened is
@@ -68,26 +63,23 @@ class SecretsVault {
   Future<String?> read(String key) async {
     final raw = store.read(key);
     if (raw == null) return null;
-    if (!isSealed(raw)) return raw;
+    if (!_isSealed(raw)) return raw;
     return sealer.open(raw.substring(sealedPrefix.length));
   }
 
   Future<void> write(String key, String value) async {
     final sealed = await sealer.seal(value);
-    lastWriteSealed = sealed != null;
     await store.write(
       key,
       sealed == null ? value : '$sealedPrefix$sealed',
     );
   }
 
-  Future<void> remove(String key) => store.remove(key);
-
   /// Seals a value an older build stored as plaintext. Returns true when the
   /// stored value changed.
   Future<bool> upgrade(String key) async {
     final raw = store.read(key);
-    if (raw == null || isSealed(raw)) return false;
+    if (raw == null || _isSealed(raw)) return false;
     final sealed = await sealer.seal(raw);
     if (sealed == null) return false;
     await store.write(key, '$sealedPrefix$sealed');

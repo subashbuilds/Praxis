@@ -64,7 +64,6 @@ void main() {
 
     await vault.write('praxis.providers', '{"key":"sk-live"}');
 
-    expect(vault.lastWriteSealed, isFalse);
     expect(store.read('praxis.providers'), '{"key":"sk-live"}');
     expect(await vault.read('praxis.providers'), '{"key":"sk-live"}');
   });

@@ -1976,10 +1976,13 @@ ${skillText.isEmpty ? '' : '\nSkill instructions loaded for this task:\n$skillTe
               return const _ToolOutcome('Patch cancelled by the user.');
             }
           }
+          // Snapshot before the patch runs: the revert has to bring back the
+          // files as they were, not the patched text.
+          final undoIds = await _snapshotAll(_pathsFor(call));
           final applied = await applyPatch(fs, patchText);
           return _ToolOutcome(
             '${applied.summary}${await _verificationSuffix()}',
-            undoIds: await _snapshotAll(_pathsFor(call)),
+            undoIds: undoIds,
           );
         case 'write_file':
           final path = (call.arguments['path'] as String? ?? '').trim();

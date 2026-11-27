@@ -87,14 +87,10 @@ class UndoTask {
   final DateTime at;
   final List<FileChange> changes;
 
-  bool get isEmpty => changes.isEmpty;
-
   List<FileChange> get pending =>
       changes.where((change) => !change.reverted).toList(growable: false);
 
-  Set<String> get paths => changes.map((change) => change.path).toSet();
-
-  int get fileCount => paths.length;
+  int get fileCount => changes.map((change) => change.path).toSet().length;
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -248,26 +244,6 @@ class UndoStore {
       changes: [...task.changes, change],
     ));
     return change;
-  }
-
-  /// Puts [change] back. The file is removed when it did not exist before the
-  /// write, and rewritten byte-for-byte otherwise.
-  Future<UndoOutcome> revert(UndoTask task, FileChange change) async {
-    await _restore(change);
-    final updated = UndoTask(
-      id: task.id,
-      label: task.label,
-      at: task.at,
-      changes: [
-        for (final item in task.changes)
-          item.id == change.id ? item.copyWith(reverted: true) : item,
-      ],
-    );
-    await _save(updated);
-    return UndoOutcome(
-      change.existed ? 'restored ${change.path}' : 'removed ${change.path}',
-      changeIds: [change.id],
-    );
   }
 
   /// Reverts exactly the changes named by [ids].
